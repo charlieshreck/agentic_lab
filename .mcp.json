@@ -1,0 +1,40 @@
+{
+  "mcpServers": {
+    "infisical": {
+      "url": "http://10.30.0.20:31080",
+      "description": "Infisical secrets management MCP server (from monitoring cluster)"
+    },
+    "coroot": {
+      "url": "http://10.30.0.20:31081",
+      "description": "Coroot observability MCP server (from monitoring cluster)"
+    },
+    "proxmox-ruapehu": {
+      "url": "http://10.30.0.20:31082",
+      "description": "Proxmox MCP for production host Ruapehu"
+    },
+    "kubernetes-prod": {
+      "url": "http://10.30.0.20:31084",
+      "description": "Kubernetes MCP for production Talos cluster"
+    },
+    "kubernetes-monitoring": {
+      "url": "http://10.30.0.20:31085",
+      "description": "Kubernetes MCP for monitoring K3s cluster"
+    },
+    "talos-prod": {
+      "url": "http://10.30.0.20:31086",
+      "description": "Talos MCP for production cluster management"
+    }
+  },
+  "comments": {
+    "note": "Initially using MCP servers from monitoring cluster (10.30.0.20)",
+    "future": "Will deploy dedicated MCP servers for agentic platform after cluster provisioning",
+    "planned_additions": [
+      "kubernetes-agentic: For managing the agentic platform cluster itself",
+      "talos-agentic: For Talos management of the UM690L cluster",
+      "proxmox-carrick: If UM690L is managed via Proxmox on Carrick",
+      "home-assistant: For smart home integrations",
+      "arr-suite: For media management (Sonarr, Radarr, etc.)",
+      "knowledge: For direct Qdrant vector DB access"
+    ]
+  }
+}

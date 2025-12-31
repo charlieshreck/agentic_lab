@@ -1,0 +1,64 @@
+# ============================================================================
+# Terraform Variables Example - Agentic AI Platform
+# ============================================================================
+# Copy this file to terraform.tfvars and fill in actual values
+# NEVER commit terraform.tfvars (it's in .gitignore)
+# ============================================================================
+
+# Proxmox Connection
+proxmox_host     = "10.20.0.1"      # IP of Proxmox host managing UM690L
+proxmox_user     = "root@pam"
+proxmox_password = "your-proxmox-password-here"  # Or use env var: TF_VAR_proxmox_password
+proxmox_node     = "Carrick"        # Proxmox node name (check: pvesh get /nodes)
+
+# Network Configuration
+network_bridge  = "vmbr0"           # Proxmox bridge for VM network
+network_gateway = "10.20.0.1"       # Default gateway for 10.20.0.0/24 network
+dns_servers     = ["1.1.1.1", "8.8.8.8"]
+
+# Cluster Configuration
+cluster_name       = "agentic-platform"
+talos_version      = "v1.8.1"       # Check https://github.com/siderolabs/talos/releases
+kubernetes_version = "v1.31.1"      # Compatible K8s version for Talos
+
+# Storage Configuration
+proxmox_storage     = "local-lvm"   # Proxmox storage for VM disk (check: pvesh get /storage)
+proxmox_iso_storage = "local"       # Proxmox storage for ISOs
+
+# VM Configuration
+vm_id          = 400
+vm_name        = "agentic-talos"
+vm_ip          = "10.20.0.109"
+vm_cores       = 8                  # Use most of UM690L's 8C/16T
+vm_memory      = 24576              # 24GB (32GB total - 8GB for host = 24GB)
+vm_disk_size   = 500                # 500GB (1.5TB NVMe - reserve 500GB for data disk later)
+vm_mac_address = null               # Auto-generate or set specific MAC
+
+# GitOps Repository
+gitops_repo_url    = "https://github.com/charlieshreck/agentic_lab.git"
+gitops_repo_branch = "main"
+
+# ============================================================================
+# Notes:
+# ============================================================================
+# 1. Update proxmox_host based on your actual Proxmox installation
+#    - If UM690L is the Proxmox host: likely 10.20.0.1 or similar
+#    - If UM690L is managed BY another Proxmox: use that host's IP
+#
+# 2. Check available storage with: pvesh get /storage
+#    - Use ZFS pool if available for better performance
+#    - local-lvm is usually the default
+#
+# 3. Network isolation:
+#    - 10.20.0.0/24 is separate from prod (10.10.0.0/24) and monitoring (10.30.0.0/24)
+#    - Adjust if your network topology is different
+#
+# 4. Resource allocation:
+#    - UM690L specs: Ryzen 9 6900HX (8C/16T), 32GB DDR5, 1.5TB NVMe
+#    - Leaving ~8GB for host overhead
+#    - Leaving ~500GB+ for future data volumes (Qdrant, PostgreSQL, etc.)
+#
+# 5. Alternative deployment:
+#    - Bare metal Talos: Set vm_id to null, use Talos metal provider instead
+#    - Multiple disks: Add separate data disk for /var/lib (future enhancement)
+# ============================================================================

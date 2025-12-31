@@ -1,0 +1,223 @@
+flowchart TB
+    subgraph HW["🖥️ HARDWARE LAYER - Minisforum UM690L"]
+        CPU["AMD Ryzen 9 6900HX<br/>8C/16T @ 3.3-4.9GHz"]
+        GPU["Radeon 680M iGPU<br/>RDNA2 • gfx1035<br/>12 CUs @ 2.4GHz"]
+        RAM["32GB DDR5-4800<br/>~77 GB/s bandwidth"]
+        NVME1["1TB NVMe<br/>OS + Models"]
+        NVME2["500GB NVMe<br/>Vector DB + State"]
+    end
+
+    subgraph OS["🐧 OS LAYER - Talos Linux"]
+        TALOS["Talos Linux v1.12+<br/>~600MB RAM overhead"]
+        AMDGPU["siderolabs/amdgpu<br/>System Extension"]
+        K8S["Single-Node K8s<br/>allowSchedulingOnControlPlanes"]
+    end
+
+    subgraph STORAGE["💾 STORAGE LAYER"]
+        NVME1["1TB NVMe<br/>Talos OS + Models<br/>local-path-provisioner"]
+        NVME2["500GB NVMe<br/>Data Disk<br/>Qdrant/PG/Redis"]
+        LOCALPATH["local-path-provisioner<br/>Kubernetes PVCs"]
+        MINIO["MinIO<br/>S3-Compatible<br/>Backup Target"]
+    end
+
+    subgraph INFERENCE["🧠 LOCAL INFERENCE LAYER"]
+        OLLAMA["Ollama Server<br/>VULKAN Backend<br/>KEEP_ALIVE=5m"]
+        subgraph MODELS["Loaded Models"]
+            QWEN["Qwen 2.5 3B Q4_K_M<br/>Tool Calling • Router<br/>~2GB VRAM"]
+            NOMIC["nomic-embed-text-v1.5<br/>Embeddings<br/>768 dim • 8K ctx"]
+        end
+        LLAMA_CPP["llama.cpp<br/>Direct inference<br/>--n-gpu-layers 99"]
+    end
+
+    subgraph VECTOR["📊 VECTOR & STATE"]
+        QDRANT["Qdrant<br/>Vector Database<br/>REST API Snapshots"]
+        REDIS["Redis<br/>Semantic Cache<br/>Job Queue"]
+        POSTGRES["PostgreSQL<br/>LangGraph Checkpointer<br/>Agent State"]
+    end
+
+    subgraph ORCHESTRATION["🔄 ORCHESTRATION LAYER"]
+        LANGGRAPH["LangGraph<br/>Graph-based Routing<br/>State Management"]
+        ROUTER["Complexity Router<br/>local → cloud decision<br/>PII detection"]
+        OPENWEBUI["Open WebUI<br/>Chat Interface<br/>Pipeline Filters"]
+    end
+
+    subgraph PII["🔒 PRIVACY LAYER"]
+        PRESIDIO["Presidio<br/>Rule-based PII<br/>Regex + Patterns"]
+        GLINER["GLiNER<br/>Zero-shot NER<br/>~75ms latency"]
+    end
+
+    subgraph CLOUD["☁️ CLOUD APIs"]
+        subgraph GEMINI_GRP["Gemini (Primary - Unrestricted)"]
+            GEM_FLASH["Gemini Flash<br/>Default Escalation"]
+            GEM_PRO["Gemini Pro<br/>Complex Analysis"]
+            GEM_THINK["Gemini Thinking<br/>Deep Reasoning"]
+        end
+        subgraph CLAUDE_GRP["Claude (Secondary - Quota Limited)"]
+            CL_HAIKU["Claude 4.5 Haiku<br/>Fallback Only"]
+            CL_SONNET["Claude 4.5 Sonnet<br/>Premium Code"]
+            CL_OPUS["Claude 4.5 Opus<br/>Critical Tasks"]
+        end
+        LITELLM["LiteLLM Proxy<br/>Unified Interface<br/>Quota Tracking"]
+        QUOTA["Quota Monitor<br/>Daily/Weekly Limits<br/>Redis Counter"]
+    end
+
+    subgraph MCP_LAYER["🔧 MCP TOOL SERVERS (Custom Built)"]
+        MCP_HA["Home Assistant MCP<br/>Lights • Climate • Automations<br/>Tasmota • Google Home"]
+        MCP_ARR["Arr Suite MCP<br/>Sonarr • Radarr • Prowlarr<br/>SABnzbd • Downloads"]
+        MCP_PLEX["Plex MCP<br/>Library • Playback<br/>Tautulli Stats"]
+        MCP_NAS["TrueNAS MCP<br/>Datasets • Snapshots<br/>SMB Shares"]
+        MCP_INFRA["Infrastructure MCP<br/>kubectl • ArgoCD<br/>MinIO • Backups"]
+    end
+
+    subgraph MCP_BUILD["🏗️ MCP BUILD PIPELINE"]
+        FASTMCP["FastMCP Framework<br/>Python 3.11+"]
+        MCP_DOCKER["Custom Dockerfiles<br/>No official images"]
+        MCP_GHCR["GHCR Registry<br/>ghcr.io/yourrepo"]
+    end
+
+    subgraph OBSERVE["📈 OBSERVABILITY"]
+        PROM["Prometheus<br/>ollama-exporter<br/>:11435 metrics"]
+        GRAFANA["Grafana<br/>Dashboards<br/>Alerting"]
+        LANGFUSE["Langfuse<br/>LLM Tracing<br/>Cost Tracking"]
+    end
+
+    subgraph HITL["👤 HUMAN-IN-THE-LOOP LAYER"]
+        COROOT["Coroot<br/>Anomaly Detection"]
+        TRIAGE["Local LLM Triage<br/>Is this a problem?"]
+        NOTIFY["Notification Service<br/>Signal/Mattermost"]
+        APPROVAL["Approval Handler<br/>Parse responses"]
+        RUNBOOK_DB["Runbook Database<br/>Learned fixes"]
+        WEEKLY["Weekly Reports<br/>What I did/learned"]
+    end
+
+    subgraph GITOPS["🚀 GITOPS / DEVOPS"]
+        GIT["Git Repository<br/>Infrastructure + Prompts<br/>Version Control"]
+        ARGOCD["ArgoCD<br/>Continuous Deployment<br/>Self-Heal"]
+        SOPS["SOPS + Age<br/>Secret Encryption<br/>No External Deps"]
+        TALHELPER["Talhelper<br/>Talos Config Gen<br/>Declarative"]
+        RENOVATE["Renovate<br/>Dependency Updates<br/>Auto-PR"]
+        TERRAFORM["Terraform<br/>Talos + Infra<br/>State Management"]
+    end
+
+    subgraph SCHEDULING["⏰ SCHEDULING"]
+        CRONJOB["K8s CronJob<br/>Scheduled Tasks<br/>concurrencyPolicy: Forbid"]
+        TEMPORAL["Temporal.io<br/>Durable Workflows<br/>Human-in-Loop"]
+        N8N["n8n<br/>Visual Workflows<br/>Ollama Integration"]
+    end
+
+    %% Connections
+    HW --> OS
+    OS --> STORAGE
+    TALOS --> AMDGPU
+    AMDGPU --> GPU
+    
+    STORAGE --> INFERENCE
+    LOCALPATH --> OLLAMA
+    NVME1 --> LOCALPATH
+    NVME2 --> LOCALPATH
+    
+    OLLAMA --> MODELS
+    OLLAMA --> LLAMA_CPP
+    
+    INFERENCE --> VECTOR
+    NOMIC --> QDRANT
+    
+    VECTOR --> ORCHESTRATION
+    QDRANT --> LANGGRAPH
+    REDIS --> LANGGRAPH
+    POSTGRES --> LANGGRAPH
+    
+    ORCHESTRATION --> PII
+    ROUTER --> PRESIDIO
+    ROUTER --> GLINER
+    
+    LANGGRAPH --> CLOUD
+    PII --> LITELLM
+    LITELLM --> GEM_FLASH
+    LITELLM --> GEM_PRO
+    LITELLM --> GEM_THINK
+    LITELLM --> CL_HAIKU
+    LITELLM --> CL_SONNET
+    LITELLM --> CL_OPUS
+    QUOTA --> LITELLM
+    REDIS --> QUOTA
+    
+    LANGGRAPH --> MCP_LAYER
+    MCP_HA --> LANGGRAPH
+    MCP_ARR --> LANGGRAPH
+    MCP_PLEX --> LANGGRAPH
+    MCP_NAS --> LANGGRAPH
+    MCP_INFRA --> LANGGRAPH
+    
+    FASTMCP --> MCP_DOCKER
+    MCP_DOCKER --> MCP_GHCR
+    MCP_GHCR --> MCP_HA
+    MCP_GHCR --> MCP_ARR
+    MCP_GHCR --> MCP_PLEX
+    MCP_GHCR --> MCP_NAS
+    MCP_GHCR --> MCP_INFRA
+    
+    ARGOCD --> MCP_LAYER
+    
+    OPENWEBUI --> LANGGRAPH
+    OPENWEBUI --> OLLAMA
+    
+    INFERENCE --> OBSERVE
+    ORCHESTRATION --> OBSERVE
+    PROM --> GRAFANA
+    LANGGRAPH --> LANGFUSE
+    
+    GITOPS --> OS
+    GIT --> ARGOCD
+    ARGOCD --> K8S
+    SOPS --> ARGOCD
+    TALHELPER --> TALOS
+    RENOVATE --> GIT
+    TERRAFORM --> TALOS
+    
+    %% HITL connections
+    PROM --> COROOT
+    COROOT --> TRIAGE
+    TRIAGE --> NOTIFY
+    NOTIFY --> APPROVAL
+    APPROVAL --> RUNBOOK_DB
+    APPROVAL --> LANGGRAPH
+    RUNBOOK_DB --> TRIAGE
+    LANGGRAPH --> WEEKLY
+    WEEKLY --> NOTIFY
+    RENOVATE -.->|PR notification| NOTIFY
+    ARGOCD -.->|Deploy status| NOTIFY
+    
+    SCHEDULING --> ORCHESTRATION
+    CRONJOB --> LANGGRAPH
+    N8N --> OLLAMA
+
+    %% Styling
+    classDef hardware fill:#1a1a2e,stroke:#e94560,color:#fff
+    classDef os fill:#16213e,stroke:#0f3460,color:#fff
+    classDef storage fill:#1a1a2e,stroke:#00d9ff,color:#fff
+    classDef inference fill:#0d7377,stroke:#14ffec,color:#fff
+    classDef vector fill:#323232,stroke:#ffd700,color:#fff
+    classDef orchestration fill:#2d132c,stroke:#ee4c7c,color:#fff
+    classDef cloud fill:#1e3d59,stroke:#f5f0e1,color:#fff
+    classDef observe fill:#2c3e50,stroke:#3498db,color:#fff
+    classDef gitops fill:#1b1b2f,stroke:#e43f5a,color:#fff
+    classDef privacy fill:#2d3436,stroke:#00cec9,color:#fff
+
+    classDef mcp fill:#4a5568,stroke:#68d391,color:#fff
+    classDef mcpbuild fill:#2d3748,stroke:#9f7aea,color:#fff
+    classDef hitl fill:#744210,stroke:#f6e05e,color:#fff
+
+    class CPU,GPU,RAM,NVME1,NVME2 hardware
+    class TALOS,AMDGPU,K8S os
+    class NVME1,NVME2,LOCALPATH,MINIO storage
+    class OLLAMA,QWEN,NOMIC,LLAMA_CPP inference
+    class QDRANT,REDIS,POSTGRES vector
+    class LANGGRAPH,ROUTER,OPENWEBUI orchestration
+    class GEM_FLASH,GEM_PRO,GEM_THINK,CL_HAIKU,CL_SONNET,CL_OPUS,LITELLM,QUOTA cloud
+    class PROM,GRAFANA,LANGFUSE observe
+    class GIT,ARGOCD,SOPS,TALHELPER,RENOVATE,TERRAFORM gitops
+    class PRESIDIO,GLINER privacy
+    class MCP_HA,MCP_ARR,MCP_PLEX,MCP_NAS,MCP_INFRA mcp
+    class FASTMCP,MCP_DOCKER,MCP_GHCR mcpbuild
+    class COROOT,TRIAGE,NOTIFY,APPROVAL,RUNBOOK_DB,WEEKLY hitl

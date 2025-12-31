@@ -1,0 +1,116 @@
+flowchart TD
+    subgraph DETECT["🔍 DETECTION"]
+        COROOT["Coroot<br/>Anomaly Detection"]
+        PROM_ALERT["Prometheus<br/>Threshold Alerts"]
+        RENOVATE_PR["Renovate<br/>Dependency PR"]
+        SCHEDULED["Scheduled Query<br/>Monthly Unifi Check"]
+    end
+
+    subgraph TRIAGE["🧠 LOCAL TRIAGE"]
+        IS_ISSUE{"Local LLM:<br/>Is this actually<br/>a problem?"}
+        CHECK_RUNBOOK{"Existing<br/>Runbook?"}
+        CHECK_STANDARD{"Standard<br/>Change?"}
+        RESEARCH["Research Solutions<br/>(Cloud LLM if needed)"]
+    end
+
+    subgraph NOTIFY["📱 HUMAN NOTIFICATION"]
+        SIGNAL["Signal Message"]
+        ASK_ISSUE["🔔 Issue Detected<br/>[Yes] [No] [Snooze]"]
+        PRESENT_SOLUTIONS["📋 Solutions:<br/>Plan A + Impact<br/>Plan B + Impact<br/>Plan C + Impact"]
+        PR_NOTIFY["📦 PR Ready<br/>[Approve] [Defer] [Reject]"]
+        WEEKLY_REPORT["📊 Weekly Report<br/>Actions + Learnings"]
+    end
+
+    subgraph APPROVAL["✅ APPROVAL HANDLING"]
+        PARSE["Parse Response"]
+        HUMAN_YES["Human: Yes/Approve"]
+        HUMAN_NO["Human: No/Ignore"]
+        HUMAN_CUSTOM["Human: Custom Action"]
+        TIMEOUT["Timeout (24h)<br/>→ Weekly Report"]
+    end
+
+    subgraph EXECUTE["⚡ EXECUTION"]
+        AUTO_EXEC["Auto-Execute<br/>(Standard Change)"]
+        APPROVED_EXEC["Execute Approved<br/>Action"]
+        MCP_TOOLS["MCP Tool Calls<br/>kubectl/HA/Arr"]
+        GIT_MERGE["Merge PR<br/>via GitHub API"]
+    end
+
+    subgraph LEARN["📚 LEARNING"]
+        DOCUMENT["Document in<br/>Runbook"]
+        UPDATE_PREFS["Update User<br/>Preferences"]
+        TRACK_SUCCESS["Track Success<br/>Rate"]
+        PROMOTE{"Promotion<br/>Criteria Met?"}
+        TO_STANDARD["Promote to<br/>Standard Change"]
+    end
+
+    subgraph FOLLOW_UP["📤 FOLLOW-UP"]
+        CONFIRM["✅ Action Complete<br/>Status: Healthy"]
+        ASK_NEXT["Next occurrence:<br/>[Auto] [Ask] [Investigate]"]
+    end
+
+    %% Detection flows
+    COROOT --> IS_ISSUE
+    PROM_ALERT --> IS_ISSUE
+    RENOVATE_PR --> PR_NOTIFY
+    SCHEDULED --> RESEARCH
+
+    %% Triage flows
+    IS_ISSUE -->|"Looks real"| CHECK_RUNBOOK
+    IS_ISSUE -->|"False positive"| UPDATE_PREFS
+    CHECK_RUNBOOK -->|"Yes"| CHECK_STANDARD
+    CHECK_RUNBOOK -->|"No"| RESEARCH
+    CHECK_STANDARD -->|"Yes"| AUTO_EXEC
+    CHECK_STANDARD -->|"No, needs approval"| PRESENT_SOLUTIONS
+    RESEARCH --> PRESENT_SOLUTIONS
+
+    %% Notification flows
+    PRESENT_SOLUTIONS --> SIGNAL
+    PR_NOTIFY --> SIGNAL
+    ASK_ISSUE --> SIGNAL
+    SIGNAL --> PARSE
+
+    %% Approval flows
+    PARSE -->|"1/2/3/approve"| HUMAN_YES
+    PARSE -->|"ignore/no"| HUMAN_NO
+    PARSE -->|"custom:..."| HUMAN_CUSTOM
+    PARSE -->|"No response"| TIMEOUT
+
+    %% Execution flows
+    HUMAN_YES --> APPROVED_EXEC
+    HUMAN_YES -->|"PR approval"| GIT_MERGE
+    HUMAN_CUSTOM --> MCP_TOOLS
+    AUTO_EXEC --> MCP_TOOLS
+    APPROVED_EXEC --> MCP_TOOLS
+
+    %% Learning flows
+    MCP_TOOLS --> DOCUMENT
+    GIT_MERGE --> DOCUMENT
+    HUMAN_NO --> UPDATE_PREFS
+    DOCUMENT --> TRACK_SUCCESS
+    TRACK_SUCCESS --> PROMOTE
+    PROMOTE -->|"Yes"| TO_STANDARD
+    PROMOTE -->|"No"| CONFIRM
+    TO_STANDARD --> CONFIRM
+
+    %% Follow-up
+    CONFIRM --> ASK_NEXT
+    ASK_NEXT -->|"Auto"| TO_STANDARD
+    TIMEOUT --> WEEKLY_REPORT
+
+    %% Styling
+    classDef detect fill:#3182ce,stroke:#2c5282,color:#fff
+    classDef triage fill:#805ad5,stroke:#553c9a,color:#fff
+    classDef notify fill:#d69e2e,stroke:#b7791f,color:#fff
+    classDef approval fill:#38a169,stroke:#276749,color:#fff
+    classDef execute fill:#e53e3e,stroke:#c53030,color:#fff
+    classDef learn fill:#319795,stroke:#285e61,color:#fff
+    classDef followup fill:#718096,stroke:#4a5568,color:#fff
+
+    class COROOT,PROM_ALERT,RENOVATE_PR,SCHEDULED detect
+    class IS_ISSUE,CHECK_RUNBOOK,CHECK_STANDARD,RESEARCH triage
+    class SIGNAL,ASK_ISSUE,PRESENT_SOLUTIONS,PR_NOTIFY,WEEKLY_REPORT notify
+    class PARSE,HUMAN_YES,HUMAN_NO,HUMAN_CUSTOM,TIMEOUT approval
+    class AUTO_EXEC,APPROVED_EXEC,MCP_TOOLS,GIT_MERGE execute
+    class DOCUMENT,UPDATE_PREFS,TRACK_SUCCESS,PROMOTE,TO_STANDARD learn
+    class CONFIRM,ASK_NEXT followup

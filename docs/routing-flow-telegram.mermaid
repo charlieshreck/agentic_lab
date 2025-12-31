@@ -1,0 +1,149 @@
+flowchart TD
+    subgraph DETECT["🔍 DETECTION"]
+        COROOT["Coroot<br/>Anomaly Detection"]
+        PROM_ALERT["Prometheus<br/>Threshold Alerts"]
+        RENOVATE_PR["Renovate<br/>Dependency PR"]
+        SCHEDULED["Scheduled Query<br/>Monthly Checks"]
+    end
+
+    subgraph INFERENCE["🧠 HYBRID INFERENCE"]
+        MODE_CHECK{"Inference<br/>Mode?"}
+        LOCAL_LLM["Local: Ollama<br/>qwen2.5:7b"]
+        CLOUD_LLM["Cloud: Gemini<br/>Flash/Pro"]
+        CONFIDENCE{"Confidence<br/>≥ 0.7?"}
+        ESCALATE["Escalate to<br/>Cloud"]
+    end
+
+    subgraph TRIAGE["📋 TRIAGE"]
+        IS_ISSUE{"Is this<br/>a problem?"}
+        CHECK_RUNBOOK{"Existing<br/>Runbook?"}
+        CHECK_STANDARD{"Standard<br/>Change?"}
+        RESEARCH["Research<br/>Solutions"]
+        ROUTE_DECISION{"Route to<br/>Topic?"}
+    end
+
+    subgraph TELEGRAM["📱 TELEGRAM FORUM"]
+        FORUM["🏠 Homelab Ops"]
+        CRITICAL["🔴 Critical Alerts"]
+        ARR["🟡 Arr Suite"]
+        INFRA["🔵 Infrastructure"]
+        HA["🏠 Home Assistant"]
+        INCIDENT["🔧 Incident #N<br/>(Dynamic)"]
+        REPORTS["📊 Weekly Reports"]
+        RESOLVED["✅ Resolved"]
+    end
+
+    subgraph NOTIFY["📨 NOTIFICATION"]
+        PRESENT["📋 Solutions<br/>[1️⃣] [2️⃣] [3️⃣]<br/>[❌] [🔍] [☁️]"]
+        PR_NOTIFY["📦 PR Ready<br/>[Approve] [Defer]"]
+    end
+
+    subgraph APPROVAL["✅ APPROVAL"]
+        CALLBACK["Inline Keyboard<br/>Callback"]
+        APPROVE["Button: Approve"]
+        IGNORE["Button: Ignore"]
+        DETAILS["Button: Details"]
+        REANALYZE["Button: ☁️<br/>Cloud Re-analyze"]
+        TEXT_CMD["Text Command"]
+    end
+
+    subgraph EXECUTE["⚡ EXECUTION"]
+        AUTO_EXEC["Auto-Execute<br/>(Standard)"]
+        APPROVED_EXEC["Execute<br/>Approved"]
+        MCP_TOOLS["MCP Tools<br/>kubectl/HA/Arr"]
+        GIT_MERGE["Merge PR"]
+    end
+
+    subgraph LEARN["📚 LEARNING"]
+        DOCUMENT["Update<br/>Runbook"]
+        UPDATE_PREFS["Update<br/>Preferences"]
+        TRACK["Track<br/>Success Rate"]
+        PROMOTE{"Promote to<br/>Standard?"}
+        CLOSE_TOPIC["Close Topic"]
+    end
+
+    %% Detection to Inference
+    COROOT --> MODE_CHECK
+    PROM_ALERT --> MODE_CHECK
+    RENOVATE_PR --> PR_NOTIFY
+    SCHEDULED --> MODE_CHECK
+
+    %% Inference Mode Routing
+    MODE_CHECK -->|"local_first"| LOCAL_LLM
+    MODE_CHECK -->|"cloud_only"| CLOUD_LLM
+    MODE_CHECK -->|"local_only"| LOCAL_LLM
+    LOCAL_LLM --> CONFIDENCE
+    CONFIDENCE -->|"No"| ESCALATE
+    ESCALATE --> CLOUD_LLM
+    CONFIDENCE -->|"Yes"| IS_ISSUE
+    CLOUD_LLM --> IS_ISSUE
+
+    %% Triage
+    IS_ISSUE -->|"Yes"| CHECK_RUNBOOK
+    IS_ISSUE -->|"No"| UPDATE_PREFS
+    CHECK_RUNBOOK -->|"Yes"| CHECK_STANDARD
+    CHECK_RUNBOOK -->|"No"| RESEARCH
+    CHECK_STANDARD -->|"Yes"| AUTO_EXEC
+    CHECK_STANDARD -->|"No"| ROUTE_DECISION
+    RESEARCH --> ROUTE_DECISION
+
+    %% Topic Routing
+    ROUTE_DECISION -->|"Critical"| CRITICAL
+    ROUTE_DECISION -->|"Arr"| ARR
+    ROUTE_DECISION -->|"Infra"| INFRA
+    ROUTE_DECISION -->|"HA"| HA
+    ROUTE_DECISION -->|"Complex"| INCIDENT
+
+    %% Topics to Notification
+    CRITICAL --> PRESENT
+    ARR --> PRESENT
+    INFRA --> PRESENT
+    HA --> PRESENT
+    INCIDENT --> PRESENT
+    PR_NOTIFY --> INFRA
+
+    %% Approval Flow
+    PRESENT --> CALLBACK
+    CALLBACK --> APPROVE
+    CALLBACK --> IGNORE
+    CALLBACK --> DETAILS
+    CALLBACK --> REANALYZE
+    TEXT_CMD --> APPROVED_EXEC
+    DETAILS --> PRESENT
+    REANALYZE -->|"Bypass local"| CLOUD_LLM
+
+    %% Execution
+    APPROVE --> APPROVED_EXEC
+    APPROVE -->|"PR"| GIT_MERGE
+    AUTO_EXEC --> MCP_TOOLS
+    APPROVED_EXEC --> MCP_TOOLS
+
+    %% Learning
+    MCP_TOOLS --> DOCUMENT
+    GIT_MERGE --> DOCUMENT
+    IGNORE --> UPDATE_PREFS
+    DOCUMENT --> TRACK
+    TRACK --> PROMOTE
+    PROMOTE -->|"Yes"| CHECK_STANDARD
+    PROMOTE -->|"No"| CLOSE_TOPIC
+    CLOSE_TOPIC --> RESOLVED
+    REPORTS --> FORUM
+
+    %% Styling
+    classDef detect fill:#3182ce,stroke:#2c5282,color:#fff
+    classDef inference fill:#9f7aea,stroke:#6b46c1,color:#fff
+    classDef triage fill:#805ad5,stroke:#553c9a,color:#fff
+    classDef telegram fill:#0088cc,stroke:#006699,color:#fff
+    classDef notify fill:#d69e2e,stroke:#b7791f,color:#fff
+    classDef approval fill:#38a169,stroke:#276749,color:#fff
+    classDef execute fill:#e53e3e,stroke:#c53030,color:#fff
+    classDef learn fill:#319795,stroke:#285e61,color:#fff
+
+    class COROOT,PROM_ALERT,RENOVATE_PR,SCHEDULED detect
+    class MODE_CHECK,LOCAL_LLM,CLOUD_LLM,CONFIDENCE,ESCALATE inference
+    class IS_ISSUE,CHECK_RUNBOOK,CHECK_STANDARD,RESEARCH,ROUTE_DECISION triage
+    class FORUM,CRITICAL,ARR,INFRA,HA,INCIDENT,REPORTS,RESOLVED telegram
+    class PRESENT,PR_NOTIFY notify
+    class CALLBACK,APPROVE,IGNORE,DETAILS,REANALYZE,TEXT_CMD approval
+    class AUTO_EXEC,APPROVED_EXEC,MCP_TOOLS,GIT_MERGE execute
+    class DOCUMENT,UPDATE_PREFS,TRACK,PROMOTE,CLOSE_TOPIC learn

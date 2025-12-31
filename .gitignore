@@ -1,0 +1,96 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!terraform.tfvars.example
+*.backup
+
+# Kubeconfig and Talosconfig
+*.kubeconfig
+kubeconfig
+talosconfig
+.kube/
+generated/
+*.yaml.bak
+
+# Secrets
+*.env
+*.secret
+.secrets/
+secrets.yaml
+!secrets.example.yaml
+*.enc
+*.encrypted
+
+# SSH Keys
+*.pem
+*.key
+id_*
+!*.pub
+
+# Ansible
+*.retry
+vault-password
+ansible.cfg.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.venv
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Claude Code
+.claude/cache/
+.claude/tmp/
+
+# Docker
+*.tar
+*.tar.gz
+docker-compose.override.yml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Backup files
+*.bak
+*.backup
+*.old
