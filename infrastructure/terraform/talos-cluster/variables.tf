@@ -1,43 +1,30 @@
 # ============================================================================
-# Agentic AI Platform - Talos Single-Node Cluster Variables
+# Agentic AI Platform - Bare Metal Talos Variables
 # ============================================================================
 
-# Proxmox Connection
-variable "proxmox_host" {
-  description = "Proxmox host address"
-  type        = string
-  default     = "10.20.0.1"  # Update based on actual Proxmox host for UM690L
-}
-
-variable "proxmox_user" {
-  description = "Proxmox API user"
-  type        = string
-  default     = "root@pam"
-}
-
-variable "proxmox_password" {
-  description = "Proxmox password"
-  type        = string
-  sensitive   = true
-}
-
-variable "proxmox_node" {
-  description = "Proxmox node name"
-  type        = string
-  default     = "Carrick"  # Update based on actual node name
-}
-
 # Network Configuration
-variable "network_bridge" {
-  description = "Network bridge for VM"
+variable "node_ip" {
+  description = "Static IP address for Talos node"
   type        = string
-  default     = "vmbr0"
+  default     = "10.20.0.109"
 }
 
 variable "network_gateway" {
   description = "Network gateway"
   type        = string
   default     = "10.20.0.1"
+}
+
+variable "network_cidr" {
+  description = "Network CIDR (e.g., 24 for /24)"
+  type        = number
+  default     = 24
+}
+
+variable "network_interface" {
+  description = "Primary network interface name"
+  type        = string
+  default     = "eth0"  # Usually eth0, but check with 'ip addr' during Talos maintenance mode
 }
 
 variable "dns_servers" {
@@ -53,73 +40,35 @@ variable "cluster_name" {
   default     = "agentic-platform"
 }
 
+variable "node_hostname" {
+  description = "Hostname for the Talos node"
+  type        = string
+  default     = "agentic-01"
+}
+
 variable "talos_version" {
   description = "Talos Linux version"
   type        = string
-  default     = "v1.8.1"  # Stable version, update as needed
+  default     = "v1.8.1"  # Check https://github.com/siderolabs/talos/releases for latest
 }
 
 variable "kubernetes_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "v1.31.1"  # Stable version, update as needed
+  default     = "v1.31.1"  # Compatible K8s version for Talos 1.8
 }
 
-# Storage Configuration
-variable "proxmox_storage" {
-  description = "Proxmox storage pool for VM disk"
+# Disk Configuration
+variable "install_disk" {
+  description = "Disk device path for Talos installation"
   type        = string
-  default     = "local-lvm"  # Update based on actual Proxmox storage
+  default     = "/dev/nvme0n1"  # Common for NVMe drives, adjust if needed
 }
 
-variable "proxmox_iso_storage" {
-  description = "Proxmox storage for ISO images"
-  type        = string
-  default     = "local"
-}
-
-# VM Configuration
-variable "vm_id" {
-  description = "Proxmox VM ID"
+variable "disk_min_size" {
+  description = "Minimum disk size in GB (for diskSelector)"
   type        = number
-  default     = 400
-}
-
-variable "vm_name" {
-  description = "VM name"
-  type        = string
-  default     = "agentic-talos"
-}
-
-variable "vm_ip" {
-  description = "Static IP address for VM"
-  type        = string
-  default     = "10.20.0.109"
-}
-
-variable "vm_cores" {
-  description = "Number of CPU cores"
-  type        = number
-  default     = 8  # Use most of UM690L's 8C/16T
-}
-
-variable "vm_memory" {
-  description = "RAM in MB"
-  type        = number
-  default     = 24576  # 24GB (leave ~8GB for host)
-}
-
-variable "vm_disk_size" {
-  description = "Disk size in GB"
-  type        = number
-  default     = 500  # 500GB for OS + models (1.5TB NVMe total)
-}
-
-# MAC Address (optional - Proxmox will auto-generate if not specified)
-variable "vm_mac_address" {
-  description = "MAC address for VM (optional)"
-  type        = string
-  default     = null
+  default     = 400  # UM690L has 1.5TB NVMe
 }
 
 # GitOps Configuration

@@ -46,7 +46,6 @@ All secrets are organized by component under `/agentic-platform/`:
 
 ```
 /agentic-platform/
-├── proxmox/              # Proxmox API credentials
 ├── llm-apis/             # LLM API keys (Gemini, Claude)
 ├── telegram/             # Telegram bot credentials
 ├── home-assistant/       # Home Assistant long-lived token
@@ -61,19 +60,19 @@ All secrets are organized by component under `/agentic-platform/`:
 
 ### 1. Infrastructure (Terraform)
 
-**Infisical Path**: `/agentic-platform/proxmox`
+**Note**: Bare metal Talos deployment requires no API credentials for infrastructure provisioning. All configuration is applied directly via `talosctl` using the generated machine secrets.
 
-| Key | Description | Example |
-|-----|-------------|---------|
-| `API_URL` | Proxmox API endpoint | `https://10.20.0.1:8006/api2/json` |
-| `TOKEN_ID` | Proxmox API token ID | `terraform@pve!terraform` |
-| `API_TOKEN` | Proxmox API token secret | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
-
-**Terraform Usage**:
-```bash
-# Set via environment variables (recommended for initial setup)
-export TF_VAR_proxmox_api_token_id="terraform@pve!terraform"
-export TF_VAR_proxmox_api_token_secret="$(infisical get API_TOKEN --path /agentic-platform/proxmox)"
+**Terraform State**: Consider using Terraform Cloud or encrypted S3 backend for state storage:
+```hcl
+# infrastructure/terraform/talos-cluster/backend.tf (optional)
+terraform {
+  backend "s3" {
+    bucket = "homelab-terraform-state"
+    key    = "agentic-lab/talos-cluster/terraform.tfstate"
+    region = "us-east-1"
+    encrypt = true
+  }
+}
 ```
 
 ### 2. LLM APIs

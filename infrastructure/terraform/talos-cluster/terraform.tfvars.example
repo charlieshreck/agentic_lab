@@ -1,64 +1,90 @@
 # ============================================================================
-# Terraform Variables Example - Agentic AI Platform
+# Terraform Variables Example - Bare Metal Talos
 # ============================================================================
-# Copy this file to terraform.tfvars and fill in actual values
-# NEVER commit terraform.tfvars (it's in .gitignore)
+# Copy this file to terraform.tfvars and adjust values for your hardware
+# terraform.tfvars is gitignored for security
 # ============================================================================
-
-# Proxmox Connection
-proxmox_host     = "10.20.0.1"      # IP of Proxmox host managing UM690L
-proxmox_user     = "root@pam"
-proxmox_password = "your-proxmox-password-here"  # Or use env var: TF_VAR_proxmox_password
-proxmox_node     = "Carrick"        # Proxmox node name (check: pvesh get /nodes)
 
 # Network Configuration
-network_bridge  = "vmbr0"           # Proxmox bridge for VM network
-network_gateway = "10.20.0.1"       # Default gateway for 10.20.0.0/24 network
-dns_servers     = ["1.1.1.1", "8.8.8.8"]
+node_ip           = "10.20.0.109"
+network_gateway   = "10.20.0.1"
+network_cidr      = 24
+network_interface = "eth0"  # Check during Talos maintenance mode: talosctl get links
+dns_servers       = ["1.1.1.1", "8.8.8.8"]
 
 # Cluster Configuration
-cluster_name       = "agentic-platform"
-talos_version      = "v1.8.1"       # Check https://github.com/siderolabs/talos/releases
-kubernetes_version = "v1.31.1"      # Compatible K8s version for Talos
+cluster_name    = "agentic-platform"
+node_hostname   = "agentic-01"
+talos_version   = "v1.8.1"       # https://github.com/siderolabs/talos/releases
+kubernetes_version = "v1.31.1"   # Compatible with Talos 1.8.x
 
-# Storage Configuration
-proxmox_storage     = "local-lvm"   # Proxmox storage for VM disk (check: pvesh get /storage)
-proxmox_iso_storage = "local"       # Proxmox storage for ISOs
-
-# VM Configuration
-vm_id          = 400
-vm_name        = "agentic-talos"
-vm_ip          = "10.20.0.109"
-vm_cores       = 8                  # Use most of UM690L's 8C/16T
-vm_memory      = 24576              # 24GB (32GB total - 8GB for host = 24GB)
-vm_disk_size   = 500                # 500GB (1.5TB NVMe - reserve 500GB for data disk later)
-vm_mac_address = null               # Auto-generate or set specific MAC
+# Disk Configuration
+install_disk    = "/dev/nvme0n1"  # Check during maintenance mode: talosctl disks
+disk_min_size   = 400             # Minimum 400GB (UM690L has 1.5TB)
 
 # GitOps Repository
 gitops_repo_url    = "https://github.com/charlieshreck/agentic_lab.git"
 gitops_repo_branch = "main"
 
 # ============================================================================
-# Notes:
+# Hardware-Specific Notes for UM690L
 # ============================================================================
-# 1. Update proxmox_host based on your actual Proxmox installation
-#    - If UM690L is the Proxmox host: likely 10.20.0.1 or similar
-#    - If UM690L is managed BY another Proxmox: use that host's IP
+# CPU: AMD Ryzen 9 6900HX (8C/16T)
+# RAM: 32GB DDR5-4800
+# Storage: 1.5TB NVMe (typically shows as /dev/nvme0n1)
+# GPU: Radeon 680M (RDNA2, built-in - will be enabled for Ollama)
+# Network: 2x 2.5GbE (eth0 and eth1, typically only eth0 needed)
 #
-# 2. Check available storage with: pvesh get /storage
-#    - Use ZFS pool if available for better performance
-#    - local-lvm is usually the default
+# ============================================================================
+# Pre-Deployment Checklist
+# ============================================================================
+# 1. Download Talos ISO:
+#    https://github.com/siderolabs/talos/releases/download/v1.8.1/metal-amd64.iso
 #
-# 3. Network isolation:
-#    - 10.20.0.0/24 is separate from prod (10.10.0.0/24) and monitoring (10.30.0.0/24)
-#    - Adjust if your network topology is different
+# 2. Flash to USB drive:
+#    dd if=metal-amd64.iso of=/dev/sdX bs=4M status=progress && sync
 #
-# 4. Resource allocation:
-#    - UM690L specs: Ryzen 9 6900HX (8C/16T), 32GB DDR5, 1.5TB NVMe
-#    - Leaving ~8GB for host overhead
-#    - Leaving ~500GB+ for future data volumes (Qdrant, PostgreSQL, etc.)
+# 3. Boot UM690L from USB
+#    - Enter BIOS (F2 or DEL during boot)
+#    - Set boot order: USB first
+#    - Disable Secure Boot if enabled
 #
-# 5. Alternative deployment:
-#    - Bare metal Talos: Set vm_id to null, use Talos metal provider instead
-#    - Multiple disks: Add separate data disk for /var/lib (future enhancement)
+# 4. Verify network connectivity:
+#    - Machine will boot into maintenance mode
+#    - Check IP: Should get DHCP address initially
+#    - Verify reachable from workstation: ping <ip>
+#
+# 5. Adjust variables above based on your network
+#
+# 6. Run terraform apply (see BARE_METAL_INSTALL.md for full guide)
+#
+# ============================================================================
+# Network Interface Detection
+# ============================================================================
+# To find the correct interface name after booting Talos ISO:
+#
+# 1. Get temporary DHCP IP:
+#    talosctl -n <dhcp-ip> get links
+#
+# 2. Look for physical interfaces (usually eth0, eth1)
+#    - eth0: First onboard NIC
+#    - eth1: Second onboard NIC
+#
+# 3. Update network_interface variable if not eth0
+#
+# ============================================================================
+# Disk Selection
+# ============================================================================
+# To verify disk path after booting Talos ISO:
+#
+# talosctl -n <dhcp-ip> disks
+#
+# Common patterns:
+# - NVMe: /dev/nvme0n1, /dev/nvme1n1, etc.
+# - SATA SSD: /dev/sda, /dev/sdb, etc.
+# - M.2 NVMe: Usually nvme0n1
+#
+# UM690L typically has:
+# - Single 1.5TB NVMe: /dev/nvme0n1
+#
 # ============================================================================

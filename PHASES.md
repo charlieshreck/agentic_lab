@@ -20,11 +20,12 @@ This document outlines the phased implementation approach for the Agentic AI Pla
 
 ### Tasks
 
-- [ ] Configure Terraform variables (`terraform.tfvars`)
-- [ ] Create Infisical path `/agentic-platform/proxmox` with API credentials
+- [ ] Download Talos ISO and flash to USB drive (see BARE_METAL_INSTALL.md)
+- [ ] Boot UM690L from USB into Talos maintenance mode
+- [ ] Configure Terraform variables (`terraform.tfvars`) with network and disk settings
 - [ ] Run `terraform plan` and review
-- [ ] Run `terraform apply` to provision Talos VM (or bare metal)
-- [ ] Bootstrap Talos cluster via generated talosconfig
+- [ ] Run `terraform apply` to provision bare metal Talos cluster
+- [ ] Remove USB drive and reboot into installed system
 - [ ] Verify kubeconfig access
 - [ ] Test basic kubectl commands
 
@@ -33,8 +34,8 @@ This document outlines the phased implementation approach for the Agentic AI Pla
 ```bash
 # All commands succeed:
 kubectl get nodes
-# NAME              STATUS   ROLES           AGE   VERSION
-# agentic-talos     Ready    control-plane   5m    v1.28.x
+# NAME         STATUS   ROLES           AGE   VERSION
+# agentic-01   Ready    control-plane   5m    v1.31.1
 
 kubectl get pods -A
 # System pods running (apiserver, controller-manager, scheduler, etc.)

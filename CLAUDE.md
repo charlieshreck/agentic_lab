@@ -15,10 +15,11 @@ This repository contains the infrastructure and application code for a **self-im
 ## Architecture Summary
 
 ### Infrastructure
-- **Platform**: Talos Linux single-node cluster on UM690L
+- **Platform**: Talos Linux bare metal on UM690L (no Proxmox, no VMs)
+- **Hardware**: AMD Ryzen 9 6900HX (8C/16T), 32GB DDR5, 1.5TB NVMe
 - **Network**: 10.20.0.0/24 (isolated from production and monitoring networks)
-- **Host**: 10.20.0.109
-- **Resources**: AMD Ryzen 9 6900HX (8C/16T), 32GB DDR5, 1.5TB NVMe
+- **Node IP**: 10.20.0.109
+- **GPU**: AMD Radeon 680M (RDNA2) for local inference acceleration
 - **Storage**: Local path provisioner + future MinIO for backups
 
 ### Key Components
@@ -132,10 +133,13 @@ agentic_lab/
 
 - Terraform >= 1.5.0
 - kubectl >= 1.28
-- talosctl >= 1.6.0
-- Proxmox host with API access (or bare metal for direct Talos install)
+- talosctl >= 1.8.0
+- UM690L bare metal hardware (no Proxmox required)
+- USB drive (8GB+) for Talos ISO
 - GitHub account (for GitOps repository)
 - Infisical project for secrets (or SOPS + age keys)
+
+**Installation Guide**: See [BARE_METAL_INSTALL.md](./BARE_METAL_INSTALL.md) for complete bare metal setup instructions.
 
 ---
 

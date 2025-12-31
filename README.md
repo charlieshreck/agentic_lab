@@ -49,12 +49,14 @@ This is a **hybrid local/cloud AI agent** deployed on dedicated infrastructure (
 
 ## Prerequisites
 
-- **Hardware**: Proxmox host or bare metal with 8+ cores, 16GB+ RAM
-  - This project targets UM690L (Ryzen 9 6900HX, 32GB RAM, 1.5TB NVMe)
+- **Hardware**: UM690L bare metal (Ryzen 9 6900HX, 32GB RAM, 1.5TB NVMe)
+  - USB drive (8GB+) for Talos ISO
+  - Monitor + keyboard for initial setup (or remote console)
+  - Network connectivity
 - **Software**:
   - Terraform >= 1.5.0
   - kubectl >= 1.28
-  - talosctl >= 1.6.0
+  - talosctl >= 1.8.0
 - **Accounts**:
   - GitHub (for GitOps repository)
   - Infisical (for secrets management) or SOPS + age keys
@@ -66,43 +68,18 @@ This is a **hybrid local/cloud AI agent** deployed on dedicated infrastructure (
 
 ## Quick Start
 
-### 1. Clone Repository
+⚠️ **Important**: This is a bare metal Talos installation. See **[BARE_METAL_INSTALL.md](./BARE_METAL_INSTALL.md)** for the complete step-by-step guide.
 
-```bash
-git clone https://github.com/charlieshreck/agentic_lab.git
-cd agentic_lab
-```
+### Quick Summary:
 
-### 2. Configure Terraform
+1. **Download Talos ISO** and flash to USB drive
+2. **Boot UM690L** from USB (enters maintenance mode)
+3. **Configure Terraform** with network details
+4. **Run `terraform apply`** to provision cluster
+5. **Remove USB** and reboot (boots from NVMe)
+6. **Deploy platform** via ArgoCD
 
-```bash
-cd infrastructure/terraform/talos-cluster
-
-# Copy example vars
-cp terraform.tfvars.example terraform.tfvars
-
-# Edit with your Proxmox credentials
-vim terraform.tfvars
-```
-
-**Required variables**:
-- `proxmox_api_url`: Proxmox API endpoint
-- `proxmox_api_token_id`: API token ID
-- `proxmox_api_token_secret`: API token secret
-- `vm_ip`: Static IP for Talos node (default: 10.20.0.109)
-
-### 3. Provision Infrastructure
-
-```bash
-terraform init
-terraform plan -out=agentic.plan
-terraform apply agentic.plan
-```
-
-This creates:
-- Talos VM on Proxmox (or provisions bare metal if using Talos metal provider)
-- Single-node Kubernetes cluster
-- Kubeconfig and Talosconfig in `generated/` directory
+**Full guide**: [BARE_METAL_INSTALL.md](./BARE_METAL_INSTALL.md)
 
 ### 4. Access Cluster
 

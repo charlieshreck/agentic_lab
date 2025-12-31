@@ -1,15 +1,14 @@
 # ============================================================================
-# Agentic AI Platform - Single-Node Talos Cluster
+# Agentic AI Platform - Bare Metal Talos Cluster
+# ============================================================================
+# This configuration manages Talos OS on bare metal hardware (UM690L)
+# Hardware must be manually booted from Talos ISO before applying this config
 # ============================================================================
 
 terraform {
   required_version = ">= 1.5.0"
 
   required_providers {
-    proxmox = {
-      source  = "bpg/proxmox"
-      version = "~> 0.70.0"
-    }
     talos = {
       source  = "siderolabs/talos"
       version = "~> 0.7.0"
@@ -17,112 +16,8 @@ terraform {
   }
 }
 
-# Proxmox Provider
-provider "proxmox" {
-  endpoint = "https://${var.proxmox_host}:8006"
-  username = var.proxmox_user
-  password = var.proxmox_password
-  insecure = true
-
-  ssh {
-    agent    = false
-    username = "root"
-    password = var.proxmox_password
-  }
-}
-
 # Talos Provider
 provider "talos" {}
-
-# ============================================================================
-# Download Talos ISO
-# ============================================================================
-
-resource "proxmox_virtual_environment_download_file" "talos_nocloud_image" {
-  content_type = "iso"
-  datastore_id = var.proxmox_iso_storage
-  node_name    = var.proxmox_node
-
-  # Official Talos nocloud image (generic, no extensions needed for single-node)
-  url = "https://factory.talos.dev/image/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515/${var.talos_version}/nocloud-amd64.iso"
-
-  file_name               = "talos-${var.talos_version}-nocloud-amd64.iso"
-  overwrite               = false
-  overwrite_unmanaged     = true
-  checksum                = null
-  checksum_algorithm      = null
-}
-
-# ============================================================================
-# Talos VM
-# ============================================================================
-
-resource "proxmox_virtual_environment_vm" "talos" {
-  name        = var.vm_name
-  description = "Talos Linux single-node cluster for Agentic AI Platform"
-  node_name   = var.proxmox_node
-  vm_id       = var.vm_id
-
-  cpu {
-    cores = var.vm_cores
-    type  = "host"
-  }
-
-  memory {
-    dedicated = var.vm_memory
-  }
-
-  bios = "ovmf"
-
-  efi_disk {
-    datastore_id = var.proxmox_storage
-    file_format  = "raw"
-    type         = "4m"
-  }
-
-  # Network interface
-  network_device {
-    bridge      = var.network_bridge
-    mac_address = var.vm_mac_address
-    model       = "virtio"
-  }
-
-  # Boot disk
-  disk {
-    datastore_id = var.proxmox_storage
-    interface    = "scsi0"
-    size         = var.vm_disk_size
-    file_format  = "raw"
-    ssd          = true
-    discard      = "on"
-  }
-
-  # Talos ISO
-  cdrom {
-    enabled   = true
-    file_id   = proxmox_virtual_environment_download_file.talos_nocloud_image.id
-    interface = "ide2"
-  }
-
-  serial_device {}
-
-  on_boot = true
-  started = true
-
-  operating_system {
-    type = "l26"  # Linux 2.6+ kernel
-  }
-
-  agent {
-    enabled = false  # Talos doesn't use QEMU agent
-  }
-
-  lifecycle {
-    ignore_changes = [
-      cdrom,  # Prevent accidental ISO unmounting
-    ]
-  }
-}
 
 # ============================================================================
 # Talos Machine Configuration
@@ -133,37 +28,52 @@ resource "talos_machine_secrets" "this" {
   talos_version = var.talos_version
 }
 
-# Machine configuration for single-node cluster (acts as both CP and worker)
+# Machine configuration for bare metal single-node cluster
 data "talos_machine_configuration" "this" {
   cluster_name     = var.cluster_name
-  cluster_endpoint = "https://${var.vm_ip}:6443"
+  cluster_endpoint = "https://${var.node_ip}:6443"
   machine_type     = "controlplane"
   machine_secrets  = talos_machine_secrets.this.machine_secrets
 
   talos_version      = var.talos_version
   kubernetes_version = var.kubernetes_version
 
-  docs_enabled = false
+  docs_enabled     = false
   examples_enabled = false
 
   config_patches = [
     yamlencode({
       machine = {
         install = {
-          disk = "/dev/sda"
-          image = "factory.talos.dev/installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:${var.talos_version}"
+          disk  = var.install_disk
+          image = "ghcr.io/siderolabs/installer:${var.talos_version}"
+          # Use entire disk for OS
+          diskSelector = {
+            size = ">= ${var.disk_min_size}GB"
+          }
         }
         network = {
-          hostname = var.vm_name
+          hostname = var.node_hostname
           interfaces = [{
-            interface = "eth0"
-            addresses = ["${var.vm_ip}/24"]
+            interface = var.network_interface
+            addresses = ["${var.node_ip}/${var.network_cidr}"]
             routes = [{
               network = "0.0.0.0/0"
               gateway = var.network_gateway
             }]
           }]
           nameservers = var.dns_servers
+        }
+        # AMD GPU support for Ollama
+        kernel = {
+          modules = [{
+            name = "amdgpu"
+          }]
+        }
+        sysctls = {
+          # Optimize for AI workloads
+          "vm.max_map_count" = "262144"  # For Qdrant
+          "fs.inotify.max_user_watches" = "524288"
         }
       }
       cluster = {
@@ -172,6 +82,14 @@ data "talos_machine_configuration" "this" {
           cni = {
             name = "none"  # Will deploy Cilium via ArgoCD
           }
+          # Pod CIDR
+          podSubnets = ["10.244.0.0/16"]
+          # Service CIDR
+          serviceSubnets = ["10.96.0.0/12"]
+        }
+        # Proxy configuration
+        proxy = {
+          disabled = false
         }
       }
     })
@@ -182,32 +100,30 @@ data "talos_machine_configuration" "this" {
 data "talos_client_configuration" "this" {
   cluster_name         = var.cluster_name
   client_configuration = talos_machine_secrets.this.client_configuration
-  endpoints            = [var.vm_ip]
-  nodes                = [var.vm_ip]
+  endpoints            = [var.node_ip]
+  nodes                = [var.node_ip]
 }
 
 # ============================================================================
-# Talos Bootstrap
+# Talos Bootstrap (After Manual ISO Boot)
 # ============================================================================
 
-# Apply machine configuration to VM
+# Apply machine configuration to bare metal node
 resource "talos_machine_configuration_apply" "this" {
   client_configuration        = talos_machine_secrets.this.client_configuration
   machine_configuration_input = data.talos_machine_configuration.this.machine_configuration
-  node                        = var.vm_ip
-  endpoint                    = var.vm_ip
+  node                        = var.node_ip
+  endpoint                    = var.node_ip
 
-  # Apply after VM is created and booted
-  depends_on = [
-    proxmox_virtual_environment_vm.talos
-  ]
+  # Manual prerequisite: Boot UM690L from Talos ISO
+  # The machine will be in maintenance mode waiting for configuration
 }
 
 # Bootstrap Kubernetes cluster
 resource "talos_machine_bootstrap" "this" {
   client_configuration = talos_machine_secrets.this.client_configuration
-  endpoint             = var.vm_ip
-  node                 = var.vm_ip
+  endpoint             = var.node_ip
+  node                 = var.node_ip
 
   depends_on = [
     talos_machine_configuration_apply.this
@@ -221,12 +137,17 @@ resource "talos_machine_bootstrap" "this" {
 # Generate kubeconfig
 data "talos_cluster_kubeconfig" "this" {
   client_configuration = talos_machine_secrets.this.client_configuration
-  endpoint             = var.vm_ip
-  node                 = var.vm_ip
+  endpoint             = var.node_ip
+  node                 = var.node_ip
 
   depends_on = [
     talos_machine_bootstrap.this
   ]
+
+  # Wait for control plane to be ready
+  timeouts {
+    read = "5m"
+  }
 }
 
 # Save kubeconfig to file
@@ -234,11 +155,22 @@ resource "local_file" "kubeconfig" {
   content         = data.talos_cluster_kubeconfig.this.kubeconfig_raw
   filename        = "${path.module}/generated/kubeconfig"
   file_permission = "0600"
+
+  depends_on = [
+    data.talos_cluster_kubeconfig.this
+  ]
 }
 
 # Save talosconfig to file
 resource "local_file" "talosconfig" {
   content         = data.talos_client_configuration.this.talos_config
   filename        = "${path.module}/generated/talosconfig"
+  file_permission = "0600"
+}
+
+# Save machine configuration for reference
+resource "local_file" "machine_config" {
+  content         = data.talos_machine_configuration.this.machine_configuration
+  filename        = "${path.module}/generated/machine-config.yaml"
   file_permission = "0600"
 }
