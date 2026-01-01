@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - https://raw.githubusercontent.com/cilium/cilium/v1.16.5/install/kubernetes/quick-install.yaml
+
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cilium-config
+        namespace: kube-system
+      data:
+        enable-ipv4: "true"
+        enable-ipv6: "false"
+        ipam: "kubernetes"
+        tunnel-protocol: "vxlan"
+        enable-hubble: "true"
