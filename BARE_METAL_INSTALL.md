@@ -43,8 +43,9 @@ This guide walks through installing Talos OS directly on the UM690L hardware (no
 From your workstation:
 
 ```bash
-# Download Talos v1.8.1 metal ISO
-wget https://github.com/siderolabs/talos/releases/download/v1.8.1/metal-amd64.iso
+# Download Talos v1.11.5 metal ISO (note: use Factory image for AMD GPU support)
+# See INSTALLATION_STEPS.md for the correct Factory ISO URL
+wget https://github.com/siderolabs/talos/releases/download/v1.11.5/metal-amd64.iso
 
 # Verify download
 ls -lh metal-amd64.iso

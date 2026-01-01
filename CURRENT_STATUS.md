@@ -94,7 +94,7 @@ talosctl gen config agentic-platform https://10.20.0.109:6443 --output-dir gener
 **IMPORTANT**: Copy this URL to download the ISO on your Windows laptop:
 
 ```
-https://factory.talos.dev/image/d9d97f8dca41cb2d47f2b5b6a34ea45725381bfd0b9b6a34b686418ef6682591/v1.8.1/metal-amd64.iso
+https://factory.talos.dev/image/d9d97f8dca41cb2d47f2b5b6a34ea45725381bfd0b9b6a34b686418ef6682591/v1.11.5/metal-amd64.iso
 ```
 
 **File Size**: ~200MB
@@ -119,7 +119,7 @@ https://factory.talos.dev/image/d9d97f8dca41cb2d47f2b5b6a34ea45725381bfd0b9b6a34
 
 Open this URL in browser:
 ```
-https://factory.talos.dev/image/d9d97f8dca41cb2d47f2b5b6a34ea45725381bfd0b9b6a34b686418ef6682591/v1.8.1/metal-amd64.iso
+https://factory.talos.dev/image/d9d97f8dca41cb2d47f2b5b6a34ea45725381bfd0b9b6a34b686418ef6682591/v1.11.5/metal-amd64.iso
 ```
 
 Save to: `C:\Users\Mrlon\Downloads\talos-factory-amd.iso`
@@ -183,7 +183,7 @@ ping 10.20.0.109
 
 # Check Talos is responding
 talosctl --nodes 10.20.0.109 version
-# Should show Talos v1.8.1
+# Should show Talos v1.11.5
 ```
 
 #### 6. Bootstrap Kubernetes Cluster
@@ -271,7 +271,7 @@ git commit -m "Update status: Talos cluster successfully deployed
 
 Cluster Details:
 - Node: agentic-01 at 10.20.0.109
-- Talos: v1.8.1 with Factory schematic (AMD GPU)
+- Talos: v1.11.5 with Factory schematic (AMD GPU)
 - Kubernetes: v1.31.1
 - Status: Healthy, ready for Phase 2
 
@@ -534,7 +534,7 @@ If you encounter problems tomorrow:
 1. **Read generated/INSTALLATION_STEPS.md** - Has troubleshooting section
 2. **Check this file** - CURRENT_STATUS.md
 3. **Review git log**: `git log --oneline` to see what was done
-4. **Talos docs**: https://www.talos.dev/v1.8/introduction/getting-started/
+4. **Talos docs**: https://www.talos.dev/v1.11/introduction/getting-started/
 
 ---
 
