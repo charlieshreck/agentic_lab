@@ -40,7 +40,7 @@ kubectl get nodes
 kubectl get pods -A
 # System pods running (apiserver, controller-manager, scheduler, etc.)
 
-talosctl health --nodes 10.20.0.109
+talosctl health --nodes 10.20.0.40
 # All health checks pass
 ```
 

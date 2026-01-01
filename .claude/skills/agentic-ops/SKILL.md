@@ -4,7 +4,7 @@ This skill assists with the Agentic AI Platform infrastructure and application m
 
 ## Context
 
-**Infrastructure**: Talos cluster on UM690L (10.20.0.109)
+**Infrastructure**: Talos cluster on UM690L (10.20.0.40)
 **Network**: 10.20.0.0/24 (isolated from prod/monitoring)
 **Stack**: Ollama + Qdrant + LangGraph + Telegram + MCP servers
 **Purpose**: Cyclical learning AI agent for homelab management
@@ -86,8 +86,8 @@ kubectl get applications -n argocd
 ### "Talos cluster health"
 ```bash
 export TALOSCONFIG=infrastructure/terraform/talos-cluster/generated/talosconfig
-talosctl health --nodes 10.20.0.109
-talosctl dashboard --nodes 10.20.0.109
+talosctl health --nodes 10.20.0.40
+talosctl dashboard --nodes 10.20.0.40
 ```
 
 ### "Get kubeconfig for MCP development"

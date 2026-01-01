@@ -64,7 +64,7 @@ git push
 terraform apply
 
 # 4. Apply to cluster
-talosctl apply-config --nodes 10.20.0.109 \
+talosctl apply-config --nodes 10.20.0.40 \
   --file generated/talosconfig-agentic-talos.yaml
 ```
 
@@ -138,7 +138,7 @@ terraform apply
 echo "api_key: sk-my-key" > secret.yaml
 
 # WRONG: Manual talosctl changes without updating Terraform
-talosctl patch mc --nodes 10.20.0.109 -p '[...]'
+talosctl patch mc --nodes 10.20.0.40 -p '[...]'
 
 # WRONG: Manual VM creation in Proxmox UI
 # (Use Terraform instead)
@@ -240,7 +240,7 @@ terraform apply
 git revert <commit-hash>
 git push
 terraform apply  # Regenerate configs
-talosctl apply-config --nodes 10.20.0.109 --file generated/talosconfig-agentic-talos.yaml
+talosctl apply-config --nodes 10.20.0.40 --file generated/talosconfig-agentic-talos.yaml
 ```
 
 ## Why GitOps?

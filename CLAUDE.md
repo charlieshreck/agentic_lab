@@ -18,7 +18,7 @@ This repository contains the infrastructure and application code for a **self-im
 - **Platform**: Talos Linux bare metal on UM690L (no Proxmox, no VMs)
 - **Hardware**: AMD Ryzen 9 6900HX (8C/16T), 32GB DDR5, 1.5TB NVMe
 - **Network**: 10.20.0.0/24 (isolated from production and monitoring networks)
-- **Node IP**: 10.20.0.109
+- **Node IP**: 10.20.0.40
 - **GPU**: AMD Radeon 680M (RDNA2) for local inference acceleration
 - **Storage**: Local path provisioner + future MinIO for backups
 
@@ -61,7 +61,7 @@ This repository contains the infrastructure and application code for a **self-im
 ```
 10.20.0.0/24 - Agentic Platform Network
 ├── 10.20.0.1      - Gateway
-├── 10.20.0.109    - Talos cluster node (UM690L)
+├── 10.20.0.40    - Talos cluster node (UM690L)
 └── 10.20.0.x      - Future expansion nodes
 
 Related Networks:

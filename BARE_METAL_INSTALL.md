@@ -32,7 +32,7 @@ This guide walks through installing Talos OS directly on the UM690L hardware (no
 - kubectl >= 1.28.0
 
 ### Network Requirements
-- Static IP available: 10.20.0.109 (or adjust in terraform.tfvars)
+- Static IP available: 10.20.0.40 (or adjust in terraform.tfvars)
 - Gateway: 10.20.0.1
 - Internet connectivity for pulling container images
 
@@ -191,7 +191,7 @@ vim terraform.tfvars
 
 ```hcl
 # Network Configuration
-node_ip           = "10.20.0.109"      # Your desired static IP
+node_ip           = "10.20.0.40"      # Your desired static IP
 network_gateway   = "10.20.0.1"        # Your router/gateway
 network_cidr      = 24
 network_interface = "eth0"             # From 'get links' output
@@ -238,7 +238,7 @@ terraform apply
 3. **Applies configuration to node** via Talos API (uses DHCP IP temporarily)
 4. **Talos installs itself to disk** (/dev/nvme0n1)
 5. **Node reboots** with permanent configuration
-6. **Node comes up with static IP** (10.20.0.109)
+6. **Node comes up with static IP** (10.20.0.40)
 7. **Kubernetes bootstraps** (control plane starts)
 8. **Kubeconfig generated** to `generated/kubeconfig`
 
@@ -247,7 +247,7 @@ terraform apply
 **During the apply**:
 - Watch the UM690L console for progress
 - Node will reboot during installation
-- After reboot, it should come up at 10.20.0.109
+- After reboot, it should come up at 10.20.0.40
 
 ---
 
@@ -261,7 +261,7 @@ export KUBECONFIG=$(terraform output -raw kubeconfig_path)
 export TALOSCONFIG=$(terraform output -raw talosconfig_path)
 
 # Verify Talos health
-talosctl health --nodes 10.20.0.109
+talosctl health --nodes 10.20.0.40
 
 # Output should show:
 # [✓] API
@@ -293,14 +293,14 @@ Once the cluster is healthy:
 
 1. **Power off** the UM690L:
    ```bash
-   talosctl shutdown --nodes 10.20.0.109
+   talosctl shutdown --nodes 10.20.0.40
    ```
 
 2. **Remove USB drive**
 
 3. **Power on** UM690L
    - Should boot directly from NVMe now
-   - Will come up at 10.20.0.109
+   - Will come up at 10.20.0.40
 
 ---
 
@@ -419,10 +419,10 @@ The AMD Radeon 680M iGPU is automatically detected by Talos. To verify:
 
 ```bash
 # Check kernel modules
-talosctl -n 10.20.0.109 get kernelmodules | grep amdgpu
+talosctl -n 10.20.0.40 get kernelmodules | grep amdgpu
 
 # Check GPU in system
-talosctl -n 10.20.0.109 ls /dev/dri
+talosctl -n 10.20.0.40 ls /dev/dri
 # Should show: card0, renderD128
 ```
 

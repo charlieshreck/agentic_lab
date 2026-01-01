@@ -1,8 +1,51 @@
 # Current Status - Agentic Lab Project
 
-**Last Updated**: 2025-12-31
-**Status**: Ready for Talos installation
-**Next Session**: Continue with bare metal deployment
+**Last Updated**: 2026-01-01
+**Status**: ✅ Talos Cluster Deployed Successfully
+**Next Session**: Deploy ArgoCD and CNI (Phase 2)
+
+---
+
+## Latest Deployment (2026-01-01)
+
+### ✅ Talos Cluster Successfully Deployed
+
+**Cluster Details:**
+- **Node**: agentic-01
+- **IP**: 10.20.0.40/24 (changed from planned 10.20.0.40 to align with other clusters)
+- **Talos Version**: v1.11.5 (upgraded from v1.8.1 for AMD GPU support)
+- **Kubernetes**: v1.34.1
+- **Status**: Running (NotReady - CNI installation pending)
+
+**Hardware Verified:**
+- **CPU**: AMD Ryzen 9 6900HX (8 cores, 16 threads)
+- **RAM**: 32GB DDR5
+- **Storage**: 1.5TB NVMe (/dev/nvme0n1)
+- **GPU**: AMD Radeon 680M with 2GB VRAM
+  - Driver: amdgpu v20251021-v1.11.5
+  - Devices: `/dev/dri/card0`, `/dev/dri/renderD128`
+  - Status: ✅ Fully operational
+
+**Deployment Timeline:**
+1. ✅ Downloaded Factory ISO (v1.11.5) with AMD GPU extensions
+2. ✅ Flashed to USB and booted UM690L
+3. ✅ Configured OPNsense firewall rules (10.10.0.0/24 → 10.20.0.0/24)
+4. ✅ Applied Talos configuration
+5. ✅ Node installed and rebooted (~10 minutes)
+6. ✅ Bootstrapped Kubernetes cluster
+7. ✅ Verified AMD GPU support
+8. ✅ Retrieved kubeconfig
+
+**Key Changes from Plan:**
+- IP Address: 10.20.0.40 (instead of 10.20.0.40) - aligned with cluster naming convention
+- Talos Version: v1.11.5 (instead of v1.8.1) - required for AMD GPU extensions
+- Added OPNsense firewall rules for inter-VLAN communication
+
+**Current State:**
+- Cluster API: https://10.20.0.40:6443
+- Kubeconfig: `~/.kube/agentic-cluster`
+- Talosconfig: `~/.talos/config`
+- System pods: Running (CoreDNS pending CNI)
 
 ---
 
@@ -45,7 +88,7 @@ All documentation is complete and committed:
 
 ### 4. Network Configuration ✅
 
-- **IP Address**: 10.20.0.109/24
+- **IP Address**: 10.20.0.40/24
 - **Gateway**: 10.20.0.1
 - **DNS**: 1.1.1.1, 8.8.8.8
 - **Hostname**: agentic-01
@@ -85,7 +128,7 @@ generated/
 ```bash
 cd /home/agentic_lab/infrastructure/terraform/talos-cluster
 rm -rf generated/*
-talosctl gen config agentic-platform https://10.20.0.109:6443 --output-dir generated/
+talosctl gen config agentic-platform https://10.20.0.40:6443 --output-dir generated/
 # Then apply the patch as documented in git commit 9366ad8
 ```
 
@@ -160,17 +203,17 @@ cat ~/.talos/config | grep agentic-platform
 
 # Apply the configuration
 talosctl apply-config --insecure \
-  --nodes 10.20.0.109 \
+  --nodes 10.20.0.40 \
   --file controlplane-final.yaml
 
 # Expected output:
-# Applied configuration to node 10.20.0.109
+# Applied configuration to node 10.20.0.40
 ```
 
 **What happens next**:
 - Node downloads Factory image (~200MB)
 - Installs Talos to /dev/nvme0n1
-- Configures network (10.20.0.109)
+- Configures network (10.20.0.40)
 - Reboots automatically
 - **Wait 10-15 minutes**
 
@@ -178,11 +221,11 @@ talosctl apply-config --insecure \
 
 ```bash
 # Wait for reboot, then check connectivity
-ping 10.20.0.109
+ping 10.20.0.40
 # Should respond after ~10 minutes
 
 # Check Talos is responding
-talosctl --nodes 10.20.0.109 version
+talosctl --nodes 10.20.0.40 version
 # Should show Talos v1.11.5
 ```
 
@@ -190,7 +233,7 @@ talosctl --nodes 10.20.0.109 version
 
 ```bash
 # Bootstrap etcd (only run once!)
-talosctl bootstrap --nodes 10.20.0.109
+talosctl bootstrap --nodes 10.20.0.40
 
 # Wait 2-3 minutes for Kubernetes to initialize
 ```
@@ -215,7 +258,7 @@ kubectl get nodes
 
 ```bash
 # Check Talos health
-talosctl health --nodes 10.20.0.109
+talosctl health --nodes 10.20.0.40
 # Expected:
 # [✓] API
 # [✓] etcd
@@ -233,11 +276,11 @@ Once cluster is healthy:
 
 ```bash
 # Shutdown node
-talosctl shutdown --nodes 10.20.0.109
+talosctl shutdown --nodes 10.20.0.40
 
 # Remove USB drive
 # Power on UM690L
-# Will boot from NVMe at 10.20.0.109
+# Will boot from NVMe at 10.20.0.40
 ```
 
 ---
@@ -248,11 +291,11 @@ talosctl shutdown --nodes 10.20.0.109
 
 ```bash
 # Check AMD GPU kernel module loaded
-talosctl --nodes 10.20.0.109 get kernelmodules | grep amdgpu
+talosctl --nodes 10.20.0.40 get kernelmodules | grep amdgpu
 # Should show: amdgpu module loaded
 
 # Check GPU device
-talosctl --nodes 10.20.0.109 ls /dev/dri
+talosctl --nodes 10.20.0.40 ls /dev/dri
 # Should show: card0, renderD128
 ```
 
@@ -270,7 +313,7 @@ git add CURRENT_STATUS.md
 git commit -m "Update status: Talos cluster successfully deployed
 
 Cluster Details:
-- Node: agentic-01 at 10.20.0.109
+- Node: agentic-01 at 10.20.0.40
 - Talos: v1.11.5 with Factory schematic (AMD GPU)
 - Kubernetes: v1.31.1
 - Status: Healthy, ready for Phase 2
@@ -304,7 +347,7 @@ kubectl apply -k kubernetes/bootstrap/
 
 ### Issue: Node not responding after apply-config
 
-**Symptom**: Can't ping 10.20.0.109 after applying config
+**Symptom**: Can't ping 10.20.0.40 after applying config
 
 **Solution**:
 - Wait 10-15 minutes - node is installing to disk
@@ -327,10 +370,10 @@ kubectl apply -k kubernetes/bootstrap/
 **Solution**:
 ```bash
 # Check node is actually running Kubernetes
-talosctl --nodes 10.20.0.109 service kubelet
+talosctl --nodes 10.20.0.40 service kubelet
 
 # If not running, bootstrap again
-talosctl bootstrap --nodes 10.20.0.109
+talosctl bootstrap --nodes 10.20.0.40
 
 # Wait 3 minutes, then retry kubeconfig
 ```
@@ -355,10 +398,10 @@ echo $KUBECONFIG
 
 # Check kubeconfig contents
 kubectl config view
-# Should show server: https://10.20.0.109:6443
+# Should show server: https://10.20.0.40:6443
 
 # Test direct connectivity
-curl -k https://10.20.0.109:6443/version
+curl -k https://10.20.0.40:6443/version
 # Should return Kubernetes version JSON
 ```
 
@@ -404,19 +447,19 @@ echo 'export KUBECONFIG=~/.kube/agentic-cluster' >> ~/.bashrc
 
 ```bash
 # Check node health
-talosctl health --nodes 10.20.0.109
+talosctl health --nodes 10.20.0.40
 
 # View node version
-talosctl --nodes 10.20.0.109 version
+talosctl --nodes 10.20.0.40 version
 
 # Check service status
-talosctl --nodes 10.20.0.109 service
+talosctl --nodes 10.20.0.40 service
 
 # View logs
-talosctl --nodes 10.20.0.109 logs kubelet
+talosctl --nodes 10.20.0.40 logs kubelet
 
 # Dashboard (interactive)
-talosctl dashboard --nodes 10.20.0.109
+talosctl dashboard --nodes 10.20.0.40
 ```
 
 ### Kubernetes Commands
@@ -460,7 +503,7 @@ Before starting installation:
 ```
 10.20.0.0/24 - Agentic Platform (NEW - THIS PROJECT)
 ├── 10.20.0.1    - Gateway
-├── 10.20.0.109  - Talos cluster (UM690L)
+├── 10.20.0.40  - Talos cluster (UM690L)
 └── Future expansion
 
 Related Networks:

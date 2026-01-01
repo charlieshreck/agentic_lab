@@ -91,7 +91,7 @@ export TALOSCONFIG=$(terraform output -raw talosconfig_path)
 kubectl get nodes
 
 # Check Talos health
-talosctl health --nodes 10.20.0.109
+talosctl health --nodes 10.20.0.40
 ```
 
 ### 5. Deploy Platform (ArgoCD Bootstrap)
@@ -157,7 +157,7 @@ See [PHASES.md](./PHASES.md) for detailed roadmap.
 ```
 10.20.0.0/24 - Agentic Platform Network (Isolated)
 ├── 10.20.0.1      - Gateway
-├── 10.20.0.109    - Talos cluster node (UM690L)
+├── 10.20.0.40    - Talos cluster node (UM690L)
 └── 10.20.0.x      - Future expansion
 
 Related Networks:
