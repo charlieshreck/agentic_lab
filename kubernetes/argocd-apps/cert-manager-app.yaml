@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  sources:
+    # Helm chart for cert-manager
+    - repoURL: https://charts.jetstack.io
+      chart: cert-manager
+      targetRevision: v1.16.2
+      helm:
+        releaseName: cert-manager
+        parameters:
+          - name: crds.enabled
+            value: "true"
+          - name: crds.keep
+            value: "true"
+    # Git repository for additional resources (ClusterIssuer, secrets, etc.)
+    - repoURL: https://github.com/charlieshreck/agentic_lab.git
+      targetRevision: main
+      path: kubernetes/platform/cert-manager/resources
+  destination:
+    server: https://10.20.0.40:6443
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      jsonPointers:
+        - /spec/conversion/webhook/clientConfig/caBundle
