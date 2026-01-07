@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-servers-config
+  namespace: ai-platform
+  labels:
+    app: mcp-servers
+data:
+  # Infrastructure MCP configuration
+  infrastructure-config.yaml: |
+    name: infrastructure-mcp
+    description: Infrastructure management tools for Kubernetes and Talos
+    endpoint: http://infrastructure-mcp:8000
+    transport: sse
+    tools:
+      - kubectl_get_pods
+      - kubectl_get_deployments
+      - kubectl_logs
+      - kubectl_restart_deployment
+      - kubectl_get_events
+      - talosctl_health
+      - talosctl_services
+
+  # Knowledge MCP configuration
+  knowledge-config.yaml: |
+    name: knowledge-mcp
+    description: Qdrant vector search and knowledge base tools
+    endpoint: http://knowledge-mcp:8000
+    transport: sse
+    tools:
+      - search_runbooks
+      - search_decisions
+      - search_documentation
+      - add_runbook
+      - add_decision
+      - get_similar_events
+
+  # Home Assistant MCP configuration
+  home-assistant-config.yaml: |
+    name: home-assistant-mcp
+    description: Smart home control via Home Assistant
+    endpoint: http://home-assistant-mcp:8000
+    transport: sse
+    tools:
+      - list_lights
+      - turn_on_light
+      - turn_off_light
+      - list_climate
+      - set_climate
+      - get_sensor_state
+      - run_automation
+      - run_script
+      - list_areas
+
+  # Arr Suite MCP configuration
+  arr-suite-config.yaml: |
+    name: arr-suite-mcp
+    description: Media management with Sonarr, Radarr, Prowlarr
+    endpoint: http://arr-suite-mcp:8000
+    transport: sse
+    tools:
+      - list_tv_shows
+      - search_tv_show
+      - trigger_show_search
+      - get_sonarr_calendar
+      - list_movies
+      - search_movie
+      - add_movie
+      - trigger_movie_search
+      - get_download_queue
+      - get_system_status
+      - list_indexers
+      - test_indexer

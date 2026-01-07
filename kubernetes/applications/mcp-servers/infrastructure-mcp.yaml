@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: infrastructure-mcp
+  namespace: ai-platform
+  labels:
+    app: infrastructure-mcp
+    component: mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infrastructure-mcp-role
+  labels:
+    app: infrastructure-mcp
+rules:
+  # Read-only access to common resources
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "events", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Limited write access for deployments (restart only)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["patch"]
+  # ArgoCD read access
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infrastructure-mcp-binding
+  labels:
+    app: infrastructure-mcp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infrastructure-mcp-role
+subjects:
+  - kind: ServiceAccount
+    name: infrastructure-mcp
+    namespace: ai-platform
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infrastructure-mcp
+  namespace: ai-platform
+  labels:
+    app: infrastructure-mcp
+    component: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: infrastructure-mcp
+  template:
+    metadata:
+      labels:
+        app: infrastructure-mcp
+        component: mcp
+    spec:
+      serviceAccountName: infrastructure-mcp
+      containers:
+        - name: mcp-server
+          image: ghcr.io/charlieshreck/agentic_lab/infrastructure-mcp:latest
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: MCP_TRANSPORT
+              value: "sse"
+            - name: TALOSCONFIG
+              value: "/etc/talos/talosconfig"
+          volumeMounts:
+            - name: talos-config
+              mountPath: /etc/talos
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: talos-config
+          secret:
+            secretName: talos-config
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infrastructure-mcp
+  namespace: ai-platform
+  labels:
+    app: infrastructure-mcp
+    component: mcp
+spec:
+  selector:
+    app: infrastructure-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
