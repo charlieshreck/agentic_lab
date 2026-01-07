@@ -49,13 +49,13 @@ variable "node_hostname" {
 variable "talos_version" {
   description = "Talos Linux version"
   type        = string
-  default     = "v1.8.1"  # Check https://github.com/siderolabs/talos/releases for latest
+  default     = "v1.11.5"  # Matches Factory ISO version
 }
 
 variable "kubernetes_version" {
   description = "Kubernetes version"
   type        = string
-  default     = "v1.31.1"  # Compatible K8s version for Talos 1.8
+  default     = "v1.34.1"  # Compatible K8s version for Talos 1.11
 }
 
 # Disk Configuration
@@ -69,6 +69,19 @@ variable "disk_min_size" {
   description = "Minimum disk size in GB (for diskSelector)"
   type        = number
   default     = 400  # UM690L has 1.5TB NVMe
+}
+
+# Storage Disk Configuration
+variable "storage_disk" {
+  description = "Disk device path for persistent storage (1TB drive)"
+  type        = string
+  default     = "/dev/nvme0n1"  # 1TB drive for data
+}
+
+variable "storage_disk_min_size" {
+  description = "Minimum size for storage disk validation (in GB)"
+  type        = number
+  default     = 900  # 1TB drive should be >900GB
 }
 
 # GitOps Configuration

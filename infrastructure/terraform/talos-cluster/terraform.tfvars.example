@@ -15,12 +15,15 @@ dns_servers       = ["1.1.1.1", "8.8.8.8"]
 # Cluster Configuration
 cluster_name    = "agentic-platform"
 node_hostname   = "agentic-01"
-talos_version   = "v1.8.1"       # https://github.com/siderolabs/talos/releases
-kubernetes_version = "v1.31.1"   # Compatible with Talos 1.8.x
+talos_version   = "v1.11.5"      # https://github.com/siderolabs/talos/releases
+kubernetes_version = "v1.34.1"   # Compatible with Talos 1.11.x
 
 # Disk Configuration
-install_disk    = "/dev/nvme0n1"  # Check during maintenance mode: talosctl disks
-disk_min_size   = 400             # Minimum 400GB (UM690L has 1.5TB)
+install_disk    = "/dev/nvme1n1"  # 256GB OS drive
+disk_min_size   = 200             # Minimum 200GB for OS disk
+
+storage_disk          = "/dev/nvme0n1"  # 1TB data drive
+storage_disk_min_size = 900             # Validate >900GB for 1TB drive
 
 # GitOps Repository
 gitops_repo_url    = "https://github.com/charlieshreck/agentic_lab.git"
@@ -31,17 +34,20 @@ gitops_repo_branch = "main"
 # ============================================================================
 # CPU: AMD Ryzen 9 6900HX (8C/16T)
 # RAM: 32GB DDR5-4800
-# Storage: 1.5TB NVMe (typically shows as /dev/nvme0n1)
+# Storage: Dual NVMe drives
+#   - /dev/nvme1n1: 256GB (OS/system)
+#   - /dev/nvme0n1: 1TB (persistent data)
 # GPU: Radeon 680M (RDNA2, built-in - will be enabled for Ollama)
 # Network: 2x 2.5GbE (eth0 and eth1, typically only eth0 needed)
 #
 # ============================================================================
 # Pre-Deployment Checklist
 # ============================================================================
-# 1. Download Talos ISO:
-#    https://github.com/siderolabs/talos/releases/download/v1.8.1/metal-amd64.iso
+# 1. Download Talos ISO (use Factory schematic for AMD GPU support):
+#    https://factory.talos.dev/image/d9d97f8dca41cb2d47f2b5b6a34ea45725381bfd0b9b6a34b686418ef6682591/v1.11.5/metal-amd64.iso
+#    This includes: AMD GPU driver, AMD microcode, iSCSI tools
 #
-# 2. Flash to USB drive:
+# 2. Flash to USB drive (Windows: use Rufus, Linux: use dd):
 #    dd if=metal-amd64.iso of=/dev/sdX bs=4M status=progress && sync
 #
 # 3. Boot UM690L from USB
@@ -75,16 +81,23 @@ gitops_repo_branch = "main"
 # ============================================================================
 # Disk Selection
 # ============================================================================
-# To verify disk path after booting Talos ISO:
+# To verify disk paths after booting Talos ISO:
 #
 # talosctl -n <dhcp-ip> disks
 #
-# Common patterns:
-# - NVMe: /dev/nvme0n1, /dev/nvme1n1, etc.
-# - SATA SSD: /dev/sda, /dev/sdb, etc.
-# - M.2 NVMe: Usually nvme0n1
+# ⚠️ CRITICAL: Always verify disk sizes before setting variables!
 #
-# UM690L typically has:
-# - Single 1.5TB NVMe: /dev/nvme0n1
+# UM690L has dual NVMe drives:
+#   - /dev/nvme1n1: 256GB (install_disk for OS)
+#   - /dev/nvme0n1: 1TB (storage_disk for persistent data)
+#
+# Storage Configuration:
+#   - install_disk: OS installation (Talos Linux)
+#   - storage_disk: Persistent data mounted at /var/mnt/storage
+#     - Used by Local Path Provisioner for PVCs
+#     - Stores: Ollama models, Qdrant vectors, PostgreSQL data, etc.
+#
+# Talos only persists /var directory, so storage MUST be mounted at
+# /var/mnt/storage (not /mnt/storage) to survive reboots.
 #
 # ============================================================================

@@ -98,3 +98,15 @@ output "next_steps" {
     - Disk check: talosctl disks --nodes ${var.node_ip}
   EOT
 }
+
+output "storage_configuration" {
+  description = "Storage disk configuration summary"
+  value = {
+    os_disk       = var.install_disk
+    os_size_min   = var.disk_min_size
+    data_disk     = var.storage_disk
+    data_size_min = var.storage_disk_min_size
+    mount_point   = "/var/mnt/storage"
+    warning       = "VERIFY: OS=${var.install_disk} (256GB), DATA=${var.storage_disk} (1TB)"
+  }
+}

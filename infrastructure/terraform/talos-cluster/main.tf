@@ -38,9 +38,6 @@ data "talos_machine_configuration" "this" {
   talos_version      = var.talos_version
   kubernetes_version = var.kubernetes_version
 
-  docs_enabled     = false
-  examples_enabled = false
-
   config_patches = [
     yamlencode({
       machine = {
@@ -90,6 +87,29 @@ data "talos_machine_configuration" "this" {
         # Proxy configuration
         proxy = {
           disabled = false
+        }
+      }
+    }),
+
+    # Storage disk configuration patch
+    yamlencode({
+      machine = {
+        # Format and mount 1TB data drive
+        disks = [{
+          device = var.storage_disk  # /dev/nvme0n1 (1TB)
+          partitions = [{
+            mountpoint = "/var/mnt/storage"
+          }]
+        }]
+
+        # Kubelet configuration for mount propagation (CRITICAL!)
+        kubelet = {
+          extraMounts = [{
+            destination = "/var/mnt/storage"
+            type        = "bind"
+            source      = "/var/mnt/storage"
+            options     = ["bind", "rshared", "rw"]
+          }]
         }
       }
     })
@@ -143,11 +163,6 @@ data "talos_cluster_kubeconfig" "this" {
   depends_on = [
     talos_machine_bootstrap.this
   ]
-
-  # Wait for control plane to be ready
-  timeouts {
-    read = "5m"
-  }
 }
 
 # Save kubeconfig to file
