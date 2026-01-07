@@ -5,7 +5,7 @@ namespace: ai-platform
 
 resources:
   - configmap.yaml
-  - secret.yaml
+  - infisical-secrets.yaml
   - infrastructure-mcp.yaml
   - knowledge-mcp.yaml
   - home-assistant-mcp.yaml

@@ -159,29 +159,26 @@ spec:
             - name: PORT
               value: "8000"
             - name: SONARR_URL
-              valueFrom:
-                secretKeyRef:
-                  name: mcp-secrets
-                  key: sonarr-url
-                  optional: true
+              value: "https://sonarr.kernow.io"
             - name: SONARR_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: mcp-secrets
-                  key: sonarr-api-key
-                  optional: true
+                  name: mcp-sonarr
+                  key: API_KEY
             - name: RADARR_URL
-              valueFrom:
-                secretKeyRef:
-                  name: mcp-secrets
-                  key: radarr-url
-                  optional: true
+              value: "https://radarr.kernow.io"
             - name: RADARR_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: mcp-secrets
-                  key: radarr-api-key
-                  optional: true
+                  name: mcp-radarr
+                  key: API_KEY
+            - name: PROWLARR_URL
+              value: "https://prowlarr.kernow.io"
+            - name: PROWLARR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-prowlarr
+                  key: API_KEY
           volumeMounts:
             - name: code
               mountPath: /code
