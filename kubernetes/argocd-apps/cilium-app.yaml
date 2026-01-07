@@ -11,9 +11,46 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/charlieshreck/agentic_lab.git
-    targetRevision: main
-    path: kubernetes/platform/cilium
+    repoURL: https://helm.cilium.io/
+    chart: cilium
+    targetRevision: 1.16.5
+    helm:
+      releaseName: cilium
+      values: |
+        # Talos Linux specific settings
+        ipam:
+          mode: kubernetes
+        kubeProxyReplacement: true
+        k8sServiceHost: localhost
+        k8sServicePort: 7445
+        # Talos cgroup settings
+        cgroup:
+          autoMount:
+            enabled: false
+          hostRoot: /sys/fs/cgroup
+        # Security context for Talos
+        securityContext:
+          privileged: true
+          capabilities:
+            ciliumAgent:
+              - CHOWN
+              - KILL
+              - NET_ADMIN
+              - NET_RAW
+              - IPC_LOCK
+              - SYS_ADMIN
+              - SYS_RESOURCE
+              - DAC_OVERRIDE
+              - FOWNER
+              - SETGID
+              - SETUID
+            cleanCiliumState:
+              - NET_ADMIN
+              - SYS_ADMIN
+              - SYS_RESOURCE
+        # Operator settings
+        operator:
+          replicas: 1
   destination:
     server: https://10.20.0.40:6443  # Agentic cluster API server
     namespace: kube-system
