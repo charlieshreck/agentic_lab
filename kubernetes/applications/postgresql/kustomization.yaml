@@ -4,7 +4,6 @@ kind: Kustomization
 namespace: ai-platform
 
 resources:
-  - namespace.yaml
   - statefulset.yaml
   - service.yaml
-  - init-collections-job.yaml
+  - secret.yaml

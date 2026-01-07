@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qdrant-init-collections
+  namespace: ai-platform
+  labels:
+    app: qdrant
+    component: init
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: init
+        image: curlimages/curl:8.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          QDRANT_URL="http://qdrant:6333"
+
+          echo "Creating 'runbooks' collection..."
+          curl -s -X PUT "${QDRANT_URL}/collections/runbooks" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "vectors": {
+                "size": 768,
+                "distance": "Cosine"
+              },
+              "on_disk_payload": true
+            }'
+
+          echo ""
+          echo "Creating 'decisions' collection..."
+          curl -s -X PUT "${QDRANT_URL}/collections/decisions" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "vectors": {
+                "size": 768,
+                "distance": "Cosine"
+              },
+              "on_disk_payload": true
+            }'
+
+          echo ""
+          echo "Creating 'documentation' collection..."
+          curl -s -X PUT "${QDRANT_URL}/collections/documentation" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "vectors": {
+                "size": 768,
+                "distance": "Cosine"
+              },
+              "on_disk_payload": true
+            }'
+
+          echo ""
+          echo "Creating 'agent_events' collection..."
+          curl -s -X PUT "${QDRANT_URL}/collections/agent_events" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "vectors": {
+                "size": 768,
+                "distance": "Cosine"
+              },
+              "on_disk_payload": true
+            }'
+
+          echo ""
+          echo "Verifying collections..."
+          curl -s "${QDRANT_URL}/collections" | grep -o '"name":"[^"]*"'
+          echo ""
+          echo "Done!"
