@@ -12,7 +12,7 @@ spec:
     targetRevision: main
     path: kubernetes/applications/qdrant
   destination:
-    server: https://10.20.0.40:6443
+    server: https://10.20.0.40:6443  # Agentic cluster API server
     namespace: ai-platform
   syncPolicy:
     automated:

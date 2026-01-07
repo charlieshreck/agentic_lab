@@ -12,7 +12,7 @@ spec:
     targetRevision: main
     path: kubernetes/platform/local-path-provisioner
   destination:
-    server: https://10.20.0.40:6443
+    server: https://10.20.0.40:6443  # Agentic cluster API server
     namespace: local-path-storage
   syncPolicy:
     automated:

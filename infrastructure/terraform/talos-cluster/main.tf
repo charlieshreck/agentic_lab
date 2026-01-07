@@ -42,11 +42,11 @@ data "talos_machine_configuration" "this" {
     yamlencode({
       machine = {
         install = {
-          disk  = var.install_disk
           image = "ghcr.io/siderolabs/installer:${var.talos_version}"
-          # Use entire disk for OS
+          wipe  = true  # Force clean install
+          # Use stable disk selector by model name (survives reboots)
           diskSelector = {
-            size = ">= ${var.disk_min_size}GB"
+            model = "Samsung*"  # 250GB Samsung SSD for OS
           }
         }
         network = {
@@ -61,12 +61,13 @@ data "talos_machine_configuration" "this" {
           }]
           nameservers = var.dns_servers
         }
-        # AMD GPU support for Ollama
-        kernel = {
-          modules = [{
-            name = "amdgpu"
-          }]
-        }
+        # NOTE: amdgpu module requires custom Talos extension
+        # Uncomment when using factory.talos.dev image with AMD GPU extension
+        # kernel = {
+        #   modules = [{
+        #     name = "amdgpu"
+        #   }]
+        # }
         sysctls = {
           # Optimize for AI workloads
           "vm.max_map_count" = "262144"  # For Qdrant
@@ -92,11 +93,15 @@ data "talos_machine_configuration" "this" {
     }),
 
     # Storage disk configuration patch
+    # NOTE: NVMe disk names can swap on reboot - current mapping:
+    # nvme0n1 = 1TB Kingston (storage), nvme1n1 = 250GB Samsung (OS)
     yamlencode({
       machine = {
         # Format and mount 1TB data drive
+        # Using /dev/disk/by-id/ paths for stability would be ideal
+        # but Talos requires device path. We'll handle this post-install.
         disks = [{
-          device = var.storage_disk  # /dev/nvme0n1 (1TB)
+          device = "/dev/nvme0n1"  # 1TB Kingston (current mapping)
           partitions = [{
             mountpoint = "/var/mnt/storage"
           }]

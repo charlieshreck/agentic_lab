@@ -19,7 +19,7 @@ spec:
       targetRevision: main
       path: kubernetes/platform/infisical/resources
   destination:
-    server: https://10.20.0.40:6443
+    server: https://10.20.0.40:6443  # Agentic cluster API server
     namespace: infisical-operator-system
   syncPolicy:
     automated:
