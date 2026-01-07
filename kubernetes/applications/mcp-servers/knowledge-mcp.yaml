@@ -1,3 +1,114 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: knowledge-mcp-code
+  namespace: ai-platform
+  labels:
+    app: knowledge-mcp
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """Knowledge MCP server for Qdrant vector database operations."""
+    import os
+    import logging
+    import httpx
+    from typing import List, Optional
+    from datetime import datetime, timezone
+    from fastmcp import FastMCP
+    from pydantic import BaseModel
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+
+    mcp = FastMCP(name="knowledge-mcp", instructions="MCP server for knowledge base operations.")
+
+    class SearchResult(BaseModel):
+        id: str
+        score: float
+        title: str
+        content: str
+
+    async def get_embedding(text: str) -> List[float]:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(f"{OLLAMA_URL}/api/embeddings", json={"model": EMBEDDING_MODEL, "prompt": text})
+            response.raise_for_status()
+            return response.json()["embedding"]
+
+    async def qdrant_search(collection: str, vector: List[float], limit: int = 5) -> List[dict]:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(f"{QDRANT_URL}/collections/{collection}/points/search", json={"vector": vector, "limit": limit, "with_payload": True})
+            response.raise_for_status()
+            return response.json().get("result", [])
+
+    async def qdrant_upsert(collection: str, points: List[dict]) -> bool:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.put(f"{QDRANT_URL}/collections/{collection}/points", json={"points": points})
+            return response.status_code == 200
+
+    @mcp.tool()
+    async def search_runbooks(query: str, limit: int = 5) -> List[SearchResult]:
+        """Search runbooks for solutions to issues."""
+        try:
+            vector = await get_embedding(query)
+            results = await qdrant_search("runbooks", vector, limit)
+            return [SearchResult(id=str(r.get("id")), score=r.get("score", 0), title=r.get("payload", {}).get("title", ""), content=r.get("payload", {}).get("solution", "")) for r in results if r.get("score", 0) >= 0.7]
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
+
+    @mcp.tool()
+    async def search_documentation(query: str, limit: int = 5) -> List[SearchResult]:
+        """Search documentation for information."""
+        try:
+            vector = await get_embedding(query)
+            results = await qdrant_search("documentation", vector, limit)
+            return [SearchResult(id=str(r.get("id")), score=r.get("score", 0), title=r.get("payload", {}).get("title", ""), content=r.get("payload", {}).get("content", "")) for r in results]
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
+
+    @mcp.tool()
+    async def add_runbook(title: str, trigger_pattern: str, solution: str) -> dict:
+        """Add a new runbook to the knowledge base."""
+        try:
+            import uuid
+            point_id = str(uuid.uuid4())
+            vector = await get_embedding(f"{title}\n{solution}")
+            point = {"id": point_id, "vector": vector, "payload": {"title": title, "trigger_pattern": trigger_pattern, "solution": solution, "created_at": datetime.now(timezone.utc).isoformat()}}
+            success = await qdrant_upsert("runbooks", [point])
+            return {"success": success, "id": point_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def get_similar_events(event_description: str, limit: int = 5) -> List[SearchResult]:
+        """Find similar historical events."""
+        try:
+            vector = await get_embedding(event_description)
+            results = await qdrant_search("agent_events", vector, limit)
+            return [SearchResult(id=str(r.get("id")), score=r.get("score", 0), title=r.get("payload", {}).get("event_type", ""), content=r.get("payload", {}).get("description", "")) for r in results if r.get("score", 0) >= 0.75]
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        logger.info(f"Starting knowledge MCP on port {port}")
+        mcp.run(transport="sse", host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    fastmcp>=2.7.0
+    pydantic>=2.11.0
+    httpx>=0.28.0
+    uvicorn>=0.34.0
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,23 +128,36 @@ spec:
         app: knowledge-mcp
         component: mcp
     spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
       containers:
         - name: mcp-server
-          image: ghcr.io/charlieshreck/agentic_lab/knowledge-mcp:latest
+          image: python:3.11-slim
+          command: ['sh', '-c', 'cd /app && PYTHONPATH=/app/deps python /code/main.py']
           ports:
             - containerPort: 8000
               name: http
           env:
             - name: PORT
               value: "8000"
-            - name: MCP_TRANSPORT
-              value: "sse"
             - name: QDRANT_URL
               value: "http://qdrant:6333"
             - name: OLLAMA_URL
               value: "http://ollama:11434"
             - name: EMBEDDING_MODEL
               value: "nomic-embed-text"
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
           resources:
             requests:
               memory: "128Mi"
@@ -41,20 +165,26 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "500m"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            timeoutSeconds: 5
           readinessProbe:
             httpGet:
-              path: /health
+              path: /sse
               port: 8000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /sse
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: code
+          configMap:
+            name: knowledge-mcp-code
+        - name: deps
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

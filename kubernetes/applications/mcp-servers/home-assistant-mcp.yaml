@@ -1,3 +1,106 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: home-assistant-mcp-code
+  namespace: ai-platform
+  labels:
+    app: home-assistant-mcp
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """Home Assistant MCP server for smart home control."""
+    import os
+    import logging
+    import httpx
+    from typing import List, Optional
+    from fastmcp import FastMCP
+    from pydantic import BaseModel
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    HA_URL = os.environ.get("HA_URL", "http://homeassistant.local:8123")
+    HA_TOKEN = os.environ.get("HA_TOKEN", "")
+
+    mcp = FastMCP(name="home-assistant-mcp", instructions="MCP server for Home Assistant smart home control.")
+
+    class LightState(BaseModel):
+        entity_id: str
+        friendly_name: str
+        state: str
+        brightness: Optional[int] = None
+
+    async def ha_request(method: str, endpoint: str, data: dict = None) -> dict:
+        if not HA_TOKEN:
+            return {"error": "HA_TOKEN not configured"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(method, f"{HA_URL}/api/{endpoint}", headers={"Authorization": f"Bearer {HA_TOKEN}"}, json=data)
+            response.raise_for_status()
+            return response.json() if response.content else {}
+
+    @mcp.tool()
+    async def list_lights() -> List[LightState]:
+        """List all light entities and their current state."""
+        try:
+            states = await ha_request("GET", "states")
+            return [LightState(entity_id=s["entity_id"], friendly_name=s.get("attributes", {}).get("friendly_name", s["entity_id"]), state=s["state"], brightness=s.get("attributes", {}).get("brightness")) for s in states if s["entity_id"].startswith("light.")]
+        except Exception as e:
+            logger.error(f"Failed: {e}")
+            return []
+
+    @mcp.tool()
+    async def turn_on_light(entity_id: str, brightness: Optional[int] = None) -> str:
+        """Turn on a light with optional brightness."""
+        try:
+            data = {"entity_id": entity_id}
+            if brightness:
+                data["brightness"] = min(255, max(0, brightness))
+            await ha_request("POST", "services/light/turn_on", data)
+            return f"Turned on {entity_id}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    @mcp.tool()
+    async def turn_off_light(entity_id: str) -> str:
+        """Turn off a light."""
+        try:
+            await ha_request("POST", "services/light/turn_off", {"entity_id": entity_id})
+            return f"Turned off {entity_id}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    @mcp.tool()
+    async def get_sensor_state(entity_id: str) -> dict:
+        """Get the current state of any sensor or entity."""
+        try:
+            state = await ha_request("GET", f"states/{entity_id}")
+            return {"entity_id": state["entity_id"], "state": state["state"], "attributes": state.get("attributes", {})}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def run_automation(automation_id: str) -> str:
+        """Trigger a Home Assistant automation."""
+        try:
+            await ha_request("POST", "services/automation/trigger", {"entity_id": automation_id})
+            return f"Triggered {automation_id}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        logger.info(f"Starting home-assistant MCP on port {port}")
+        mcp.run(transport="sse", host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    fastmcp>=2.7.0
+    pydantic>=2.11.0
+    httpx>=0.28.0
+    uvicorn>=0.34.0
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,17 +120,25 @@ spec:
         app: home-assistant-mcp
         component: mcp
     spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
       containers:
         - name: mcp-server
-          image: ghcr.io/charlieshreck/agentic_lab/home-assistant-mcp:latest
+          image: python:3.11-slim
+          command: ['sh', '-c', 'cd /app && PYTHONPATH=/app/deps python /code/main.py']
           ports:
             - containerPort: 8000
               name: http
           env:
             - name: PORT
               value: "8000"
-            - name: MCP_TRANSPORT
-              value: "sse"
             - name: HA_URL
               valueFrom:
                 secretKeyRef:
@@ -40,6 +151,11 @@ spec:
                   name: mcp-secrets
                   key: ha-token
                   optional: true
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
           resources:
             requests:
               memory: "128Mi"
@@ -47,20 +163,26 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "500m"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            timeoutSeconds: 5
           readinessProbe:
             httpGet:
-              path: /health
+              path: /sse
               port: 8000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /sse
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: code
+          configMap:
+            name: home-assistant-mcp-code
+        - name: deps
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

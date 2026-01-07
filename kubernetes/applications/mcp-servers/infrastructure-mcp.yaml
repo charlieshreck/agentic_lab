@@ -14,18 +14,15 @@ metadata:
   labels:
     app: infrastructure-mcp
 rules:
-  # Read-only access to common resources
   - apiGroups: [""]
     resources: ["pods", "pods/log", "services", "configmaps", "events", "namespaces", "nodes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
     verbs: ["get", "list", "watch"]
-  # Limited write access for deployments (restart only)
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["patch"]
-  # ArgoCD read access
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
     verbs: ["get", "list", "watch"]
@@ -44,6 +41,105 @@ subjects:
   - kind: ServiceAccount
     name: infrastructure-mcp
     namespace: ai-platform
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infrastructure-mcp-code
+  namespace: ai-platform
+  labels:
+    app: infrastructure-mcp
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """Infrastructure MCP server for Kubernetes and Talos management."""
+    import os
+    import subprocess
+    import json
+    import logging
+    from typing import List, Optional
+    from fastmcp import FastMCP
+    from pydantic import BaseModel
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    mcp = FastMCP(
+        name="infrastructure-mcp",
+        instructions="MCP server for Kubernetes cluster operations."
+    )
+
+    class PodInfo(BaseModel):
+        name: str
+        namespace: str
+        status: str
+        ready: bool
+        restarts: int
+
+    def run_kubectl(args: List[str], timeout: int = 30) -> tuple[str, str, int]:
+        try:
+            result = subprocess.run(["kubectl"] + args, capture_output=True, text=True, timeout=timeout)
+            return result.stdout, result.stderr, result.returncode
+        except Exception as e:
+            return "", str(e), 1
+
+    @mcp.tool()
+    async def kubectl_get_pods(namespace: str = "default", label_selector: Optional[str] = None) -> List[PodInfo]:
+        """Get pods in a Kubernetes namespace."""
+        args = ["get", "pods", "-n", namespace, "-o", "json"]
+        if label_selector:
+            args.extend(["-l", label_selector])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return []
+        try:
+            data = json.loads(stdout)
+            return [PodInfo(
+                name=pod["metadata"]["name"],
+                namespace=pod["metadata"]["namespace"],
+                status=pod["status"]["phase"],
+                ready=all(c.get("ready", False) for c in pod["status"].get("containerStatuses", [])),
+                restarts=sum(c.get("restartCount", 0) for c in pod["status"].get("containerStatuses", []))
+            ) for pod in data.get("items", [])]
+        except:
+            return []
+
+    @mcp.tool()
+    async def kubectl_logs(pod_name: str, namespace: str = "default", tail_lines: int = 50) -> str:
+        """Get logs from a Kubernetes pod."""
+        stdout, stderr, rc = run_kubectl(["logs", pod_name, "-n", namespace, f"--tail={tail_lines}"])
+        return stdout if rc == 0 else f"Error: {stderr}"
+
+    @mcp.tool()
+    async def kubectl_restart_deployment(deployment_name: str, namespace: str = "default") -> str:
+        """Restart a Kubernetes deployment."""
+        stdout, stderr, rc = run_kubectl(["rollout", "restart", "deployment", deployment_name, "-n", namespace])
+        return f"Restarted {deployment_name}" if rc == 0 else f"Error: {stderr}"
+
+    @mcp.tool()
+    async def kubectl_get_events(namespace: str = "default", limit: int = 20) -> List[dict]:
+        """Get Kubernetes events in a namespace."""
+        stdout, stderr, rc = run_kubectl(["get", "events", "-n", namespace, "-o", "json", "--sort-by=.lastTimestamp"])
+        if rc != 0:
+            return []
+        try:
+            data = json.loads(stdout)
+            return [{"type": e.get("type"), "reason": e.get("reason"), "message": e.get("message", "")[:100], "object": e.get("involvedObject", {}).get("name")} for e in data.get("items", [])[-limit:]]
+        except:
+            return []
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        logger.info(f"Starting infrastructure MCP on port {port}")
+        mcp.run(transport="sse", host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    fastmcp>=2.7.0
+    pydantic>=2.11.0
+    uvicorn>=0.34.0
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -65,49 +161,57 @@ spec:
         component: mcp
     spec:
       serviceAccountName: infrastructure-mcp
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
       containers:
         - name: mcp-server
-          image: ghcr.io/charlieshreck/agentic_lab/infrastructure-mcp:latest
+          image: python:3.11-slim
+          command: ['sh', '-c', 'apt-get update && apt-get install -y curl && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && chmod +x kubectl && mv kubectl /usr/local/bin/ && cd /app && PYTHONPATH=/app/deps python /code/main.py']
           ports:
             - containerPort: 8000
               name: http
           env:
             - name: PORT
               value: "8000"
-            - name: MCP_TRANSPORT
-              value: "sse"
-            - name: TALOSCONFIG
-              value: "/etc/talos/talosconfig"
           volumeMounts:
-            - name: talos-config
-              mountPath: /etc/talos
-              readOnly: true
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
           resources:
             requests:
-              memory: "128Mi"
+              memory: "256Mi"
               cpu: "100m"
             limits:
-              memory: "256Mi"
+              memory: "512Mi"
               cpu: "500m"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            timeoutSeconds: 5
           readinessProbe:
             httpGet:
-              path: /health
+              path: /sse
               port: 8000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /sse
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 5
       volumes:
-        - name: talos-config
-          secret:
-            secretName: talos-config
-            optional: true
+        - name: code
+          configMap:
+            name: infrastructure-mcp-code
+        - name: deps
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
