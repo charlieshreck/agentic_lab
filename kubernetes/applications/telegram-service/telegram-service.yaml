@@ -1,0 +1,430 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegram-service-code
+  namespace: ai-platform
+  labels:
+    app: telegram-service
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """Telegram Service for Human-in-the-Loop Workflows."""
+    import os
+    import logging
+    from typing import Optional
+    from datetime import datetime
+
+    from fastapi import FastAPI, Request, HTTPException
+    from pydantic import BaseModel
+    import httpx
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    FORUM_CHAT_ID = os.environ.get("TELEGRAM_FORUM_CHAT_ID", "")
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+    LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
+    KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
+
+    TELEGRAM_API = "https://api.telegram.org/bot" + BOT_TOKEN
+
+    topics = {}
+    app = FastAPI(title="Telegram Service")
+
+    class ApprovalRequest(BaseModel):
+        alert_id: str
+        alert: dict
+        solutions: list
+        context: dict
+        topic: str = "infrastructure"
+
+    class TelegramUpdate(BaseModel):
+        update_id: int
+        message: Optional[dict] = None
+        callback_query: Optional[dict] = None
+
+    async def telegram_request(method, data=None):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(TELEGRAM_API + "/" + method, json=data or {})
+                result = response.json()
+                if not result.get("ok"):
+                    logger.error("Telegram API error: %s", result)
+                return result
+            except Exception as e:
+                logger.error("Telegram request failed: %s", e)
+                return {"ok": False, "error": str(e)}
+
+    async def send_message(chat_id, text, topic_id=None, reply_markup=None, parse_mode="Markdown"):
+        data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+        if topic_id:
+            data["message_thread_id"] = topic_id
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        return await telegram_request("sendMessage", data)
+
+    async def create_forum_topic(name):
+        result = await telegram_request("createForumTopic", {"chat_id": FORUM_CHAT_ID, "name": name})
+        if result.get("ok"):
+            return result["result"]["message_thread_id"]
+        return 0
+
+    async def close_forum_topic(topic_id):
+        await telegram_request("closeForumTopic", {"chat_id": FORUM_CHAT_ID, "message_thread_id": topic_id})
+
+    async def initialize_standing_topics():
+        global topics
+        standing = [
+            {"key": "critical", "name": "Critical Alerts"},
+            {"key": "arr_suite", "name": "Arr Suite"},
+            {"key": "infrastructure", "name": "Infrastructure"},
+            {"key": "home_assistant", "name": "Home Assistant"},
+            {"key": "weekly_reports", "name": "Weekly Reports"},
+            {"key": "resolved", "name": "Resolved"}
+        ]
+        for topic in standing:
+            topics[topic["key"]] = {"name": topic["name"], "topic_id": 1}
+        logger.info("Initialized %d standing topics", len(topics))
+
+    async def build_approval_keyboard(alert_id, solutions):
+        buttons = []
+        row = []
+        for i, sol in enumerate(solutions, 1):
+            name = sol.get("name", "Option")[:12]
+            row.append({"text": str(i) + " " + name, "callback_data": "approve:" + alert_id + ":" + str(i)})
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([
+            {"text": "Ignore", "callback_data": "ignore:" + alert_id},
+            {"text": "Details", "callback_data": "details:" + alert_id}
+        ])
+        return {"inline_keyboard": buttons}
+
+    @app.on_event("startup")
+    async def startup():
+        await initialize_standing_topics()
+        if WEBHOOK_URL and BOT_TOKEN:
+            result = await telegram_request("setWebhook", {
+                "url": WEBHOOK_URL,
+                "allowed_updates": ["message", "callback_query"],
+                "drop_pending_updates": True
+            })
+            logger.info("Webhook registration: %s", result)
+
+    @app.post("/webhook/telegram")
+    async def telegram_webhook(request: Request):
+        try:
+            data = await request.json()
+            logger.info("Received update: %s", data.get("update_id"))
+            if "callback_query" in data:
+                await handle_callback(data["callback_query"])
+            elif "message" in data:
+                await handle_message(data["message"])
+            return {"ok": True}
+        except Exception as e:
+            logger.error("Webhook error: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def handle_callback(callback):
+        callback_id = callback["id"]
+        data = callback.get("data", "")
+        user = callback.get("from", {}).get("username", "unknown")
+        logger.info("Callback from @%s: %s", user, data)
+        await telegram_request("answerCallbackQuery", {"callback_query_id": callback_id})
+        parts = data.split(":")
+        action = parts[0]
+        alert_id = parts[1] if len(parts) > 1 else None
+        option = parts[2] if len(parts) > 2 else None
+        if action == "approve" and alert_id and option:
+            await process_approval(callback, alert_id, int(option), user)
+        elif action == "ignore" and alert_id:
+            await process_ignore(callback, alert_id, user)
+        elif action == "details" and alert_id:
+            await show_details(callback, alert_id)
+
+    async def process_approval(callback, alert_id, option, user):
+        message = callback.get("message", {})
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(
+                    LANGGRAPH_URL + "/approve",
+                    json={"alert_id": alert_id, "solution_index": option, "approved_by": user}
+                )
+                result = response.json()
+                await telegram_request("editMessageText", {
+                    "chat_id": message.get("chat", {}).get("id"),
+                    "message_id": message.get("message_id"),
+                    "text": message.get("text", "") + "\n\n*Approved by @" + user + "*: Option " + str(option),
+                    "parse_mode": "Markdown"
+                })
+                chat_id = message.get("chat", {}).get("id")
+                topic_id = message.get("message_thread_id")
+                if result.get("success"):
+                    summary = result.get("summary", "")
+                    runbook = result.get("runbook_id", "pending")
+                    await send_message(chat_id, "*Executed successfully*\n\n" + summary + "\n\nRunbook: `" + runbook + "`", topic_id=topic_id)
+                else:
+                    error = result.get("error", "Unknown error")
+                    await send_message(chat_id, "*Execution failed*\n\n" + error, topic_id=topic_id)
+            except Exception as e:
+                logger.error("Approval failed: %s", e)
+                await send_message(message.get("chat", {}).get("id"), "*Error processing approval*: " + str(e), topic_id=message.get("message_thread_id"))
+
+    async def process_ignore(callback, alert_id, user):
+        message = callback.get("message", {})
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(LANGGRAPH_URL + "/ignore", json={"alert_id": alert_id, "ignored_by": user})
+        await telegram_request("editMessageText", {
+            "chat_id": message.get("chat", {}).get("id"),
+            "message_id": message.get("message_id"),
+            "text": message.get("text", "") + "\n\n*Ignored by @" + user + "*",
+            "parse_mode": "Markdown"
+        })
+
+    async def show_details(callback, alert_id):
+        message = callback.get("message", {})
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(LANGGRAPH_URL + "/pending/" + alert_id)
+            pending = response.json()
+        if pending:
+            alert = pending.get("alert", {})
+            assessment = pending.get("assessment", {})
+            details = "*Details for Alert " + alert_id + "*\n\n"
+            details += "*Alert:* " + str(alert.get("alertname", "Unknown")) + "\n"
+            details += "*Severity:* " + str(alert.get("severity", "warning")) + "\n"
+            details += "*Namespace:* " + str(alert.get("namespace", "default")) + "\n"
+            details += "*Description:* " + str(alert.get("description", "N/A")) + "\n\n"
+            details += "*Assessment:*\n"
+            details += "- Domain: " + str(assessment.get("domain", "unknown")) + "\n"
+            details += "- Complexity: " + str(assessment.get("complexity", "unknown")) + "\n"
+            details += "- Similar runbook: " + str(assessment.get("similar_runbook", "none")) + "\n"
+            await send_message(message.get("chat", {}).get("id"), details, topic_id=message.get("message_thread_id"))
+        else:
+            await send_message(message.get("chat", {}).get("id"), "Alert " + alert_id + " not found or expired", topic_id=message.get("message_thread_id"))
+
+    async def handle_message(message):
+        text = message.get("text", "").lower().strip()
+        chat_id = message.get("chat", {}).get("id")
+        topic_id = message.get("message_thread_id")
+        if text == "status":
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(LANGGRAPH_URL + "/status")
+                status = response.json()
+            status_text = "*System Status*\n\n"
+            status_text += "*Pending Approvals:* " + str(status.get("pending_count", 0)) + "\n"
+            status_text += "*Auto-executed (24h):* " + str(status.get("auto_executed", 0)) + "\n"
+            status_text += "*Active Runbooks:* " + str(status.get("active_runbooks", 0)) + "\n"
+            status_text += "*Learning Queue:* " + str(status.get("learning_queue", 0)) + "\n"
+            await send_message(chat_id, status_text, topic_id=topic_id)
+        elif text == "help":
+            help_text = "*Available Commands*\n\n- `status` - Show system status\n- `help` - Show this help\n- Reply to approval messages with button clicks\n"
+            await send_message(chat_id, help_text, topic_id=topic_id)
+
+    @app.post("/approval")
+    async def send_approval_request(request: ApprovalRequest):
+        alert = request.alert
+        solutions = request.solutions
+        context = request.context
+        topic_key = request.topic
+        topic_id = topics.get(topic_key, {}).get("topic_id", 1)
+        text = "*" + str(alert.get("alertname", "Alert")) + "*\n\n"
+        text += str(alert.get("description", "")) + "\n\n"
+        similar = context.get("similar_runbook")
+        if similar:
+            similarity = str(context.get("similarity", 0))
+            text += "Similar to: `" + str(similar) + "` (" + similarity + "% match)\n\n"
+        text += "*Solutions:*\n"
+        for i, sol in enumerate(solutions, 1):
+            text += "\n" + str(i) + ". *" + str(sol.get("name", "Option")) + "*\n"
+            text += "   Impact: " + str(sol.get("impact", "unknown")) + "\n"
+            text += "   Risk: " + str(sol.get("risk", "unknown")) + "\n"
+        keyboard = await build_approval_keyboard(request.alert_id, solutions)
+        result = await send_message(FORUM_CHAT_ID, text, topic_id=topic_id, reply_markup=keyboard)
+        return {"message_id": result.get("result", {}).get("message_id"), "topic_id": topic_id}
+
+    @app.post("/notify")
+    async def send_notification(topic: str, message: str):
+        topic_id = topics.get(topic, {}).get("topic_id", 1)
+        result = await send_message(FORUM_CHAT_ID, message, topic_id=topic_id)
+        return {"ok": result.get("ok", False)}
+
+    @app.get("/health")
+    async def health():
+        return {"status": "healthy", "bot_configured": bool(BOT_TOKEN)}
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        logger.info("Starting Telegram service on port %d", port)
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    fastapi>=0.115.0
+    uvicorn>=0.34.0
+    httpx>=0.28.0
+    pydantic>=2.11.0
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegram-topic-policies
+  namespace: ai-platform
+  labels:
+    app: telegram-service
+data:
+  policies.yaml: |
+    standing_topics:
+      - key: critical
+        name: "Critical Alerts"
+        description: "High-priority alerts requiring immediate attention"
+        pinned: true
+      - key: arr_suite
+        name: "Arr Suite"
+        description: "Sonarr, Radarr, Prowlarr, SABnzbd notifications"
+        domains: ["sonarr", "radarr", "prowlarr", "sabnzbd", "plex"]
+      - key: infrastructure
+        name: "Infrastructure"
+        description: "Kubernetes, ArgoCD, storage, network"
+        domains: ["k8s", "argocd", "storage", "network", "proxmox", "talos"]
+      - key: home_assistant
+        name: "Home Assistant"
+        description: "Home automation, Tasmota, sensors"
+        domains: ["homeassistant", "tasmota", "mqtt", "zigbee"]
+      - key: weekly_reports
+        name: "Weekly Reports"
+        description: "Scheduled summaries and learning digests"
+      - key: resolved
+        name: "Resolved"
+        description: "Archive of closed incidents"
+    routing_rules:
+      - match:
+          alertname: ".*OOM.*|.*Memory.*"
+          namespace: "apps"
+        route_to: arr_suite
+      - match:
+          alertname: ".*"
+          severity: critical
+        route_to: critical
+      - match:
+          source: renovate
+        route_to: infrastructure
+      - match:
+          domain: homeassistant
+        route_to: home_assistant
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-service
+  namespace: ai-platform
+  labels:
+    app: telegram-service
+    component: hitl
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: telegram-service
+  template:
+    metadata:
+      labels:
+        app: telegram-service
+        component: hitl
+    spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+      containers:
+        - name: telegram-service
+          image: python:3.11-slim
+          command: ['sh', '-c', 'cd /app && PYTHONPATH=/app/deps python /code/main.py']
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-telegram
+                  key: BOT_TOKEN
+            - name: TELEGRAM_FORUM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-telegram
+                  key: FORUM_CHAT_ID
+            - name: WEBHOOK_URL
+              value: "https://telegram-webhook.kernow.io/webhook/telegram"
+            - name: LANGGRAPH_URL
+              value: "http://langgraph:8000"
+            - name: KNOWLEDGE_MCP_URL
+              value: "http://knowledge-mcp:8000"
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+            - name: policies
+              mountPath: /config
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: code
+          configMap:
+            name: telegram-service-code
+        - name: deps
+          emptyDir: {}
+        - name: policies
+          configMap:
+            name: telegram-topic-policies
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-service
+  namespace: ai-platform
+  labels:
+    app: telegram-service
+    component: hitl
+spec:
+  selector:
+    app: telegram-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

@@ -1,0 +1,454 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langgraph-code
+  namespace: ai-platform
+  labels:
+    app: langgraph
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """LangGraph Orchestrator for Agentic AI Platform."""
+    import os
+    import logging
+    import json
+    from typing import TypedDict, Annotated, Sequence, Optional
+    from datetime import datetime
+    import httpx
+
+    from langgraph.graph import StateGraph, END
+    from langchain_core.messages import BaseMessage
+
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    POSTGRES_URL = os.environ.get("POSTGRES_URL", "postgresql://postgres:postgres@postgres:5432/langgraph")
+    REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
+    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
+    INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
+    TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
+
+    class AgentState(TypedDict):
+        messages: Annotated[Sequence[BaseMessage], lambda x, y: x + y]
+        alert: dict
+        assessment: dict
+        solutions: list
+        selected_solution: dict
+        approval_status: str
+        execution_result: dict
+        runbook_id: str
+        topic_id: int
+        thread_id: str
+
+    pending_approvals = {}
+    app = FastAPI(title="LangGraph Orchestrator")
+
+    class AlertInput(BaseModel):
+        id: str
+        alertname: str
+        severity: str = "warning"
+        namespace: str = "default"
+        description: str = ""
+        labels: Optional[dict] = None
+        annotations: Optional[dict] = None
+
+    class ApprovalRequest(BaseModel):
+        alert_id: str
+        solution_index: int
+        approved_by: str
+
+    class IgnoreRequest(BaseModel):
+        alert_id: str
+        ignored_by: str
+
+    async def call_litellm(messages, model="local/qwen2.5:7b"):
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.post(
+                    LITELLM_URL + "/v1/chat/completions",
+                    json={"model": model, "messages": messages}
+                )
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                logger.error("LiteLLM call failed: %s", e)
+                return "Error: " + str(e)
+
+    async def call_knowledge_mcp(endpoint, method="GET", data=None):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                url = KNOWLEDGE_MCP_URL + "/" + endpoint
+                if method == "GET":
+                    response = await client.get(url)
+                else:
+                    response = await client.post(url, json=data)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error("Knowledge MCP call failed: %s", e)
+                return {"error": str(e)}
+
+    async def call_telegram(endpoint, data):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(TELEGRAM_SERVICE_URL + "/" + endpoint, json=data)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error("Telegram service call failed: %s", e)
+                return {"error": str(e)}
+
+    def build_assessment_prompt(alert, similar):
+        return """Analyze this alert and provide assessment:
+    Alert: """ + str(alert.get("alertname", "unknown")) + """
+    Severity: """ + str(alert.get("severity", "warning")) + """
+    Description: """ + str(alert.get("description", "")) + """
+    Namespace: """ + str(alert.get("namespace", "default")) + """
+
+    Similar runbooks found: """ + str(similar) + """
+
+    Respond with JSON containing: domain, complexity, requires_approval, similar_runbook, similarity_score, recommended_topic"""
+
+    def build_solutions_prompt(alert, assessment):
+        return """Generate 2-3 solutions for this alert:
+    Alert: """ + str(alert.get("alertname", "unknown")) + """
+    Description: """ + str(alert.get("description", "")) + """
+    Assessment: """ + str(assessment) + """
+
+    Respond with JSON array containing objects with: name, description, impact, risk, commands"""
+
+    async def assess_alert(state):
+        alert = state["alert"]
+        similar = await call_knowledge_mcp("search", "POST", {
+            "collection": "runbooks",
+            "query": str(alert.get("alertname", "")) + " " + str(alert.get("description", "")),
+            "limit": 3
+        })
+        prompt = build_assessment_prompt(alert, similar)
+        result = await call_litellm([{"role": "user", "content": prompt}])
+        try:
+            assessment = json.loads(result.strip().replace("```json", "").replace("```", ""))
+        except:
+            assessment = {
+                "domain": "infrastructure",
+                "complexity": "medium",
+                "requires_approval": True,
+                "similar_runbook": None,
+                "similarity_score": 0,
+                "recommended_topic": "infrastructure"
+            }
+        return {"assessment": assessment}
+
+    async def generate_solutions(state):
+        alert = state["alert"]
+        assessment = state["assessment"]
+        prompt = build_solutions_prompt(alert, assessment)
+        result = await call_litellm([{"role": "user", "content": prompt}])
+        try:
+            solutions = json.loads(result.strip().replace("```json", "").replace("```", ""))
+        except:
+            solutions = [{
+                "name": "Manual Investigation",
+                "description": "Investigate the issue manually",
+                "impact": "low",
+                "risk": "low",
+                "commands": []
+            }]
+        return {"solutions": solutions}
+
+    async def request_approval(state):
+        alert = state["alert"]
+        solutions = state["solutions"]
+        assessment = state["assessment"]
+        pending_approvals[alert["id"]] = {
+            "alert": alert,
+            "solutions": solutions,
+            "assessment": assessment,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        result = await call_telegram("approval", {
+            "alert_id": alert["id"],
+            "alert": alert,
+            "solutions": solutions,
+            "context": {
+                "similar_runbook": assessment.get("similar_runbook"),
+                "similarity": assessment.get("similarity_score", 0)
+            },
+            "topic": assessment.get("recommended_topic", "infrastructure")
+        })
+        return {"approval_status": "pending", "topic_id": result.get("topic_id", 0)}
+
+    async def execute_solution(state):
+        solution = state["selected_solution"]
+        if not solution or not solution.get("commands"):
+            return {"execution_result": {"success": False, "error": "No commands to execute"}}
+        results = []
+        for cmd in solution["commands"]:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                try:
+                    response = await client.post(
+                        INFRASTRUCTURE_MCP_URL + "/execute",
+                        json={"command": cmd}
+                    )
+                    results.append(response.json())
+                except Exception as e:
+                    results.append({"error": str(e)})
+        success = all(r.get("success", False) or "error" not in r for r in results)
+        return {"execution_result": {"success": success, "results": results, "summary": "Executed " + str(len(results)) + " commands"}}
+
+    async def record_outcome(state):
+        await call_knowledge_mcp("record", "POST", {
+            "collection": "decisions",
+            "data": {
+                "alert_id": state["alert"]["id"],
+                "alert": state["alert"],
+                "assessment": state["assessment"],
+                "solution": state["selected_solution"],
+                "result": state["execution_result"],
+                "approval_status": state["approval_status"],
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        })
+        return {}
+
+    def should_request_approval(state):
+        assessment = state.get("assessment", {})
+        if assessment.get("requires_approval", True):
+            return "request_approval"
+        return "execute_solution"
+
+    def create_workflow():
+        workflow = StateGraph(AgentState)
+        workflow.add_node("assess_alert", assess_alert)
+        workflow.add_node("generate_solutions", generate_solutions)
+        workflow.add_node("request_approval", request_approval)
+        workflow.add_node("execute_solution", execute_solution)
+        workflow.add_node("record_outcome", record_outcome)
+        workflow.set_entry_point("assess_alert")
+        workflow.add_edge("assess_alert", "generate_solutions")
+        workflow.add_conditional_edges(
+            "generate_solutions",
+            should_request_approval,
+            {"request_approval": "request_approval", "execute_solution": "execute_solution"}
+        )
+        workflow.add_edge("request_approval", "record_outcome")
+        workflow.add_edge("execute_solution", "record_outcome")
+        workflow.add_edge("record_outcome", END)
+        return workflow.compile()
+
+    graph = create_workflow()
+
+    @app.post("/alert")
+    async def process_alert(alert: AlertInput):
+        alert_dict = alert.model_dump()
+        alert_dict["id"] = alert_dict.get("id") or "alert-" + datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        initial_state = {
+            "messages": [],
+            "alert": alert_dict,
+            "assessment": {},
+            "solutions": [],
+            "selected_solution": {},
+            "approval_status": "pending",
+            "execution_result": {},
+            "runbook_id": "",
+            "topic_id": 0,
+            "thread_id": alert_dict["id"]
+        }
+        try:
+            result = await graph.ainvoke(initial_state)
+            return {
+                "alert_id": alert_dict["id"],
+                "status": result.get("approval_status", "pending"),
+                "assessment": result.get("assessment", {}),
+                "solutions_count": len(result.get("solutions", []))
+            }
+        except Exception as e:
+            logger.error("Graph execution failed: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/approve")
+    async def approve_action(request: ApprovalRequest):
+        if request.alert_id not in pending_approvals:
+            raise HTTPException(status_code=404, detail="Approval not found or expired")
+        pending = pending_approvals[request.alert_id]
+        solutions = pending["solutions"]
+        if request.solution_index < 1 or request.solution_index > len(solutions):
+            raise HTTPException(status_code=400, detail="Invalid solution index")
+        selected = solutions[request.solution_index - 1]
+        state = {
+            "messages": [],
+            "alert": pending["alert"],
+            "assessment": pending["assessment"],
+            "solutions": solutions,
+            "selected_solution": selected,
+            "approval_status": "approved",
+            "execution_result": {},
+            "runbook_id": "",
+            "topic_id": 0,
+            "thread_id": request.alert_id
+        }
+        result = await execute_solution(state)
+        state.update(result)
+        await record_outcome(state)
+        del pending_approvals[request.alert_id]
+        return {
+            "success": result["execution_result"].get("success", False),
+            "summary": result["execution_result"].get("summary", ""),
+            "runbook_id": "runbook-" + request.alert_id[:8]
+        }
+
+    @app.post("/ignore")
+    async def ignore_action(request: IgnoreRequest):
+        if request.alert_id in pending_approvals:
+            pending = pending_approvals[request.alert_id]
+            await call_knowledge_mcp("record", "POST", {
+                "collection": "decisions",
+                "data": {
+                    "alert_id": request.alert_id,
+                    "alert": pending["alert"],
+                    "action": "ignored",
+                    "ignored_by": request.ignored_by,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            })
+            del pending_approvals[request.alert_id]
+        return {"status": "ignored"}
+
+    @app.get("/pending/{alert_id}")
+    async def get_pending(alert_id: str):
+        if alert_id not in pending_approvals:
+            return None
+        return pending_approvals[alert_id]
+
+    @app.get("/status")
+    async def get_status():
+        return {"pending_count": len(pending_approvals), "auto_executed": 0, "active_runbooks": 0, "learning_queue": 0}
+
+    @app.get("/health")
+    async def health():
+        return {"status": "healthy"}
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        logger.info("Starting LangGraph orchestrator on port %d", port)
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    langgraph>=0.2.0
+    langchain-core>=0.3.0
+    langchain-openai>=0.2.0
+    asyncpg>=0.30.0
+    psycopg>=3.2.0
+    psycopg-pool>=3.2.0
+    redis>=5.2.0
+    fastapi>=0.115.0
+    uvicorn>=0.34.0
+    httpx>=0.28.0
+    pydantic>=2.11.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langgraph
+  namespace: ai-platform
+  labels:
+    app: langgraph
+    component: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langgraph
+  template:
+    metadata:
+      labels:
+        app: langgraph
+        component: orchestrator
+    spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+      containers:
+        - name: langgraph
+          image: python:3.11-slim
+          command: ['sh', '-c', 'cd /app && PYTHONPATH=/app/deps python /code/main.py']
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: POSTGRES_URL
+              value: "postgresql://postgres:postgres@postgres:5432/langgraph"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+            - name: LITELLM_URL
+              value: "http://litellm:4000"
+            - name: KNOWLEDGE_MCP_URL
+              value: "http://knowledge-mcp:8000"
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp:8000"
+            - name: TELEGRAM_SERVICE_URL
+              value: "http://telegram-service:8000"
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: code
+          configMap:
+            name: langgraph-code
+        - name: deps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langgraph
+  namespace: ai-platform
+  labels:
+    app: langgraph
+    component: orchestrator
+spec:
+  selector:
+    app: langgraph
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
