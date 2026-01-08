@@ -908,12 +908,96 @@ data:
             logger.warning(f"Failed to parse runbook from Claude: {e}")
             return None
 
-    async def call_claude_agent(prompt: str, context: dict = None, allowed_tools: list = None):
+    # Priority levels (match claude-agent values)
+    PRIORITY_USER = 1       # User-initiated requests (highest)
+    PRIORITY_CRITICAL = 2   # Critical alerts
+    PRIORITY_WARNING = 3    # Warning alerts
+    PRIORITY_LOW = 4        # Background tasks (lowest)
+
+    def severity_to_priority(severity: str) -> int:
+        """Map alert severity to queue priority."""
+        mapping = {
+            "critical": PRIORITY_CRITICAL,
+            "error": PRIORITY_CRITICAL,
+            "warning": PRIORITY_WARNING,
+            "info": PRIORITY_LOW,
+        }
+        return mapping.get(severity.lower(), PRIORITY_WARNING)
+
+    async def queue_claude_task(prompt: str, priority: int = PRIORITY_LOW, context: dict = None,
+                                allowed_tools: list = None, timeout: int = 600) -> str:
+        """
+        Queue a task for Claude Agent with priority.
+        Returns task_id for polling status.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "prompt": prompt,
+                "priority": priority,
+                "context": context or {},
+                "allowed_tools": allowed_tools or ["Read", "Glob", "Grep", "Bash", "WebSearch"],
+                "working_directory": "/workspace",
+                "timeout": timeout,
+            }
+            response = await client.post(
+                CLAUDE_AGENT_URL + "/queue/submit",
+                json=payload
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("task_id")
+
+    async def poll_task_status(task_id: str, poll_interval: float = 2.0, max_wait: float = 600.0) -> dict:
+        """
+        Poll for task completion.
+        Returns task result dict with status, result, error fields.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            elapsed = 0.0
+            while elapsed < max_wait:
+                response = await client.get(f"{CLAUDE_AGENT_URL}/task/{task_id}")
+                response.raise_for_status()
+                task = response.json()
+                if task.get("status") in ["completed", "failed"]:
+                    return task
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+            return {"status": "timeout", "error": f"Task did not complete within {max_wait}s"}
+
+    async def call_claude_agent(prompt: str, context: dict = None, allowed_tools: list = None,
+                                priority: int = None, use_queue: bool = False, timeout: int = 300):
         """
         Call Claude Agent for complex agentic tasks.
+
+        Args:
+            prompt: The task prompt
+            context: Optional context dict
+            allowed_tools: List of allowed tools
+            priority: Queue priority (1=user, 2=critical, 3=warning, 4=low). If set, enables queue mode.
+            use_queue: If True, use priority queue (async) instead of sync mode
+            timeout: Timeout in seconds
+
         Uses subscription-based Claude Code for full tool access.
         """
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # If priority is set or use_queue is True, use async queue mode
+        if priority is not None or use_queue:
+            priority = priority or PRIORITY_LOW
+            try:
+                task_id = await queue_claude_task(prompt, priority, context, allowed_tools, timeout)
+                logger.info(f"Queued Claude task {task_id} with priority {priority}")
+                result = await poll_task_status(task_id, max_wait=float(timeout))
+                if result.get("status") == "completed":
+                    return result.get("result", "")
+                else:
+                    error = result.get("error", "Task failed or timed out")
+                    logger.error(f"Claude task {task_id} failed: {error}")
+                    return f"Error: {error}"
+            except Exception as e:
+                logger.error(f"Claude queue failed: {e}")
+                return await call_litellm([{"role": "user", "content": prompt}])
+
+        # Sync mode - direct call (for interactive/user requests)
+        async with httpx.AsyncClient(timeout=float(timeout)) as client:
             try:
                 payload = {
                     "prompt": prompt,
@@ -1088,6 +1172,8 @@ data:
                 logger.info(f"Escalating to Claude: {executor_result.get('escalation_reason')}")
                 escalation_msg = executor_result.get("escalation_message", "")
 
+                # Use priority queue based on alert severity
+                severity = alert.get("severity", "warning")
                 result = await call_claude_agent(
                     escalation_msg,
                     context={
@@ -1096,7 +1182,8 @@ data:
                         "gathered_info": executor_result.get("gathered_info", {}),
                         "diagnosis": executor_result.get("diagnosis", {})
                     },
-                    allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch"]
+                    allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch"],
+                    priority=severity_to_priority(severity)
                 )
 
                 # Parse and store new runbook from Claude
@@ -1149,10 +1236,13 @@ data:
         escalation_prompt += '"validation": [{"name": "...", "command": "...", "expected": "..."}]}\n\n'
         escalation_prompt += "Provide your analysis first, then the runbook JSON."
 
+        # Use priority queue based on alert severity
+        severity = alert.get("severity", "warning")
         result = await call_claude_agent(
             escalation_prompt,
             context={"alert": alert},
-            allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch"]
+            allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch"],
+            priority=severity_to_priority(severity)
         )
 
         # Parse and store new runbook from Claude
@@ -1438,12 +1528,14 @@ data:
         """
         Direct query endpoint for LLM access.
         Routes to Claude Agent or local LLM based on use_claude flag.
+        User requests get highest priority in queue.
         """
         if request.use_claude:
             result = await call_claude_agent(
                 request.prompt,
                 context=request.context,
-                allowed_tools=["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+                allowed_tools=["Read", "Glob", "Grep", "WebSearch", "WebFetch"],
+                priority=PRIORITY_USER  # User requests get highest priority
             )
         else:
             result = await call_litellm([{"role": "user", "content": request.prompt}])
@@ -1451,8 +1543,12 @@ data:
 
     @app.post("/claude/run")
     async def run_claude_task(prompt: str, context: Optional[dict] = None):
-        """Direct endpoint to run a Claude Agent task."""
-        result = await call_claude_agent(prompt, context=context)
+        """Direct endpoint to run a Claude Agent task with user priority."""
+        result = await call_claude_agent(
+            prompt,
+            context=context,
+            priority=PRIORITY_USER  # User requests get highest priority
+        )
         return {"response": result}
 
     @app.post("/runbook/store")

@@ -8,7 +8,7 @@ metadata:
     app: claude-agent
     component: agent
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: claude-agent
@@ -114,6 +114,8 @@ spec:
               value: "/home/agent"
             - name: PATH
               value: "/opt/node-bin:/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
             - name: INFRASTRUCTURE_MCP_URL

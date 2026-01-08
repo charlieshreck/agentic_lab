@@ -28,9 +28,17 @@ data:
     from fastapi import FastAPI, HTTPException, BackgroundTasks
     from pydantic import BaseModel
     import httpx
+    import redis.asyncio as redis
 
-    # In-memory task store (could be Redis for production)
-    TASKS: Dict[str, Dict[str, Any]] = {}
+    # Redis configuration
+    REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
+    TASK_QUEUE_KEY = "claude:tasks:queue"  # Sorted set with priority
+    TASK_RESULTS_PREFIX = "claude:task:"   # Hash for each task
+    TASK_TTL = 3600  # 1 hour TTL for results
+    WORKER_ID = os.environ.get("HOSTNAME", str(uuid.uuid4())[:8])
+
+    # Redis connection pool
+    redis_pool: Optional[redis.Redis] = None
 
     # ============================================================================
     # Configuration
@@ -46,6 +54,98 @@ data:
         "home-assistant": os.getenv("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000"),
         "arr-suite": os.getenv("ARR_SUITE_MCP_URL", "http://arr-suite-mcp:8000"),
     }
+
+    # Priority levels (lower score = higher priority)
+    PRIORITY_USER = 1      # User-initiated requests
+    PRIORITY_CRITICAL = 2  # Critical alerts
+    PRIORITY_WARNING = 3   # Warning alerts
+    PRIORITY_LOW = 4       # Background tasks
+
+    # ============================================================================
+    # Redis Task Queue Functions
+    # ============================================================================
+
+    async def get_redis() -> redis.Redis:
+        """Get Redis connection."""
+        global redis_pool
+        if redis_pool is None:
+            redis_pool = redis.from_url(REDIS_URL, decode_responses=True)
+        return redis_pool
+
+    async def enqueue_task(task_id: str, task_data: dict, priority: int = PRIORITY_LOW) -> bool:
+        """Add task to priority queue."""
+        r = await get_redis()
+        task_key = f"{TASK_RESULTS_PREFIX}{task_id}"
+        # Store task data
+        task_data["status"] = "pending"
+        task_data["created_at"] = datetime.utcnow().isoformat()
+        task_data["worker"] = None
+        await r.hset(task_key, mapping={k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in task_data.items()})
+        await r.expire(task_key, TASK_TTL)
+        # Add to priority queue (sorted set with priority as score)
+        await r.zadd(TASK_QUEUE_KEY, {task_id: priority})
+        return True
+
+    async def dequeue_task() -> Optional[tuple]:
+        """Get highest priority task from queue. Returns (task_id, task_data) or None."""
+        r = await get_redis()
+        # Atomically get and remove lowest score (highest priority) item
+        result = await r.zpopmin(TASK_QUEUE_KEY, count=1)
+        if not result:
+            return None
+        task_id, priority = result[0]
+        # Get task data
+        task_key = f"{TASK_RESULTS_PREFIX}{task_id}"
+        task_data = await r.hgetall(task_key)
+        if not task_data:
+            return None
+        # Mark as running
+        await r.hset(task_key, "status", "running")
+        await r.hset(task_key, "worker", WORKER_ID)
+        await r.hset(task_key, "started_at", datetime.utcnow().isoformat())
+        # Parse JSON fields
+        for k in ["context", "allowed_tools"]:
+            if k in task_data and task_data[k]:
+                try:
+                    task_data[k] = json.loads(task_data[k])
+                except:
+                    pass
+        return task_id, task_data
+
+    async def update_task_result(task_id: str, status: str, result: str = None, error: str = None):
+        """Update task with result."""
+        r = await get_redis()
+        task_key = f"{TASK_RESULTS_PREFIX}{task_id}"
+        updates = {
+            "status": status,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+        if result is not None:
+            updates["result"] = result
+        if error is not None:
+            updates["error"] = error
+        await r.hset(task_key, mapping=updates)
+        await r.expire(task_key, TASK_TTL)
+
+    async def get_task_from_redis(task_id: str) -> Optional[dict]:
+        """Get task status from Redis."""
+        r = await get_redis()
+        task_key = f"{TASK_RESULTS_PREFIX}{task_id}"
+        data = await r.hgetall(task_key)
+        return data if data else None
+
+    async def get_queue_stats() -> dict:
+        """Get queue statistics."""
+        r = await get_redis()
+        queue_length = await r.zcard(TASK_QUEUE_KEY)
+        # Count tasks by status
+        keys = await r.keys(f"{TASK_RESULTS_PREFIX}*")
+        stats = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
+        for key in keys[:100]:  # Limit scan
+            status = await r.hget(key, "status")
+            if status in stats:
+                stats[status] += 1
+        return {"queue_length": queue_length, "tasks": stats, "worker_id": WORKER_ID}
 
     # ============================================================================
     # Models
@@ -115,8 +215,23 @@ data:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        global worker_running, worker_task
         await setup_credentials()
+        # Start worker loop
+        worker_running = True
+        worker_task = asyncio.create_task(worker_loop())
         yield
+        # Shutdown worker
+        worker_running = False
+        if worker_task:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
+        # Close Redis connection
+        if redis_pool:
+            await redis_pool.close()
 
     app = FastAPI(
         title="Claude Agent API",
@@ -158,25 +273,69 @@ data:
         except Exception as e:
             return (-1, "", str(e))
 
-    async def _run_task_async(task_id: str, cmd: List[str], cwd: str, env: dict, timeout: int):
-        """Run task in background and update TASKS store."""
-        TASKS[task_id]["status"] = "running"
+    async def execute_task(task_id: str, task_data: dict):
+        """Execute a task from the queue."""
+        prompt = task_data.get("prompt", "")
+        model = task_data.get("model", "opus")
+        working_dir = task_data.get("working_directory", "/workspace")
+        timeout = int(task_data.get("timeout", 600))
+        allowed_tools = task_data.get("allowed_tools")
+        if isinstance(allowed_tools, str):
+            try:
+                allowed_tools = json.loads(allowed_tools)
+            except:
+                allowed_tools = None
+
+        # Build claude command
+        cmd = [
+            "claude",
+            "--print",
+            "--dangerously-skip-permissions",
+            "--model", model,
+        ]
+        if allowed_tools:
+            for tool in allowed_tools:
+                cmd.extend(["--allowedTools", tool])
+        cmd.append(prompt)
+
+        env = os.environ.copy()
+        env["HOME"] = os.environ.get("HOME", "/home/agent")
+        env["CLAUDE_CODE_ENTRYPOINT"] = "agent-api"
+
         try:
             returncode, stdout, stderr = await asyncio.to_thread(
-                _run_claude_sync, cmd, cwd, env, timeout
+                _run_claude_sync, cmd, working_dir, env, timeout
             )
-            TASKS[task_id]["completed_at"] = datetime.utcnow().isoformat()
             if returncode == 0:
-                TASKS[task_id]["status"] = "completed"
-                TASKS[task_id]["result"] = stdout
+                await update_task_result(task_id, "completed", result=stdout)
             else:
-                TASKS[task_id]["status"] = "failed"
-                TASKS[task_id]["error"] = stderr or "Unknown error"
-                TASKS[task_id]["result"] = stdout
+                await update_task_result(task_id, "failed", result=stdout, error=stderr or "Unknown error")
         except Exception as e:
-            TASKS[task_id]["status"] = "failed"
-            TASKS[task_id]["error"] = str(e)
-            TASKS[task_id]["completed_at"] = datetime.utcnow().isoformat()
+            await update_task_result(task_id, "failed", error=str(e))
+
+    # Worker state
+    worker_running = False
+    worker_task: Optional[asyncio.Task] = None
+
+    async def worker_loop():
+        """Background worker that processes tasks from Redis queue."""
+        global worker_running
+        print(f"[Worker {WORKER_ID}] Starting worker loop...")
+        while worker_running:
+            try:
+                task = await dequeue_task()
+                if task:
+                    task_id, task_data = task
+                    print(f"[Worker {WORKER_ID}] Processing task {task_id}")
+                    await execute_task(task_id, task_data)
+                    print(f"[Worker {WORKER_ID}] Completed task {task_id}")
+                else:
+                    # No tasks, wait before polling again
+                    await asyncio.sleep(1)
+            except Exception as e:
+                print(f"[Worker {WORKER_ID}] Error in worker loop: {e}")
+                await asyncio.sleep(5)
+        print(f"[Worker {WORKER_ID}] Worker loop stopped")
 
     @app.post("/agent/run", response_model=AgentResponse)
     async def run_agent(request: AgentRequest, background_tasks: BackgroundTasks):
@@ -186,49 +345,45 @@ data:
         This invokes Claude Code CLI as a subprocess with the given prompt.
         The agent has access to MCP tools and can perform agentic tasks.
 
-        If async_mode=True, returns task_id immediately and runs in background.
+        If async_mode=True, queues task in Redis and returns task_id immediately.
         Poll /task/{task_id} for status and results.
         """
         try:
-            # Build the claude command
+            # Async mode - queue in Redis
+            if request.async_mode:
+                task_id = str(uuid.uuid4())
+                task_data = {
+                    "prompt": request.prompt,
+                    "model": request.model,
+                    "working_directory": request.working_directory,
+                    "timeout": request.timeout,
+                    "allowed_tools": json.dumps(request.allowed_tools) if request.allowed_tools else "",
+                    "context": json.dumps(request.context) if request.context else "",
+                }
+                # Default priority - can be overridden via separate queue endpoint
+                await enqueue_task(task_id, task_data, priority=PRIORITY_LOW)
+                return AgentResponse(
+                    success=True,
+                    task_id=task_id,
+                    result=f"Task queued - poll /task/{task_id} for status"
+                )
+
+            # Sync mode - execute directly (bypasses queue)
             cmd = [
                 "claude",
-                "--print",  # Print output to stdout
-                "--dangerously-skip-permissions",  # Non-interactive mode
-                "--model", request.model,  # Use specified model (opus, sonnet, haiku)
+                "--print",
+                "--dangerously-skip-permissions",
+                "--model", request.model,
             ]
-
-            # Add allowed tools if specified
             if request.allowed_tools:
                 for tool in request.allowed_tools:
                     cmd.extend(["--allowedTools", tool])
-
-            # Add the prompt
             cmd.append(request.prompt)
 
-            # Set up environment
             env = os.environ.copy()
             env["HOME"] = os.environ.get("HOME", "/home/agent")
             env["CLAUDE_CODE_ENTRYPOINT"] = "agent-api"
 
-            # Async mode - return task_id immediately
-            if request.async_mode:
-                task_id = str(uuid.uuid4())
-                TASKS[task_id] = {
-                    "status": "pending",
-                    "created_at": datetime.utcnow().isoformat(),
-                    "prompt": request.prompt[:100],  # Store truncated prompt
-                }
-                background_tasks.add_task(
-                    _run_task_async, task_id, cmd, request.working_directory, env, request.timeout
-                )
-                return AgentResponse(
-                    success=True,
-                    task_id=task_id,
-                    result="Task queued - poll /task/{task_id} for status"
-                )
-
-            # Sync mode - wait for completion
             returncode, stdout, stderr = await asyncio.to_thread(
                 _run_claude_sync, cmd, request.working_directory, env, request.timeout
             )
@@ -237,7 +392,7 @@ data:
                 return AgentResponse(
                     success=True,
                     result=stdout,
-                    tool_calls=[]  # TODO: Parse tool calls from output
+                    tool_calls=[]
                 )
             else:
                 return AgentResponse(
@@ -253,11 +408,11 @@ data:
             )
 
     @app.get("/task/{task_id}", response_model=TaskStatus)
-    async def get_task_status(task_id: str):
-        """Get status and result of an async task."""
-        if task_id not in TASKS:
+    async def get_task_status_endpoint(task_id: str):
+        """Get status and result of an async task from Redis."""
+        task = await get_task_from_redis(task_id)
+        if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        task = TASKS[task_id]
         return TaskStatus(
             task_id=task_id,
             status=task.get("status", "unknown"),
@@ -269,13 +424,53 @@ data:
 
     @app.get("/tasks")
     async def list_tasks():
-        """List all tasks (for debugging)."""
-        return {
-            "tasks": [
-                {"task_id": k, "status": v.get("status"), "created_at": v.get("created_at")}
-                for k, v in TASKS.items()
-            ]
+        """List recent tasks from Redis (for debugging)."""
+        stats = await get_queue_stats()
+        return stats
+
+    class QueueRequest(BaseModel):
+        """Request to queue a task with priority."""
+        prompt: str
+        priority: int = PRIORITY_LOW  # 1=user, 2=critical, 3=warning, 4=low
+        model: str = "opus"
+        working_directory: str = "/workspace"
+        timeout: int = 600
+        allowed_tools: Optional[List[str]] = None
+        context: Optional[Dict[str, Any]] = None
+
+    @app.post("/queue/submit")
+    async def submit_to_queue(request: QueueRequest):
+        """
+        Submit a task to the priority queue.
+
+        Priority levels:
+        - 1: User-initiated (highest)
+        - 2: Critical alerts
+        - 3: Warning alerts
+        - 4: Low priority/background (default)
+        """
+        task_id = str(uuid.uuid4())
+        task_data = {
+            "prompt": request.prompt,
+            "model": request.model,
+            "working_directory": request.working_directory,
+            "timeout": request.timeout,
+            "allowed_tools": json.dumps(request.allowed_tools) if request.allowed_tools else "",
+            "context": json.dumps(request.context) if request.context else "",
         }
+        await enqueue_task(task_id, task_data, priority=request.priority)
+        stats = await get_queue_stats()
+        return {
+            "task_id": task_id,
+            "priority": request.priority,
+            "queue_position": stats["queue_length"],
+            "message": f"Task queued - poll /task/{task_id} for status"
+        }
+
+    @app.get("/queue/stats")
+    async def queue_statistics():
+        """Get current queue statistics."""
+        return await get_queue_stats()
 
     @app.post("/agent/query")
     async def query_agent(prompt: str, context: Optional[Dict[str, Any]] = None):
@@ -335,3 +530,4 @@ data:
     uvicorn[standard]>=0.27.0
     httpx>=0.26.0
     pydantic>=2.5.0
+    redis>=5.0.0
