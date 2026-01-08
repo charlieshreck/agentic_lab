@@ -39,6 +39,7 @@ data:
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
     TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
     OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+    NETBOX_MCP_URL = os.environ.get("NETBOX_MCP_URL", "http://netbox-mcp:8000")
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
     CLAUDE_COMPLEXITY_THRESHOLD = os.environ.get("CLAUDE_COMPLEXITY_THRESHOLD", "high")
     RUNBOOK_MATCH_THRESHOLD = float(os.environ.get("RUNBOOK_MATCH_THRESHOLD", "0.75"))
@@ -701,6 +702,65 @@ data:
             except Exception as e:
                 logger.error("Telegram service call failed: %s", e)
                 return {"error": str(e)}
+
+    async def discover_service(service_name: str) -> dict:
+        """
+        Discover service endpoint and credentials from NetBox CMDB.
+        Use this before calling infrastructure services to get their endpoints.
+        """
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                # Call NetBox MCP to get service endpoint
+                response = await client.post(
+                    NETBOX_MCP_URL + "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "netbox_get_service_endpoint",
+                            "arguments": {"name": service_name}
+                        }
+                    }
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("result", {}).get("content", [])
+                    if content and len(content) > 0:
+                        text = content[0].get("text", "{}")
+                        return json.loads(text)
+                return {}
+            except Exception as e:
+                logger.warning(f"Service discovery failed for {service_name}: {e}")
+                return {}
+
+    async def get_credentials_path(service_name: str) -> str:
+        """Get Infisical credentials path for a service from NetBox."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(
+                    NETBOX_MCP_URL + "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "netbox_get_credentials_path",
+                            "arguments": {"name": service_name}
+                        }
+                    }
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("result", {}).get("content", [])
+                    if content and len(content) > 0:
+                        text = content[0].get("text", "{}")
+                        data = json.loads(text)
+                        return data.get("credentials_path", "")
+                return ""
+            except Exception as e:
+                logger.warning(f"Credentials path lookup failed for {service_name}: {e}")
+                return ""
 
     async def get_embedding(text: str):
         """Get embedding from Ollama directly (bypasses LiteLLM bug)."""
@@ -1709,6 +1769,8 @@ spec:
               value: "http://telegram-service:8000"
             - name: OLLAMA_URL
               value: "http://ollama:11434"
+            - name: NETBOX_MCP_URL
+              value: "http://netbox-mcp:8000"
             - name: EMBEDDING_MODEL
               value: "nomic-embed-text"
             - name: RUNBOOK_MATCH_THRESHOLD
