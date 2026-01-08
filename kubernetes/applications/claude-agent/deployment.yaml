@@ -38,13 +38,17 @@ spec:
               mkdir -p /home/agent/.claude /home/agent/.kube /home/agent/.local /home/agent/.npm-global
               chown -R 1000:1000 /home/agent
 
-              echo "=== Installing Claude Code for non-root user ==="
-              # Install globally but make it accessible
-              npm install -g @anthropic-ai/claude-code
-              # Also create a symlink in a shared location
+              echo "=== Installing Claude Code to shared location ==="
+              # Install to shared volume location accessible by non-root user
               mkdir -p /opt/node-bin
-              ln -sf /usr/local/bin/claude /opt/node-bin/claude
-              chmod 755 /opt/node-bin
+              cd /opt/node-bin
+              npm init -y
+              npm install @anthropic-ai/claude-code
+              # Create wrapper script
+              echo '#!/bin/bash' > /opt/node-bin/claude
+              echo 'exec /opt/node-bin/node_modules/.bin/claude "$@"' >> /opt/node-bin/claude
+              chmod 755 /opt/node-bin/claude
+              chown -R 1000:1000 /opt/node-bin
 
               echo "=== Creating venv ==="
               python3 -m venv /opt/venv
