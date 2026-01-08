@@ -5,3 +5,4 @@ resources:
   - infisical-secrets.yaml
   - netbox-postgresql.yaml
   - netbox-deployment.yaml
+  - network-discovery.yaml
