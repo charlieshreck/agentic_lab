@@ -34,7 +34,7 @@ spec:
           echo "PostgreSQL is ready!"
       containers:
       - name: netbox
-        image: docker.io/netboxcommunity/netbox:v4.1-latest
+        image: docker.io/netboxcommunity/netbox:v4.1
         ports:
         - containerPort: 8080
           name: http
