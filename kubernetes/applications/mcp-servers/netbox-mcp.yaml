@@ -445,13 +445,10 @@ spec:
               memory: "256Mi"
               cpu: "500m"
           readinessProbe:
-            httpGet:
-              path: /sse
+            tcpSocket:
               port: 8000
             initialDelaySeconds: 30
             periodSeconds: 10
-            successThreshold: 1
-            failureThreshold: 3
           livenessProbe:
             tcpSocket:
               port: 8000
