@@ -31,15 +31,20 @@ spec:
           args:
             - |
               set -e
-              echo "=== Installing Claude Code ==="
-              npm install -g @anthropic-ai/claude-code
-
               echo "=== Installing Python ==="
               apt-get update && apt-get install -y python3 python3-pip python3-venv --no-install-recommends
 
               echo "=== Setting up user home ==="
-              mkdir -p /home/agent/.claude /home/agent/.kube /home/agent/.local
+              mkdir -p /home/agent/.claude /home/agent/.kube /home/agent/.local /home/agent/.npm-global
               chown -R 1000:1000 /home/agent
+
+              echo "=== Installing Claude Code for non-root user ==="
+              # Install globally but make it accessible
+              npm install -g @anthropic-ai/claude-code
+              # Also create a symlink in a shared location
+              mkdir -p /opt/node-bin
+              ln -sf /usr/local/bin/claude /opt/node-bin/claude
+              chmod 755 /opt/node-bin
 
               echo "=== Creating venv ==="
               python3 -m venv /opt/venv
@@ -55,6 +60,8 @@ spec:
               mountPath: /home/agent
             - name: venv
               mountPath: /opt/venv
+            - name: node-bin
+              mountPath: /opt/node-bin
       containers:
         - name: claude-agent
           image: node:22-bookworm
@@ -94,7 +101,7 @@ spec:
             - name: HOME
               value: "/home/agent"
             - name: PATH
-              value: "/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
+              value: "/opt/node-bin:/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
             - name: INFRASTRUCTURE_MCP_URL
@@ -116,6 +123,8 @@ spec:
               mountPath: /home/agent
             - name: venv
               mountPath: /opt/venv
+            - name: node-bin
+              mountPath: /opt/node-bin
           resources:
             requests:
               memory: "512Mi"
@@ -148,6 +157,8 @@ spec:
         - name: agent-home
           emptyDir: {}
         - name: venv
+          emptyDir: {}
+        - name: node-bin
           emptyDir: {}
 ---
 apiVersion: v1
