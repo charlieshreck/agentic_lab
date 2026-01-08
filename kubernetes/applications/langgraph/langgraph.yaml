@@ -261,15 +261,16 @@ data:
         def _evaluate_condition(self, condition: str) -> bool:
             """Evaluate a condition using stored variables."""
             try:
-                # Create safe evaluation context - convert None to empty string
+                # Create safe evaluation context - convert None to empty string for string checks
                 safe_vars = {k: (v if v is not None else "") for k, v in self.variables.items()}
                 safe_vars["true"] = True
                 safe_vars["false"] = False
                 # Handle common patterns
                 cond = condition
                 # Handle 'literal' in variable pattern (e.g., 'OOMKill' in recent_events)
+                # Substitute the actual variable value at substitution time
                 cond = re.sub(r"'([^']+)'\s+in\s+(\w+)",
-                    lambda m: f"'{m.group(1)}' in str(self.variables.get('{m.group(2)}', '') or '')", cond)
+                    lambda m: f"'{m.group(1)}' in '{str(self.variables.get(m.group(2), '') or '').replace(chr(39), chr(92)+chr(39))}'", cond)
                 cond = re.sub(r"(\w+)\s+in\s+\[([^\]]+)\]",
                     lambda m: f"'{self.variables.get(m.group(1), '')}' in [{m.group(2)}]", cond)
                 cond = re.sub(r"(\w+)\s*==\s*'([^']+)'",
@@ -279,7 +280,7 @@ data:
                 cond = re.sub(r"(\w+)\s*([<>]=?)\s*(\d+)",
                     lambda m: f"{self.variables.get(m.group(1), 0) or 0} {m.group(2)} {m.group(3)}", cond)
                 cond = cond.replace(" AND ", " and ").replace(" OR ", " or ")
-                return eval(cond, {"__builtins__": {"str": str}}, safe_vars)
+                return eval(cond, {"__builtins__": {}}, safe_vars)
             except Exception as e:
                 logger.warning(f"Condition eval failed: {condition} - {e}")
                 return False
