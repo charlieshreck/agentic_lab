@@ -191,11 +191,11 @@ data:
             self.variables["description"] = alert.get("description", "")
             self.variables["namespace"] = alert.get("namespace", "default")
             self.variables["pod_name"] = self._extract_pod_name(alert)
-            self.variables["node_name"] = alert.get("labels", {}).get("node", "")
+            self.variables["node_name"] = (alert.get("labels") or {}).get("node", "")
 
         def _extract_pod_name(self, alert: dict) -> str:
             """Extract pod name from alert."""
-            labels = alert.get("labels", {})
+            labels = alert.get("labels") or {}
             if "pod" in labels:
                 return labels["pod"]
             desc = alert.get("description", "")
