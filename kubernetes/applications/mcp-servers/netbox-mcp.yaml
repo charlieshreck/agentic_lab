@@ -1,0 +1,474 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netbox-mcp-code
+  namespace: ai-platform
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """NetBox MCP server for service discovery and CMDB queries."""
+    import os
+    import json
+    import logging
+    from typing import Optional, List, Dict, Any
+    from enum import Enum
+    from fastmcp import FastMCP
+    from pydantic import BaseModel, Field, ConfigDict
+    import httpx
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    NETBOX_URL = os.environ.get("NETBOX_URL", "http://netbox:8080")
+    NETBOX_TOKEN = os.environ.get("NETBOX_TOKEN", "")
+
+    mcp = FastMCP(
+        name="netbox_mcp",
+        instructions="MCP server for NetBox CMDB. Query services, devices, VMs, and discover endpoints/credentials paths."
+    )
+
+    # Enums
+    class ResponseFormat(str, Enum):
+        MARKDOWN = "markdown"
+        JSON = "json"
+
+    # Pydantic Input Models
+    class ListServicesInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        device: Optional[str] = Field(default=None, description="Filter by device name")
+        vm: Optional[str] = Field(default=None, description="Filter by virtual machine name")
+        tag: Optional[str] = Field(default=None, description="Filter by tag (e.g., 'agentic-platform', 'monitoring')")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class ListDevicesInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        site: Optional[str] = Field(default=None, description="Filter by site slug (e.g., 'agentic-cluster')")
+        role: Optional[str] = Field(default=None, description="Filter by device role slug")
+        tag: Optional[str] = Field(default=None, description="Filter by tag")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class ListVMsInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        cluster: Optional[str] = Field(default=None, description="Filter by cluster name")
+        site: Optional[str] = Field(default=None, description="Filter by site slug")
+        tag: Optional[str] = Field(default=None, description="Filter by tag")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class ListSitesInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class GetServiceInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        name: str = Field(..., description="Service name to look up (e.g., 'coroot', 'proxmox')", min_length=1)
+
+    class SearchInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        query: str = Field(..., description="Search query", min_length=1)
+        object_type: Optional[str] = Field(default=None, description="Object type: 'device', 'vm', 'service', 'site', or None for all")
+
+    # API client
+    async def _netbox_api(endpoint: str, params: dict = None) -> Dict[str, Any]:
+        """Make authenticated request to NetBox API."""
+        headers = {
+            "Authorization": f"Token {NETBOX_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        url = f"{NETBOX_URL}/api{endpoint}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            return response.json()
+
+    def _handle_error(e: Exception) -> str:
+        """Format errors with actionable messages."""
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            if status == 401:
+                return "Error: Authentication failed. Check NETBOX_TOKEN."
+            elif status == 403:
+                return "Error: Permission denied."
+            elif status == 404:
+                return "Error: Resource not found."
+            return f"Error: API request failed with status {status}."
+        elif isinstance(e, httpx.TimeoutException):
+            return "Error: Request timed out. Check connectivity to NetBox."
+        return f"Error: {type(e).__name__}: {str(e)}"
+
+    def _get_custom_field(obj: dict, field: str) -> Optional[str]:
+        """Get custom field value from NetBox object."""
+        cf = obj.get("custom_fields", {})
+        return cf.get(field) if cf else None
+
+    # Tools
+    @mcp.tool(
+        name="netbox_list_sites",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def netbox_list_sites(params: ListSitesInput) -> str:
+        """List all sites/locations in NetBox.
+
+        Returns site names, slugs, descriptions, and associated networks.
+        Use this to discover available infrastructure locations.
+        """
+        try:
+            data = await _netbox_api("/dcim/sites/")
+            sites = data.get("results", [])
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"sites": sites, "count": len(sites)}, indent=2)
+
+            lines = ["# NetBox Sites", "", f"Found {len(sites)} site(s)", ""]
+            for site in sites:
+                lines.append(f"## {site.get('name')} ({site.get('slug')})")
+                if site.get("description"):
+                    lines.append(f"- **Description**: {site.get('description')}")
+                if site.get("physical_address"):
+                    lines.append(f"- **Address**: {site.get('physical_address')}")
+                lines.append("")
+            return "\n".join(lines) if sites else "No sites found."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="netbox_list_devices",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def netbox_list_devices(params: ListDevicesInput) -> str:
+        """List physical devices (servers, network equipment, etc).
+
+        Returns device names, types, IPs, and credentials paths.
+        Filter by site, role, or tag to narrow results.
+        """
+        try:
+            query = {}
+            if params.site:
+                query["site"] = params.site
+            if params.role:
+                query["role"] = params.role
+            if params.tag:
+                query["tag"] = params.tag
+
+            data = await _netbox_api("/dcim/devices/", params=query)
+            devices = data.get("results", [])
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"devices": devices, "count": len(devices)}, indent=2)
+
+            lines = ["# Devices", "", f"Found {len(devices)} device(s)", ""]
+            for dev in devices:
+                role = dev.get("role", {}).get("name", "N/A") if dev.get("role") else "N/A"
+                site = dev.get("site", {}).get("name", "N/A") if dev.get("site") else "N/A"
+                creds_path = _get_custom_field(dev, "credentials_path")
+
+                lines.append(f"## {dev.get('name')}")
+                lines.append(f"- **Role**: {role}")
+                lines.append(f"- **Site**: {site}")
+                lines.append(f"- **Status**: {dev.get('status', {}).get('label', 'N/A')}")
+                if creds_path:
+                    lines.append(f"- **Credentials Path**: `{creds_path}`")
+                lines.append("")
+            return "\n".join(lines) if devices else "No devices found."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="netbox_list_vms",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def netbox_list_vms(params: ListVMsInput) -> str:
+        """List virtual machines in NetBox.
+
+        Returns VM names, clusters, resources, and credentials paths.
+        Filter by cluster, site, or tag.
+        """
+        try:
+            query = {}
+            if params.cluster:
+                query["cluster"] = params.cluster
+            if params.site:
+                query["site"] = params.site
+            if params.tag:
+                query["tag"] = params.tag
+
+            data = await _netbox_api("/virtualization/virtual-machines/", params=query)
+            vms = data.get("results", [])
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"vms": vms, "count": len(vms)}, indent=2)
+
+            lines = ["# Virtual Machines", "", f"Found {len(vms)} VM(s)", ""]
+            for vm in vms:
+                cluster = vm.get("cluster", {}).get("name", "N/A") if vm.get("cluster") else "N/A"
+                creds_path = _get_custom_field(vm, "credentials_path")
+
+                lines.append(f"## {vm.get('name')}")
+                lines.append(f"- **Cluster**: {cluster}")
+                lines.append(f"- **Status**: {vm.get('status', {}).get('label', 'N/A')}")
+                lines.append(f"- **vCPUs**: {vm.get('vcpus', 'N/A')}")
+                lines.append(f"- **Memory**: {vm.get('memory', 'N/A')} MB")
+                if creds_path:
+                    lines.append(f"- **Credentials Path**: `{creds_path}`")
+                lines.append("")
+            return "\n".join(lines) if vms else "No VMs found."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="netbox_list_services",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def netbox_list_services(params: ListServicesInput) -> str:
+        """List services running on devices/VMs.
+
+        Returns service names, endpoints, ports, and associated credentials paths.
+        Filter by device, VM, or tag.
+        """
+        try:
+            query = {}
+            if params.device:
+                query["device"] = params.device
+            if params.vm:
+                query["virtual_machine"] = params.vm
+            if params.tag:
+                query["tag"] = params.tag
+
+            data = await _netbox_api("/ipam/services/", params=query)
+            services = data.get("results", [])
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"services": services, "count": len(services)}, indent=2)
+
+            lines = ["# Services", "", f"Found {len(services)} service(s)", ""]
+            for svc in services:
+                device = svc.get("device", {}).get("name") if svc.get("device") else None
+                vm = svc.get("virtual_machine", {}).get("name") if svc.get("virtual_machine") else None
+                host = device or vm or "N/A"
+                ports = ", ".join([str(p) for p in svc.get("ports", [])])
+                api_endpoint = _get_custom_field(svc, "api_endpoint")
+                creds_path = _get_custom_field(svc, "credentials_path")
+
+                lines.append(f"## {svc.get('name')}")
+                lines.append(f"- **Host**: {host}")
+                lines.append(f"- **Protocol**: {svc.get('protocol', {}).get('label', 'N/A')}")
+                lines.append(f"- **Ports**: {ports}")
+                if api_endpoint:
+                    lines.append(f"- **API Endpoint**: `{api_endpoint}`")
+                if creds_path:
+                    lines.append(f"- **Credentials Path**: `{creds_path}`")
+                lines.append("")
+            return "\n".join(lines) if services else "No services found."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="netbox_get_service_endpoint",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def netbox_get_service_endpoint(params: GetServiceInput) -> str:
+        """Get the API endpoint URL for a specific service.
+
+        Returns the full URL to access the service's API.
+        Use this before making API calls to infrastructure services.
+        """
+        try:
+            data = await _netbox_api("/ipam/services/", params={"name": params.name})
+            services = data.get("results", [])
+
+            if not services:
+                return f"Service '{params.name}' not found in NetBox."
+
+            svc = services[0]
+            api_endpoint = _get_custom_field(svc, "api_endpoint")
+
+            if api_endpoint:
+                return json.dumps({
+                    "service": params.name,
+                    "endpoint": api_endpoint,
+                    "ports": svc.get("ports", []),
+                    "protocol": svc.get("protocol", {}).get("label", "N/A")
+                }, indent=2)
+            else:
+                return f"Service '{params.name}' has no api_endpoint custom field set."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="netbox_get_credentials_path",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def netbox_get_credentials_path(params: GetServiceInput) -> str:
+        """Get the Infisical credentials path for a service or device.
+
+        Returns the Infisical path where credentials are stored.
+        Use this to fetch API keys/tokens before calling a service.
+        """
+        try:
+            # Try services first
+            data = await _netbox_api("/ipam/services/", params={"name": params.name})
+            services = data.get("results", [])
+
+            if services:
+                svc = services[0]
+                creds_path = _get_custom_field(svc, "credentials_path")
+                if creds_path:
+                    return json.dumps({
+                        "name": params.name,
+                        "type": "service",
+                        "credentials_path": creds_path
+                    }, indent=2)
+
+            # Try devices
+            data = await _netbox_api("/dcim/devices/", params={"name": params.name})
+            devices = data.get("results", [])
+
+            if devices:
+                dev = devices[0]
+                creds_path = _get_custom_field(dev, "credentials_path")
+                if creds_path:
+                    return json.dumps({
+                        "name": params.name,
+                        "type": "device",
+                        "credentials_path": creds_path
+                    }, indent=2)
+
+            # Try VMs
+            data = await _netbox_api("/virtualization/virtual-machines/", params={"name": params.name})
+            vms = data.get("results", [])
+
+            if vms:
+                vm = vms[0]
+                creds_path = _get_custom_field(vm, "credentials_path")
+                if creds_path:
+                    return json.dumps({
+                        "name": params.name,
+                        "type": "vm",
+                        "credentials_path": creds_path
+                    }, indent=2)
+
+            return f"No credentials_path found for '{params.name}'."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="netbox_search",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def netbox_search(params: SearchInput) -> str:
+        """Search across NetBox for devices, VMs, services, and sites.
+
+        Performs a fuzzy search by name across multiple object types.
+        Optionally filter by object_type to narrow results.
+        """
+        try:
+            results = {"query": params.query, "results": []}
+
+            search_types = {
+                "device": "/dcim/devices/",
+                "vm": "/virtualization/virtual-machines/",
+                "service": "/ipam/services/",
+                "site": "/dcim/sites/"
+            }
+
+            types_to_search = [params.object_type] if params.object_type else search_types.keys()
+
+            for obj_type in types_to_search:
+                if obj_type not in search_types:
+                    continue
+                try:
+                    data = await _netbox_api(search_types[obj_type], params={"q": params.query})
+                    for item in data.get("results", [])[:5]:  # Limit per type
+                        results["results"].append({
+                            "type": obj_type,
+                            "name": item.get("name"),
+                            "url": item.get("url"),
+                            "id": item.get("id")
+                        })
+                except:
+                    pass
+
+            if not results["results"]:
+                return f"No results found for '{params.query}'."
+
+            lines = [f"# Search Results for '{params.query}'", ""]
+            for r in results["results"]:
+                lines.append(f"- **[{r['type']}]** {r['name']} (ID: {r['id']})")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    if __name__ == "__main__":
+        import uvicorn
+        uvicorn.run(mcp.http_app(), host="0.0.0.0", port=8000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netbox-mcp
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netbox-mcp
+  template:
+    metadata:
+      labels:
+        app: netbox-mcp
+    spec:
+      containers:
+        - name: netbox-mcp
+          image: python:3.11-slim
+          command: ["sh", "-c"]
+          args:
+            - pip install --no-cache-dir fastmcp httpx pydantic uvicorn && python /app/main.py
+          ports:
+            - containerPort: 8000
+          env:
+            - name: NETBOX_URL
+              value: "http://netbox:8080"
+            - name: NETBOX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: netbox-credentials
+                  key: API_TOKEN
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: code
+          configMap:
+            name: netbox-mcp-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netbox-mcp
+  namespace: ai-platform
+spec:
+  selector:
+    app: netbox-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
