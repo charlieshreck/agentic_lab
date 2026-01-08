@@ -34,6 +34,8 @@ data:
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
     TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
+    OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
 
     # Complexity threshold for routing to Claude vs local LLM
     CLAUDE_COMPLEXITY_THRESHOLD = os.environ.get("CLAUDE_COMPLEXITY_THRESHOLD", "high")
@@ -112,15 +114,17 @@ data:
                 return {"error": str(e)}
 
     async def get_embedding(text: str):
-        """Get embedding from local model via LiteLLM."""
+        """Get embedding from Ollama directly (bypasses LiteLLM bug)."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
+                # Call Ollama embeddings API directly
                 response = await client.post(
-                    LITELLM_URL + "/v1/embeddings",
-                    json={"model": "embeddings", "input": text}
+                    OLLAMA_URL + "/api/embeddings",
+                    json={"model": EMBEDDING_MODEL, "prompt": text}
                 )
                 if response.status_code == 200:
-                    return response.json().get("data", [{}])[0].get("embedding", [])
+                    return response.json().get("embedding", [])
+                logger.warning("Ollama embedding returned %d", response.status_code)
                 return []
             except Exception as e:
                 logger.error("Embedding error: %s", e)
@@ -649,6 +653,10 @@ spec:
               value: "http://infrastructure-mcp:8000"
             - name: TELEGRAM_SERVICE_URL
               value: "http://telegram-service:8000"
+            - name: OLLAMA_URL
+              value: "http://ollama:11434"
+            - name: EMBEDDING_MODEL
+              value: "nomic-embed-text"
             - name: RUNBOOK_MATCH_THRESHOLD
               value: "0.75"
           volumeMounts:

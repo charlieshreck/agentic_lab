@@ -1,0 +1,6 @@
+machine:
+  disks:
+    - device: /dev/nvme0n1
+      partitions:
+        - mountpoint: /mnt/storage
+          size: 0
