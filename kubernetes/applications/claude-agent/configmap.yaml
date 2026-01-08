@@ -152,7 +152,7 @@ data:
 
             # Set up environment
             env = os.environ.copy()
-            env["HOME"] = "/root"
+            env["HOME"] = os.environ.get("HOME", "/home/agent")
             env["CLAUDE_CODE_ENTRYPOINT"] = "agent-api"
 
             # Run Claude Code CLI
