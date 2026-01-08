@@ -5,3 +5,4 @@ namespace: ai-platform
 
 resources:
   - langgraph.yaml
+  - seed-runbooks.yaml

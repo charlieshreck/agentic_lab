@@ -1463,6 +1463,77 @@ Provide your analysis first, then the runbook JSON."""
         result = await call_claude_agent(prompt, context=context)
         return {"response": result}
 
+    @app.post("/runbook/store")
+    async def store_runbook_api(runbook_data: dict):
+        """Store a diagnostic runbook via API."""
+        try:
+            runbook = Runbook(**runbook_data)
+            success = await store_runbook_qdrant(runbook)
+            if success:
+                return {"status": "stored", "runbook_id": runbook.id, "name": runbook.name}
+            else:
+                raise HTTPException(status_code=500, detail="Failed to store runbook")
+        except Exception as e:
+            logger.error(f"Failed to store runbook: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/runbook/{runbook_id}")
+    async def get_runbook(runbook_id: str):
+        """Get a runbook by ID."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.get(
+                    QDRANT_URL + f"/collections/runbooks/points/{runbook_id}"
+                )
+                if response.status_code == 200:
+                    payload = response.json().get("result", {}).get("payload", {})
+                    return payload
+                return None
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/runbooks")
+    async def list_runbooks(limit: int = 20):
+        """List all runbooks."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(
+                    QDRANT_URL + "/collections/runbooks/points/scroll",
+                    json={"limit": limit, "with_payload": True}
+                )
+                if response.status_code == 200:
+                    points = response.json().get("result", {}).get("points", [])
+                    return {
+                        "runbooks": [
+                            {
+                                "id": p.get("id"),
+                                "name": p.get("payload", {}).get("name", "Unknown"),
+                                "description": p.get("payload", {}).get("description", ""),
+                                "version": 2 if "diagnosis" in p.get("payload", {}) else 1,
+                                "success_count": p.get("payload", {}).get("metadata", {}).get("success_count", 0),
+                                "auto_approve": p.get("payload", {}).get("metadata", {}).get("auto_approve_eligible", False)
+                            }
+                            for p in points
+                        ],
+                        "count": len(points)
+                    }
+                return {"runbooks": [], "count": 0}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/runbook/{runbook_id}")
+    async def delete_runbook(runbook_id: str):
+        """Delete a runbook by ID."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(
+                    QDRANT_URL + "/collections/runbooks/points/delete",
+                    json={"points": [runbook_id]}
+                )
+                return {"status": "deleted" if response.status_code == 200 else "failed"}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/health")
     async def health():
         return {"status": "healthy"}

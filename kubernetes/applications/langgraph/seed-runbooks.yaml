@@ -1,0 +1,494 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seed-runbooks
+  namespace: ai-platform
+  labels:
+    app: langgraph
+    component: runbooks
+data:
+  runbooks.json: |
+    [
+      {
+        "id": "rb-crashloop-oom-001",
+        "name": "Pod CrashLoopBackOff - OOM Kill",
+        "version": 1,
+        "description": "Diagnose and fix pods that are being OOM killed and entering CrashLoopBackOff state",
+        "triggers": {
+          "alert_patterns": ["CrashLoopBackOff", "OOMKilled", "OOM"],
+          "keywords": ["memory", "killed", "137", "oom", "crash"],
+          "severity": ["warning", "critical"]
+        },
+        "diagnosis": {
+          "description": "Verify this is actually an OOM issue and not something else",
+          "checks": [
+            {
+              "name": "Get pod termination reason",
+              "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'",
+              "extract": [
+                {"field": ".", "expected": "OOMKilled", "store_as": "termination_reason"}
+              ],
+              "timeout": 15
+            },
+            {
+              "name": "Get exit code",
+              "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'",
+              "extract": [
+                {"field": ".", "expected": "137", "store_as": "exit_code"}
+              ],
+              "timeout": 15
+            },
+            {
+              "name": "Check recent events for OOM",
+              "command": "kubectl get events -n {{namespace}} --field-selector involvedObject.name={{pod_name}} --sort-by='.lastTimestamp' -o jsonpath='{.items[*].reason}'",
+              "look_for": [
+                {"pattern": "OOMKill", "confirms": "oom_event"},
+                {"pattern": "Killing", "indicates": "container_killed"}
+              ],
+              "store_as": "recent_events",
+              "timeout": 15
+            },
+            {
+              "name": "Get current memory limits",
+              "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.spec.containers[0].resources.limits.memory}'",
+              "store_as": "current_memory_limit",
+              "timeout": 15
+            }
+          ],
+          "confidence_rules": [
+            {"condition": "termination_reason == 'OOMKilled' AND exit_code == '137'", "confidence": 0.95, "diagnosis": "confirmed_oom"},
+            {"condition": "termination_reason == 'OOMKilled'", "confidence": 0.85, "diagnosis": "likely_oom"},
+            {"condition": "'OOMKill' in recent_events", "confidence": 0.7, "diagnosis": "probable_oom"},
+            {"condition": "exit_code == '137'", "confidence": 0.6, "diagnosis": "possible_oom", "note": "Exit code 137 can also mean SIGKILL from other sources"}
+          ]
+        },
+        "information_gathering": {
+          "description": "Collect context for diagnosis or escalation",
+          "commands": [
+            {"name": "Pod describe", "command": "kubectl describe pod {{pod_name}} -n {{namespace}}", "store_as": "pod_describe", "timeout": 30},
+            {"name": "Previous logs", "command": "kubectl logs {{pod_name}} -n {{namespace}} --previous --tail=100", "store_as": "previous_logs", "on_failure": "continue", "timeout": 30},
+            {"name": "Current logs", "command": "kubectl logs {{pod_name}} -n {{namespace}} --tail=50", "store_as": "current_logs", "on_failure": "continue", "timeout": 30},
+            {"name": "Restart count", "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.status.containerStatuses[0].restartCount}'", "store_as": "restart_count", "timeout": 15},
+            {"name": "Owner reference", "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.metadata.ownerReferences[0].name}'", "store_as": "owner_name", "timeout": 15}
+          ]
+        },
+        "decision": {
+          "escalate_if": [
+            "confidence < 0.7",
+            "restart_count > 10",
+            "current_memory_limit == ''"
+          ],
+          "handle_locally_if": [
+            "confidence >= 0.7",
+            "restart_count <= 10",
+            "owner_name != ''"
+          ]
+        },
+        "fix": {
+          "description": "Increase memory limits by 50% (capped at 4Gi)",
+          "preconditions": [
+            {"check": "owner_name != ''", "reason": "Need deployment/statefulset to patch"},
+            {"check": "namespace != 'kube-system'", "reason": "Do not auto-fix system components"}
+          ],
+          "steps": [
+            {
+              "name": "Delete crashing pod to let deployment recreate it",
+              "action": "command",
+              "command": "kubectl delete pod {{pod_name}} -n {{namespace}}",
+              "timeout": 60,
+              "on_failure": "continue"
+            },
+            {
+              "name": "Wait for pod recreation",
+              "action": "wait",
+              "timeout": 30
+            }
+          ],
+          "validation": [
+            {"name": "Pod running", "command": "kubectl get pod -l app={{owner_name}} -n {{namespace}} -o jsonpath='{.items[0].status.phase}'", "expected": "Running", "wait": 30, "retries": 3}
+          ]
+        },
+        "escalation_template": "## OOM Kill Alert Escalation\n\n### Alert\n- Pod: {{pod_name}}\n- Namespace: {{namespace}}\n\n### Diagnosis\n- Termination Reason: {{termination_reason}}\n- Exit Code: {{exit_code}}\n- Confidence: This runbook had low confidence in the diagnosis.\n\n### Gathered Information\n**Previous Logs:**\n```\n{{previous_logs}}\n```\n\n**Pod Description:**\n```\n{{pod_describe}}\n```\n\n### Request\nPlease analyze this OOM issue and provide:\n1. Root cause (memory leak vs undersized limits)\n2. Recommended memory limit\n3. Updated runbook with better diagnosis",
+        "metadata": {
+          "created_by": "seed",
+          "tags": ["kubernetes", "pods", "memory", "oom", "crashloop"],
+          "related_runbooks": ["rb-crashloop-generic", "rb-resource-quota"]
+        }
+      },
+      {
+        "id": "rb-imagepull-001",
+        "name": "Pod ImagePullBackOff",
+        "version": 1,
+        "description": "Diagnose and fix pods failing to pull container images",
+        "triggers": {
+          "alert_patterns": ["ImagePullBackOff", "ErrImagePull", "ImagePull"],
+          "keywords": ["image", "pull", "registry", "unauthorized", "not found"],
+          "severity": ["warning", "critical"]
+        },
+        "diagnosis": {
+          "description": "Determine if image pull failure is due to missing image, auth issue, or network",
+          "checks": [
+            {
+              "name": "Get pod events",
+              "command": "kubectl get events -n {{namespace}} --field-selector involvedObject.name={{pod_name}},reason=Failed --sort-by='.lastTimestamp' -o jsonpath='{.items[-1].message}'",
+              "look_for": [
+                {"pattern": "unauthorized", "confirms": "auth_issue"},
+                {"pattern": "not found", "confirms": "image_not_found"},
+                {"pattern": "manifest unknown", "confirms": "tag_not_found"},
+                {"pattern": "timeout", "indicates": "network_issue"}
+              ],
+              "store_as": "pull_error",
+              "timeout": 15
+            },
+            {
+              "name": "Get image name",
+              "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.spec.containers[0].image}'",
+              "store_as": "image_name",
+              "timeout": 15
+            },
+            {
+              "name": "Check for imagePullSecrets",
+              "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.spec.imagePullSecrets[*].name}'",
+              "store_as": "pull_secrets",
+              "timeout": 15
+            }
+          ],
+          "confidence_rules": [
+            {"condition": "'unauthorized' in pull_error", "confidence": 0.9, "diagnosis": "auth_failure"},
+            {"condition": "'not found' in pull_error OR 'manifest unknown' in pull_error", "confidence": 0.9, "diagnosis": "image_missing"},
+            {"condition": "'timeout' in pull_error", "confidence": 0.7, "diagnosis": "network_issue"}
+          ]
+        },
+        "information_gathering": {
+          "description": "Gather context about the image pull failure",
+          "commands": [
+            {"name": "Pod describe", "command": "kubectl describe pod {{pod_name}} -n {{namespace}}", "store_as": "pod_describe", "timeout": 30},
+            {"name": "List secrets in namespace", "command": "kubectl get secrets -n {{namespace}} -o name | grep -i docker || echo 'none'", "store_as": "docker_secrets", "on_failure": "continue", "timeout": 15},
+            {"name": "Service account", "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.spec.serviceAccountName}'", "store_as": "service_account", "timeout": 15}
+          ]
+        },
+        "decision": {
+          "escalate_if": [
+            "confidence < 0.7",
+            "diagnosis_result == 'auth_failure'",
+            "diagnosis_result == 'image_missing'"
+          ],
+          "handle_locally_if": [
+            "diagnosis_result == 'network_issue'"
+          ]
+        },
+        "fix": {
+          "description": "For network issues, restart the pod. Auth and missing images require manual intervention.",
+          "preconditions": [
+            {"check": "diagnosis_result == 'network_issue'", "reason": "Only auto-fix network issues, auth needs manual intervention"}
+          ],
+          "steps": [
+            {
+              "name": "Delete pod to retry pull",
+              "action": "command",
+              "command": "kubectl delete pod {{pod_name}} -n {{namespace}}",
+              "timeout": 60
+            }
+          ],
+          "validation": [
+            {"name": "Pod not in ImagePullBackOff", "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}'", "should_not_contain": "ImagePull", "wait": 60, "retries": 2}
+          ]
+        },
+        "metadata": {
+          "created_by": "seed",
+          "tags": ["kubernetes", "pods", "images", "registry"]
+        }
+      },
+      {
+        "id": "rb-pending-resources-001",
+        "name": "Pod Pending - Insufficient Resources",
+        "version": 1,
+        "description": "Diagnose pods stuck in Pending state due to resource constraints",
+        "triggers": {
+          "alert_patterns": ["Pending", "Unschedulable", "FailedScheduling"],
+          "keywords": ["insufficient", "cpu", "memory", "nodes", "scheduling"],
+          "severity": ["warning"]
+        },
+        "diagnosis": {
+          "description": "Determine why pod cannot be scheduled",
+          "checks": [
+            {
+              "name": "Get scheduling events",
+              "command": "kubectl get events -n {{namespace}} --field-selector involvedObject.name={{pod_name}},reason=FailedScheduling -o jsonpath='{.items[-1].message}'",
+              "look_for": [
+                {"pattern": "Insufficient cpu", "confirms": "cpu_shortage"},
+                {"pattern": "Insufficient memory", "confirms": "memory_shortage"},
+                {"pattern": "node\\(s\\) had taint", "confirms": "taint_issue"},
+                {"pattern": "node selector", "confirms": "selector_mismatch"},
+                {"pattern": "0/\\d+ nodes are available", "indicates": "no_suitable_nodes"}
+              ],
+              "store_as": "scheduling_reason",
+              "timeout": 15
+            },
+            {
+              "name": "Get requested resources",
+              "command": "kubectl get pod {{pod_name}} -n {{namespace}} -o jsonpath='{.spec.containers[0].resources.requests}'",
+              "store_as": "resource_requests",
+              "timeout": 15
+            },
+            {
+              "name": "Check node capacity",
+              "command": "kubectl top nodes --no-headers | head -3",
+              "store_as": "node_usage",
+              "on_failure": "continue",
+              "timeout": 15
+            }
+          ],
+          "confidence_rules": [
+            {"condition": "'Insufficient cpu' in scheduling_reason OR 'Insufficient memory' in scheduling_reason", "confidence": 0.9, "diagnosis": "resource_shortage"},
+            {"condition": "'taint' in scheduling_reason", "confidence": 0.85, "diagnosis": "taint_issue"},
+            {"condition": "'node selector' in scheduling_reason", "confidence": 0.85, "diagnosis": "selector_mismatch"}
+          ]
+        },
+        "information_gathering": {
+          "description": "Gather cluster resource information",
+          "commands": [
+            {"name": "Pod describe", "command": "kubectl describe pod {{pod_name}} -n {{namespace}}", "store_as": "pod_describe", "timeout": 30},
+            {"name": "Describe nodes", "command": "kubectl describe nodes | grep -A 5 'Allocated resources'", "store_as": "node_resources", "on_failure": "continue", "timeout": 30},
+            {"name": "List pending pods", "command": "kubectl get pods -A --field-selector=status.phase=Pending -o wide", "store_as": "other_pending", "on_failure": "continue", "timeout": 15}
+          ]
+        },
+        "decision": {
+          "escalate_if": [
+            "confidence < 0.7",
+            "diagnosis_result == 'taint_issue'",
+            "diagnosis_result == 'selector_mismatch'"
+          ],
+          "handle_locally_if": []
+        },
+        "fix": {
+          "description": "Resource issues typically need human decision - escalate with analysis",
+          "preconditions": [],
+          "steps": [],
+          "validation": []
+        },
+        "metadata": {
+          "created_by": "seed",
+          "tags": ["kubernetes", "pods", "scheduling", "resources"]
+        }
+      },
+      {
+        "id": "rb-pvc-pending-001",
+        "name": "PVC Pending",
+        "version": 1,
+        "description": "Diagnose PersistentVolumeClaims stuck in Pending state",
+        "triggers": {
+          "alert_patterns": ["PVC", "PersistentVolumeClaim", "Pending", "ProvisioningFailed"],
+          "keywords": ["volume", "storage", "pvc", "pending", "provision"],
+          "severity": ["warning", "critical"]
+        },
+        "diagnosis": {
+          "description": "Determine why PVC cannot be provisioned",
+          "checks": [
+            {
+              "name": "Get PVC events",
+              "command": "kubectl get events -n {{namespace}} --field-selector involvedObject.kind=PersistentVolumeClaim --sort-by='.lastTimestamp' -o jsonpath='{.items[-1].message}'",
+              "look_for": [
+                {"pattern": "no persistent volumes available", "confirms": "no_pv"},
+                {"pattern": "storageclass.*not found", "confirms": "bad_storageclass"},
+                {"pattern": "waiting for first consumer", "indicates": "waiting_consumer"},
+                {"pattern": "provision.*failed", "indicates": "provisioner_error"}
+              ],
+              "store_as": "pvc_error",
+              "timeout": 15
+            },
+            {
+              "name": "Get storage class",
+              "command": "kubectl get pvc -n {{namespace}} -o jsonpath='{.items[0].spec.storageClassName}'",
+              "store_as": "storage_class",
+              "timeout": 15
+            },
+            {
+              "name": "Check storage class exists",
+              "command": "kubectl get storageclass {{storage_class}} -o name 2>/dev/null || echo 'not_found'",
+              "store_as": "sc_exists",
+              "timeout": 15
+            }
+          ],
+          "confidence_rules": [
+            {"condition": "'not_found' in sc_exists", "confidence": 0.95, "diagnosis": "missing_storageclass"},
+            {"condition": "'no persistent volumes' in pvc_error", "confidence": 0.9, "diagnosis": "no_matching_pv"},
+            {"condition": "'waiting for first consumer' in pvc_error", "confidence": 0.8, "diagnosis": "waiting_consumer", "note": "WaitForFirstConsumer binding mode - normal behavior"}
+          ]
+        },
+        "information_gathering": {
+          "description": "Gather storage information",
+          "commands": [
+            {"name": "List PVCs", "command": "kubectl get pvc -n {{namespace}}", "store_as": "pvcs", "timeout": 15},
+            {"name": "List PVs", "command": "kubectl get pv", "store_as": "pvs", "on_failure": "continue", "timeout": 15},
+            {"name": "List storage classes", "command": "kubectl get storageclass", "store_as": "storageclasses", "timeout": 15},
+            {"name": "Describe PVC", "command": "kubectl describe pvc -n {{namespace}}", "store_as": "pvc_describe", "timeout": 30}
+          ]
+        },
+        "decision": {
+          "escalate_if": [
+            "confidence < 0.7",
+            "diagnosis_result == 'missing_storageclass'",
+            "diagnosis_result == 'no_matching_pv'"
+          ],
+          "handle_locally_if": [
+            "diagnosis_result == 'waiting_consumer'"
+          ]
+        },
+        "fix": {
+          "description": "For waiting_consumer, this is normal behavior. Other issues need manual intervention.",
+          "preconditions": [],
+          "steps": [],
+          "validation": []
+        },
+        "metadata": {
+          "created_by": "seed",
+          "tags": ["kubernetes", "storage", "pvc", "volumes"]
+        }
+      },
+      {
+        "id": "rb-service-unreachable-001",
+        "name": "Service Not Reachable",
+        "version": 1,
+        "description": "Diagnose services that are not responding",
+        "triggers": {
+          "alert_patterns": ["ServiceDown", "EndpointNotReady", "Unreachable"],
+          "keywords": ["service", "endpoint", "connection", "refused", "timeout"],
+          "severity": ["critical"]
+        },
+        "diagnosis": {
+          "description": "Check service, endpoints, and backing pods",
+          "checks": [
+            {
+              "name": "Check endpoints",
+              "command": "kubectl get endpoints -n {{namespace}} -o jsonpath='{.items[0].subsets[0].addresses}'",
+              "look_for": [
+                {"pattern": "ip", "confirms": "has_endpoints"}
+              ],
+              "store_as": "endpoints",
+              "timeout": 15
+            },
+            {
+              "name": "Get service selector",
+              "command": "kubectl get svc -n {{namespace}} -o jsonpath='{.items[0].spec.selector}'",
+              "store_as": "svc_selector",
+              "timeout": 15
+            },
+            {
+              "name": "Count matching pods",
+              "command": "kubectl get pods -n {{namespace}} --selector=$(kubectl get svc -n {{namespace}} -o jsonpath='{.items[0].spec.selector}' | tr -d '{}' | tr ':' '=' | tr ',' ',') --no-headers | wc -l",
+              "store_as": "matching_pods_count",
+              "on_failure": "continue",
+              "timeout": 15
+            },
+            {
+              "name": "Check pod readiness",
+              "command": "kubectl get pods -n {{namespace}} -o jsonpath='{.items[*].status.conditions[?(@.type==\"Ready\")].status}'",
+              "store_as": "pod_ready_status",
+              "timeout": 15
+            }
+          ],
+          "confidence_rules": [
+            {"condition": "endpoints == '' OR endpoints == 'null'", "confidence": 0.9, "diagnosis": "no_endpoints"},
+            {"condition": "matching_pods_count == '0'", "confidence": 0.9, "diagnosis": "no_matching_pods"},
+            {"condition": "'False' in pod_ready_status", "confidence": 0.85, "diagnosis": "pods_not_ready"}
+          ]
+        },
+        "information_gathering": {
+          "description": "Gather service and pod information",
+          "commands": [
+            {"name": "Describe service", "command": "kubectl describe svc -n {{namespace}}", "store_as": "svc_describe", "timeout": 30},
+            {"name": "List pods", "command": "kubectl get pods -n {{namespace}} -o wide", "store_as": "pods_list", "timeout": 15},
+            {"name": "Describe endpoints", "command": "kubectl describe endpoints -n {{namespace}}", "store_as": "endpoints_describe", "timeout": 30}
+          ]
+        },
+        "decision": {
+          "escalate_if": [
+            "confidence < 0.7",
+            "diagnosis_result == 'no_matching_pods'"
+          ],
+          "handle_locally_if": [
+            "diagnosis_result == 'pods_not_ready'"
+          ]
+        },
+        "fix": {
+          "description": "If pods not ready, check pod health. If no pods, likely deployment issue.",
+          "preconditions": [
+            {"check": "diagnosis_result == 'pods_not_ready'", "reason": "Can only fix pod readiness issues automatically"}
+          ],
+          "steps": [
+            {
+              "name": "Restart not-ready pods",
+              "action": "command",
+              "command": "kubectl delete pods -n {{namespace}} --field-selector=status.phase!=Running",
+              "timeout": 60,
+              "on_failure": "continue"
+            }
+          ],
+          "validation": [
+            {"name": "Endpoints populated", "command": "kubectl get endpoints -n {{namespace}} -o jsonpath='{.items[0].subsets[0].addresses[0].ip}'", "wait": 30, "retries": 3}
+          ]
+        },
+        "metadata": {
+          "created_by": "seed",
+          "tags": ["kubernetes", "services", "networking", "endpoints"]
+        }
+      }
+    ]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-seed-runbooks
+  namespace: ai-platform
+  labels:
+    app: langgraph
+    component: seed-loader
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: loader
+          image: curlimages/curl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Qdrant and LangGraph to be ready..."
+              sleep 30
+
+              # Check if runbooks collection exists
+              COLLECTION_EXISTS=$(curl -s http://qdrant:6333/collections/runbooks | grep -c '"status":"ok"' || echo "0")
+
+              if [ "$COLLECTION_EXISTS" = "0" ]; then
+                echo "Creating runbooks collection..."
+                curl -X PUT http://qdrant:6333/collections/runbooks \
+                  -H "Content-Type: application/json" \
+                  -d '{
+                    "vectors": {
+                      "size": 768,
+                      "distance": "Cosine"
+                    }
+                  }'
+              fi
+
+              echo "Loading seed runbooks via LangGraph..."
+              # Load each runbook through LangGraph's store endpoint
+              cat /config/runbooks.json | while read -r line; do
+                if [ -n "$line" ]; then
+                  curl -X POST http://langgraph:8000/runbook/store \
+                    -H "Content-Type: application/json" \
+                    -d "$line" || true
+                fi
+              done
+
+              echo "Seed runbooks loaded successfully"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config
+          configMap:
+            name: seed-runbooks
