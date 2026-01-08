@@ -135,17 +135,41 @@ data:
         ),
     ]
 
-    async def call_mcp_tool(mcp_url: str, tool_name: str, params: dict = None) -> dict:
-        """Call an MCP tool and return the result."""
+    CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
+
+    async def query_via_claude_agent(query: str, timeout: int = 120) -> dict:
+        """Query infrastructure via Claude Agent which can access MCP tools."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
+                # Submit task
                 response = await client.post(
-                    f"{mcp_url}/call-tool",
-                    json={"name": tool_name, "arguments": params or {}}
+                    f"{CLAUDE_AGENT_URL}/agent/run",
+                    json={
+                        "prompt": query,
+                        "context": {"source": "alerting_pipeline"},
+                        "max_turns": 3,
+                        "working_directory": "/workspace",
+                        "async_mode": True,
+                        "timeout": timeout
+                    }
                 )
-                if response.status_code == 200:
-                    return response.json()
-                return {"error": f"HTTP {response.status_code}"}
+                result = response.json()
+                if not result.get("success") or not result.get("task_id"):
+                    return {"error": result.get("error", "Failed to queue task")}
+
+                task_id = result.get("task_id")
+
+                # Poll for completion
+                for _ in range(timeout // 5):
+                    await asyncio.sleep(5)
+                    status_resp = await client.get(f"{CLAUDE_AGENT_URL}/task/{task_id}")
+                    status = status_resp.json()
+                    if status.get("status") == "completed":
+                        return {"result": status.get("result", "")}
+                    elif status.get("status") == "failed":
+                        return {"error": status.get("error", "Unknown error")}
+
+                return {"error": "Query timed out"}
             except Exception as e:
                 return {"error": str(e)}
 
@@ -182,178 +206,96 @@ data:
             except Exception as e:
                 logger.error(f"Error raising alert: {e}")
 
-    async def check_unifi_health():
-        """Check UniFi network health."""
-        mcp_url = MCP_SERVERS.get("unifi")
-        if not mcp_url:
-            return
+    async def check_service_connectivity(name: str, url: str) -> bool:
+        """Check if a service is reachable."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                # Try common health endpoints
+                for endpoint in ["/health", "/healthz", "/", "/sse"]:
+                    try:
+                        response = await client.get(f"{url}{endpoint}")
+                        if response.status_code < 500:
+                            return True
+                    except:
+                        continue
+                return False
+            except Exception:
+                return False
 
-        # Check device status
-        result = await call_mcp_tool(mcp_url, "unifi_list_devices", {"response_format": "json"})
-        if "error" in result:
-            logger.warning(f"UniFi check failed: {result['error']}")
-            return
+    async def run_deep_health_check():
+        """Run comprehensive health check via Claude Agent (expensive, runs less frequently)."""
+        logger.info("Running deep health check via Claude Agent...")
 
-        try:
-            # Parse device list - result may be string or dict
-            import json
-            content = result.get("content", [{}])
-            if isinstance(content, list) and content:
-                text = content[0].get("text", "{}")
-                data = json.loads(text) if isinstance(text, str) else text
-                devices = data.get("devices", [])
+        queries = [
+            ("UniFi", "Check UniFi network status. List any devices that are offline or have issues. Report health status."),
+            ("TrueNAS", "Check TrueNAS storage pools. Report any degraded pools or low disk space warnings."),
+            ("Proxmox", "Check Proxmox cluster status. Report any offline nodes or high resource usage."),
+        ]
 
-                for device in devices:
-                    if device.get("state") != 1:  # Not online
-                        await raise_alert(
-                            name=f"UniFi Device Offline: {device.get('name', device.get('mac', 'Unknown'))}",
-                            severity="critical",
-                            description=f"UniFi device '{device.get('name', 'Unknown')}' is offline",
-                            source="unifi",
-                            suggested_fix=f"Check physical connectivity and power for device",
-                            context=f"MAC: {device.get('mac')}, Model: {device.get('model')}"
-                        )
-        except Exception as e:
-            logger.error(f"Error parsing UniFi response: {e}")
+        for source, query in queries:
+            try:
+                result = await query_via_claude_agent(query, timeout=180)
+                if "error" in result:
+                    logger.warning(f"{source} deep check failed: {result['error']}")
+                    continue
 
-    async def check_truenas_health():
-        """Check TrueNAS storage health."""
-        mcp_url = MCP_SERVERS.get("truenas")
-        if not mcp_url:
-            return
+                response = result.get("result", "").lower()
 
-        # Check pool status
-        result = await call_mcp_tool(mcp_url, "truenas_list_pools", {"response_format": "json"})
-        if "error" in result:
-            logger.warning(f"TrueNAS check failed: {result['error']}")
-            return
+                # Simple keyword detection for issues
+                alert_keywords = ["offline", "degraded", "critical", "error", "failed", "down", "unreachable"]
+                if any(kw in response for kw in alert_keywords):
+                    await raise_alert(
+                        name=f"{source} Health Issue Detected",
+                        severity="warning",
+                        description=f"Health check detected potential issues:\n\n{result.get('result', '')[:500]}",
+                        source=source.lower(),
+                        suggested_fix=f"Review {source} status and address any issues found"
+                    )
+            except Exception as e:
+                logger.error(f"Deep health check error for {source}: {e}")
 
-        try:
-            import json
-            content = result.get("content", [{}])
-            if isinstance(content, list) and content:
-                text = content[0].get("text", "{}")
-                data = json.loads(text) if isinstance(text, str) else text
-                pools = data.get("pools", [])
+    async def check_mcp_service_health():
+        """Check if MCP services are reachable (basic connectivity check)."""
+        for name, url in MCP_SERVERS.items():
+            try:
+                is_healthy = await check_service_connectivity(name, url)
+                if not is_healthy:
+                    await raise_alert(
+                        name=f"MCP Service Unreachable: {name}",
+                        severity="warning",
+                        description=f"MCP server '{name}' at {url} is not responding",
+                        source="alerting-pipeline",
+                        suggested_fix=f"Check pod status: kubectl get pods -n ai-platform | grep {name}"
+                    )
+            except Exception as e:
+                logger.error(f"Error checking {name}: {e}")
 
-                for pool in pools:
-                    status = pool.get("status", "").upper()
-                    if status not in ["ONLINE", "HEALTHY"]:
-                        await raise_alert(
-                            name=f"TrueNAS Pool Degraded: {pool.get('name')}",
-                            severity="critical",
-                            description=f"ZFS pool '{pool.get('name')}' is {status}",
-                            source="truenas",
-                            suggested_fix="Check disk status with 'zpool status'",
-                            context=f"Pool: {pool.get('name')}, Status: {status}"
-                        )
-
-                    # Check capacity
-                    usage = pool.get("used_percent", 0)
-                    if usage > 85:
-                        await raise_alert(
-                            name=f"TrueNAS Low Space: {pool.get('name')}",
-                            severity="warning" if usage < 95 else "critical",
-                            description=f"Pool '{pool.get('name')}' is at {usage}% capacity",
-                            source="truenas",
-                            suggested_fix="Clean up data or expand storage"
-                        )
-        except Exception as e:
-            logger.error(f"Error parsing TrueNAS response: {e}")
-
-    async def check_proxmox_health():
-        """Check Proxmox cluster health."""
-        mcp_url = MCP_SERVERS.get("proxmox")
-        if not mcp_url:
-            return
-
-        # Check cluster status
-        result = await call_mcp_tool(mcp_url, "proxmox_cluster_status", {"response_format": "json"})
-        if "error" in result:
-            logger.warning(f"Proxmox check failed: {result['error']}")
-            return
-
-        try:
-            import json
-            content = result.get("content", [{}])
-            if isinstance(content, list) and content:
-                text = content[0].get("text", "{}")
-                data = json.loads(text) if isinstance(text, str) else text
-                nodes = data.get("nodes", [])
-
-                for node in nodes:
-                    if node.get("status") != "online":
-                        await raise_alert(
-                            name=f"Proxmox Node Offline: {node.get('node')}",
-                            severity="critical",
-                            description=f"Proxmox node '{node.get('node')}' is offline",
-                            source="proxmox",
-                            suggested_fix="Check physical server and network connectivity"
-                        )
-
-                    # Check CPU
-                    cpu = node.get("cpu", 0) * 100
-                    if cpu > 90:
-                        await raise_alert(
-                            name=f"Proxmox High CPU: {node.get('node')}",
-                            severity="warning",
-                            description=f"Node '{node.get('node')}' CPU at {cpu:.1f}%",
-                            source="proxmox"
-                        )
-        except Exception as e:
-            logger.error(f"Error parsing Proxmox response: {e}")
-
-    async def check_opnsense_health():
-        """Check OPNsense firewall health."""
-        mcp_url = MCP_SERVERS.get("opnsense")
-        if not mcp_url:
-            return
-
-        # Check services
-        result = await call_mcp_tool(mcp_url, "opnsense_list_services", {"response_format": "json"})
-        if "error" in result:
-            logger.warning(f"OPNsense check failed: {result['error']}")
-            return
-
-        try:
-            import json
-            content = result.get("content", [{}])
-            if isinstance(content, list) and content:
-                text = content[0].get("text", "{}")
-                data = json.loads(text) if isinstance(text, str) else text
-                services = data.get("services", [])
-
-                critical_services = ["unbound", "dhcpd", "configd"]
-                for svc in services:
-                    if svc.get("name") in critical_services and not svc.get("running"):
-                        await raise_alert(
-                            name=f"OPNsense Service Down: {svc.get('name')}",
-                            severity="critical",
-                            description=f"Critical service '{svc.get('name')}' is not running",
-                            source="opnsense",
-                            suggested_fix=f"Restart service via OPNsense UI or SSH"
-                        )
-        except Exception as e:
-            logger.error(f"Error parsing OPNsense response: {e}")
+    # Deep check interval (every 30 minutes by default)
+    DEEP_CHECK_INTERVAL = int(os.environ.get("DEEP_CHECK_INTERVAL", "1800"))
+    last_deep_check = 0
 
     async def run_health_checks():
-        """Run all health checks."""
-        logger.info("Running health checks...")
-        await asyncio.gather(
-            check_unifi_health(),
-            check_truenas_health(),
-            check_proxmox_health(),
-            check_opnsense_health(),
-            return_exceptions=True
-        )
-        logger.info("Health checks complete")
+        """Run health checks - basic connectivity checks."""
+        logger.info("Running basic health checks...")
+        await check_mcp_service_health()
+        logger.info("Basic health checks complete")
 
     async def polling_loop():
         """Main polling loop."""
-        logger.info(f"Starting polling loop (interval: {POLL_INTERVAL}s)")
+        global last_deep_check
+        import time
+
+        logger.info(f"Starting polling loop (interval: {POLL_INTERVAL}s, deep check: {DEEP_CHECK_INTERVAL}s)")
         while True:
             try:
+                # Always run basic connectivity checks
                 await run_health_checks()
+
+                # Run deep health check less frequently (uses Claude Agent - expensive)
+                current_time = time.time()
+                if current_time - last_deep_check >= DEEP_CHECK_INTERVAL:
+                    await run_deep_health_check()
+                    last_deep_check = current_time
             except Exception as e:
                 logger.error(f"Polling error: {e}")
             await asyncio.sleep(POLL_INTERVAL)
@@ -448,8 +390,12 @@ spec:
               value: "http://opnsense-mcp:8000"
             - name: ADGUARD_MCP_URL
               value: "http://adguard-mcp:8000"
+            - name: CLAUDE_AGENT_URL
+              value: "http://claude-agent:8000"
             - name: POLL_INTERVAL
               value: "300"  # 5 minutes
+            - name: DEEP_CHECK_INTERVAL
+              value: "1800"  # 30 minutes
           volumeMounts:
             - name: code
               mountPath: /code
