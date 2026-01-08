@@ -202,7 +202,7 @@ data:
 
     if __name__ == "__main__":
         import uvicorn
-        uvicorn.run(mcp.get_app(), host="0.0.0.0", port=8000)
+        uvicorn.run(mcp.http_app(), host="0.0.0.0", port=8000)
 ---
 apiVersion: apps/v1
 kind: Deployment
