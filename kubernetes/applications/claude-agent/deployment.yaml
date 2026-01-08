@@ -38,6 +38,12 @@ spec:
               mkdir -p /home/agent/.claude /home/agent/.kube /home/agent/.local /home/agent/.npm-global
               chown -R 1000:1000 /home/agent
 
+              echo "=== Setting up /root for Claude CLI workaround ==="
+              # Claude Code CLI has hardcoded /root/.claude.json path regardless of HOME
+              # Make /root writable by agent user as workaround
+              mkdir -p /root/.claude
+              chown -R 1000:1000 /root
+
               echo "=== Installing Claude Code to shared location ==="
               # Install to shared volume location accessible by non-root user
               mkdir -p /opt/node-bin
@@ -66,6 +72,8 @@ spec:
               mountPath: /opt/venv
             - name: node-bin
               mountPath: /opt/node-bin
+            - name: root-home
+              mountPath: /root
       containers:
         - name: claude-agent
           image: node:22-bookworm
@@ -129,6 +137,8 @@ spec:
               mountPath: /opt/venv
             - name: node-bin
               mountPath: /opt/node-bin
+            - name: root-home
+              mountPath: /root
           resources:
             requests:
               memory: "512Mi"
@@ -141,13 +151,16 @@ spec:
               path: /health
               port: 8000
             initialDelaySeconds: 120
-            periodSeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 6  # Allow 6 minutes of failures before restart
           readinessProbe:
             httpGet:
               path: /health
               port: 8000
             initialDelaySeconds: 90
             periodSeconds: 10
+            timeoutSeconds: 5
       volumes:
         - name: code
           configMap:
@@ -163,6 +176,8 @@ spec:
         - name: venv
           emptyDir: {}
         - name: node-bin
+          emptyDir: {}
+        - name: root-home
           emptyDir: {}
 ---
 apiVersion: v1

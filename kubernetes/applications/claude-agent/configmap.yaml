@@ -19,6 +19,8 @@ data:
     import os
     import base64
     import subprocess
+    import uuid
+    from datetime import datetime
     from pathlib import Path
     from typing import Optional, List, Dict, Any
     from contextlib import asynccontextmanager
@@ -26,6 +28,9 @@ data:
     from fastapi import FastAPI, HTTPException, BackgroundTasks
     from pydantic import BaseModel
     import httpx
+
+    # In-memory task store (could be Redis for production)
+    TASKS: Dict[str, Dict[str, Any]] = {}
 
     # ============================================================================
     # Configuration
@@ -53,6 +58,8 @@ data:
         max_turns: int = 10
         working_directory: str = "/workspace"
         model: str = "opus"  # Default to Opus for complex tasks
+        async_mode: bool = False  # If True, return task_id immediately
+        timeout: int = 600  # Default 10 minutes, max for deep research
 
     class AgentResponse(BaseModel):
         success: bool
@@ -60,6 +67,15 @@ data:
         error: Optional[str] = None
         tool_calls: List[Dict[str, Any]] = []
         tokens_used: Optional[int] = None
+        task_id: Optional[str] = None  # For async tasks
+
+    class TaskStatus(BaseModel):
+        task_id: str
+        status: str  # pending, running, completed, failed
+        created_at: str
+        completed_at: Optional[str] = None
+        result: Optional[str] = None
+        error: Optional[str] = None
 
     class HealthResponse(BaseModel):
         status: str
@@ -125,13 +141,53 @@ data:
             mcp_servers=mcp_health
         )
 
+    def _run_claude_sync(cmd: List[str], cwd: str, env: dict, timeout: int) -> tuple:
+        """Run Claude CLI synchronously (called from thread pool)."""
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            return (result.returncode, result.stdout, result.stderr)
+        except subprocess.TimeoutExpired:
+            return (-1, "", f"Agent execution timed out ({timeout}s limit)")
+        except Exception as e:
+            return (-1, "", str(e))
+
+    async def _run_task_async(task_id: str, cmd: List[str], cwd: str, env: dict, timeout: int):
+        """Run task in background and update TASKS store."""
+        TASKS[task_id]["status"] = "running"
+        try:
+            returncode, stdout, stderr = await asyncio.to_thread(
+                _run_claude_sync, cmd, cwd, env, timeout
+            )
+            TASKS[task_id]["completed_at"] = datetime.utcnow().isoformat()
+            if returncode == 0:
+                TASKS[task_id]["status"] = "completed"
+                TASKS[task_id]["result"] = stdout
+            else:
+                TASKS[task_id]["status"] = "failed"
+                TASKS[task_id]["error"] = stderr or "Unknown error"
+                TASKS[task_id]["result"] = stdout
+        except Exception as e:
+            TASKS[task_id]["status"] = "failed"
+            TASKS[task_id]["error"] = str(e)
+            TASKS[task_id]["completed_at"] = datetime.utcnow().isoformat()
+
     @app.post("/agent/run", response_model=AgentResponse)
-    async def run_agent(request: AgentRequest):
+    async def run_agent(request: AgentRequest, background_tasks: BackgroundTasks):
         """
         Execute a Claude agent task.
 
         This invokes Claude Code CLI as a subprocess with the given prompt.
         The agent has access to MCP tools and can perform agentic tasks.
+
+        If async_mode=True, returns task_id immediately and runs in background.
+        Poll /task/{task_id} for status and results.
         """
         try:
             # Build the claude command
@@ -155,39 +211,71 @@ data:
             env["HOME"] = os.environ.get("HOME", "/home/agent")
             env["CLAUDE_CODE_ENTRYPOINT"] = "agent-api"
 
-            # Run Claude Code CLI
-            result = subprocess.run(
-                cmd,
-                cwd=request.working_directory,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-
-            if result.returncode == 0:
+            # Async mode - return task_id immediately
+            if request.async_mode:
+                task_id = str(uuid.uuid4())
+                TASKS[task_id] = {
+                    "status": "pending",
+                    "created_at": datetime.utcnow().isoformat(),
+                    "prompt": request.prompt[:100],  # Store truncated prompt
+                }
+                background_tasks.add_task(
+                    _run_task_async, task_id, cmd, request.working_directory, env, request.timeout
+                )
                 return AgentResponse(
                     success=True,
-                    result=result.stdout,
+                    task_id=task_id,
+                    result="Task queued - poll /task/{task_id} for status"
+                )
+
+            # Sync mode - wait for completion
+            returncode, stdout, stderr = await asyncio.to_thread(
+                _run_claude_sync, cmd, request.working_directory, env, request.timeout
+            )
+
+            if returncode == 0:
+                return AgentResponse(
+                    success=True,
+                    result=stdout,
                     tool_calls=[]  # TODO: Parse tool calls from output
                 )
             else:
                 return AgentResponse(
                     success=False,
-                    error=result.stderr or "Unknown error",
-                    result=result.stdout
+                    error=stderr or "Unknown error",
+                    result=stdout
                 )
 
-        except subprocess.TimeoutExpired:
-            return AgentResponse(
-                success=False,
-                error="Agent execution timed out (5 minute limit)"
-            )
         except Exception as e:
             return AgentResponse(
                 success=False,
                 error=str(e)
             )
+
+    @app.get("/task/{task_id}", response_model=TaskStatus)
+    async def get_task_status(task_id: str):
+        """Get status and result of an async task."""
+        if task_id not in TASKS:
+            raise HTTPException(status_code=404, detail="Task not found")
+        task = TASKS[task_id]
+        return TaskStatus(
+            task_id=task_id,
+            status=task.get("status", "unknown"),
+            created_at=task.get("created_at", ""),
+            completed_at=task.get("completed_at"),
+            result=task.get("result"),
+            error=task.get("error")
+        )
+
+    @app.get("/tasks")
+    async def list_tasks():
+        """List all tasks (for debugging)."""
+        return {
+            "tasks": [
+                {"task_id": k, "status": v.get("status"), "created_at": v.get("created_at")}
+                for k, v in TASKS.items()
+            ]
+        }
 
     @app.post("/agent/query")
     async def query_agent(prompt: str, context: Optional[Dict[str, Any]] = None):
