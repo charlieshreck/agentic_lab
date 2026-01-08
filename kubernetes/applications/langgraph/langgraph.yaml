@@ -313,6 +313,9 @@ data:
 
                 results["checks"].append(check_result)
 
+            # Convert sets to lists for JSON serialization
+            results["confirmations"] = list(results["confirmations"])
+            results["indications"] = list(results["indications"])
             return results
 
         def calculate_confidence(self) -> tuple:
@@ -765,20 +768,24 @@ data:
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 payload = runbook.model_dump()
+                # Generate a proper UUID for Qdrant (it doesn't accept arbitrary strings)
+                point_id = str(uuid_mod.uuid5(uuid_mod.NAMESPACE_DNS, runbook.id))
                 response = await client.put(
                     QDRANT_URL + "/collections/runbooks/points",
                     json={
                         "points": [{
-                            "id": runbook.id,
+                            "id": point_id,
                             "vector": embedding,
                             "payload": payload
                         }]
                     }
                 )
-                success = response.status_code == 200
-                if success:
-                    logger.info(f"Stored runbook: {runbook.name} ({runbook.id})")
-                return success
+                if response.status_code == 200:
+                    logger.info(f"Stored runbook: {runbook.name} ({runbook.id}) -> point {point_id}")
+                    return True
+                else:
+                    logger.error(f"Qdrant store failed: {response.status_code} - {response.text}")
+                    return False
             except Exception as e:
                 logger.error("Runbook store error: %s", e)
                 return False
@@ -1122,40 +1129,25 @@ data:
 
         # Case 3: No runbook - escalate to Claude for new runbook creation
         logger.info("No matching runbook - escalating to Claude for analysis and runbook creation")
-        escalation_prompt = f"""## New Alert - No Existing Runbook
-
-### Alert Details
-- Name: {alert.get('alertname', 'Unknown')}
-- Severity: {alert.get('severity', 'warning')}
-- Description: {alert.get('description', 'No description')}
-- Namespace: {alert.get('namespace', 'default')}
-- Labels: {json.dumps(alert.get('labels', {}))}
-
-### Task
-1. Investigate this alert type
-2. Determine the root cause and best fix approach
-3. Create a diagnostic runbook for future occurrences
-
-### Required Runbook Format
-Return a runbook definition as JSON at the end:
-```json
-{{
-  "runbook_name": "descriptive name",
-  "runbook_description": "what this runbook diagnoses and fixes",
-  "triggers": {{"alert_patterns": ["pattern1"], "keywords": ["keyword1"]}},
-  "diagnosis_checks": [
-    {{"name": "Check name", "command": "kubectl command with {{{{pod_name}}}} {{{{namespace}}}} placeholders", "look_for": ["pattern to confirm issue"]}}
-  ],
-  "fix_steps": [
-    {{"name": "Step name", "command": "kubectl fix command"}}
-  ],
-  "validation": [
-    {{"name": "Verify fix", "command": "kubectl verify command", "expected": "expected output"}}
-  ]
-}}
-```
-
-Provide your analysis first, then the runbook JSON."""
+        escalation_prompt = "NEW ALERT - NO EXISTING RUNBOOK\n\n"
+        escalation_prompt += "ALERT DETAILS:\n"
+        escalation_prompt += f"- Name: {alert.get('alertname', 'Unknown')}\n"
+        escalation_prompt += f"- Severity: {alert.get('severity', 'warning')}\n"
+        escalation_prompt += f"- Description: {alert.get('description', 'No description')}\n"
+        escalation_prompt += f"- Namespace: {alert.get('namespace', 'default')}\n"
+        escalation_prompt += f"- Labels: {json.dumps(alert.get('labels', {}))}\n\n"
+        escalation_prompt += "TASK:\n"
+        escalation_prompt += "1. Investigate this alert type\n"
+        escalation_prompt += "2. Determine the root cause and best fix approach\n"
+        escalation_prompt += "3. Create a diagnostic runbook for future occurrences\n\n"
+        escalation_prompt += "REQUIRED RUNBOOK FORMAT:\n"
+        escalation_prompt += "Return a runbook definition as JSON at the end with this structure:\n"
+        escalation_prompt += '{"runbook_name": "...", "runbook_description": "...", '
+        escalation_prompt += '"triggers": {"alert_patterns": [...], "keywords": [...]}, '
+        escalation_prompt += '"diagnosis_checks": [{"name": "...", "command": "kubectl ...", "look_for": [...]}], '
+        escalation_prompt += '"fix_steps": [{"name": "...", "command": "..."}], '
+        escalation_prompt += '"validation": [{"name": "...", "command": "...", "expected": "..."}]}\n\n'
+        escalation_prompt += "Provide your analysis first, then the runbook JSON."
 
         result = await call_claude_agent(
             escalation_prompt,
