@@ -31,7 +31,7 @@ data:
     # Configuration
     # ============================================================================
 
-    CLAUDE_HOME = Path("/root/.claude")
+    CLAUDE_HOME = Path(os.environ.get("HOME", "/home/agent")) / ".claude"
     CREDENTIALS_FILE = CLAUDE_HOME / ".credentials.json"
 
     # MCP Server endpoints (in-cluster)

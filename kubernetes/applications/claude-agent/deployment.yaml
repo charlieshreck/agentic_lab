@@ -18,9 +18,15 @@ spec:
         app: claude-agent
         component: agent
     spec:
-      containers:
-        - name: claude-agent
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: setup
           image: node:22-bookworm
+          securityContext:
+            runAsUser: 0  # Root for package installation
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -28,25 +34,49 @@ spec:
               echo "=== Installing Claude Code ==="
               npm install -g @anthropic-ai/claude-code
 
-              echo "=== Installing Python dependencies ==="
+              echo "=== Installing Python ==="
               apt-get update && apt-get install -y python3 python3-pip python3-venv --no-install-recommends
+
+              echo "=== Setting up user home ==="
+              mkdir -p /home/agent/.claude /home/agent/.kube /home/agent/.local
+              chown -R 1000:1000 /home/agent
+
+              echo "=== Creating venv ==="
               python3 -m venv /opt/venv
+              chown -R 1000:1000 /opt/venv
               . /opt/venv/bin/activate
               pip install --no-cache-dir -r /app/requirements.txt
 
+              echo "✓ Setup complete"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+            - name: agent-home
+              mountPath: /home/agent
+            - name: venv
+              mountPath: /opt/venv
+      containers:
+        - name: claude-agent
+          image: node:22-bookworm
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              export HOME=/home/agent
+
               echo "=== Setting up Claude credentials ==="
-              mkdir -p /root/.claude
+              mkdir -p $HOME/.claude
               if [ -f /secrets/claude/CREDENTIALS_JSON_B64 ]; then
-                  base64 -d /secrets/claude/CREDENTIALS_JSON_B64 > /root/.claude/.credentials.json
-                  chmod 600 /root/.claude/.credentials.json
+                  base64 -d /secrets/claude/CREDENTIALS_JSON_B64 > $HOME/.claude/.credentials.json
+                  chmod 600 $HOME/.claude/.credentials.json
                   echo "✓ Claude credentials configured"
               fi
 
               echo "=== Setting up kubeconfigs ==="
-              mkdir -p /root/.kube
+              mkdir -p $HOME/.kube
               if [ -f /secrets/claude/KUBECONFIG_MERGED_B64 ]; then
-                  base64 -d /secrets/claude/KUBECONFIG_MERGED_B64 > /root/.kube/config
-                  chmod 600 /root/.kube/config
+                  base64 -d /secrets/claude/KUBECONFIG_MERGED_B64 > $HOME/.kube/config
+                  chmod 600 $HOME/.kube/config
                   echo "✓ Kubeconfig configured (prod, monit, agentic)"
               fi
 
@@ -55,13 +85,14 @@ spec:
 
               echo "=== Starting API Server ==="
               cd /app
+              . /opt/venv/bin/activate
               exec uvicorn main:app --host 0.0.0.0 --port 8000
           ports:
             - containerPort: 8000
               name: http
           env:
             - name: HOME
-              value: "/root"
+              value: "/home/agent"
             - name: PATH
               value: "/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
             - name: KNOWLEDGE_MCP_URL
@@ -81,10 +112,10 @@ spec:
               readOnly: true
             - name: workspace
               mountPath: /workspace
-            - name: claude-home
-              mountPath: /root/.claude
-            - name: kube-dir
-              mountPath: /root/.kube
+            - name: agent-home
+              mountPath: /home/agent
+            - name: venv
+              mountPath: /opt/venv
           resources:
             requests:
               memory: "512Mi"
@@ -114,9 +145,9 @@ spec:
             secretName: claude-credentials
         - name: workspace
           emptyDir: {}
-        - name: claude-home
+        - name: agent-home
           emptyDir: {}
-        - name: kube-dir
+        - name: venv
           emptyDir: {}
 ---
 apiVersion: v1

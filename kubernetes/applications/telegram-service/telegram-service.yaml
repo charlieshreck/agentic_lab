@@ -261,7 +261,10 @@ data:
         text = re.sub(r'@\w+', '', raw_text).strip().lstrip('/')
         chat_id = message.get("chat", {}).get("id")
         topic_id = message.get("message_thread_id")
-        logger.info("Processing message: '%s' (parsed: '%s')", raw_text, text)
+        logger.info("Processing message: '%s' (parsed: '%s') chat=%s", raw_text, text, chat_id)
+        if not text:
+            logger.info("Empty text, ignoring")
+            return
         if text == "status":
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(LANGGRAPH_URL + "/status")
@@ -275,9 +278,14 @@ data:
         elif text == "help":
             help_text = "*Available Commands*\n\n- `status` - Show system status\n- `help` - Show this help\n- Or just ask any question to query the AI agent\n"
             await send_message(chat_id, help_text, topic_id=topic_id)
-        elif text:
+        else:
             # Forward any other message to Claude Agent
-            await process_agent_query(chat_id, topic_id, raw_text, message.get("from", {}).get("username", "unknown"))
+            logger.info("Forwarding to Claude Agent...")
+            try:
+                await process_agent_query(chat_id, topic_id, raw_text, message.get("from", {}).get("username", "unknown"))
+            except Exception as e:
+                logger.error("Failed to forward to agent: %s", e)
+                await send_message(chat_id, "*Error:* Failed to process query: " + str(e), topic_id=topic_id)
 
     async def process_agent_query(chat_id, topic_id, query, username):
         """Forward query to Claude Agent and return response."""
