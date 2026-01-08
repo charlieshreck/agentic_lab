@@ -312,14 +312,22 @@ data:
                     answer = result.get("result", "No response generated")
                     # Truncate if too long for Telegram (4096 char limit)
                     if len(answer) > 4000:
-                        answer = answer[:4000] + "\n\n_...truncated_"
+                        answer = answer[:4000] + "\n\n...truncated"
                 else:
-                    answer = "*Error:* " + result.get("error", "Unknown error")
+                    answer = "Error: " + result.get("error", "Unknown error")
 
                 # Delete thinking message and send response
                 if thinking_msg_id:
                     await telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": thinking_msg_id})
-                await send_message(chat_id, answer, topic_id=topic_id)
+                # Send without parse_mode to avoid markdown parsing errors
+                await telegram_request("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": answer,
+                    "message_thread_id": topic_id
+                } if topic_id else {
+                    "chat_id": chat_id,
+                    "text": answer
+                })
 
         except httpx.TimeoutException:
             if thinking_msg_id:
