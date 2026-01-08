@@ -294,8 +294,10 @@ data:
             "--model", model,
         ]
         if allowed_tools:
-            for tool in allowed_tools:
-                cmd.extend(["--allowedTools", tool])
+            # Pass allowed tools as space-separated list
+            cmd.extend(["--allowedTools"] + allowed_tools)
+        # Use -- to separate options from prompt (required when using --allowedTools)
+        cmd.append("--")
         cmd.append(prompt)
 
         env = os.environ.copy()
@@ -376,8 +378,10 @@ data:
                 "--model", request.model,
             ]
             if request.allowed_tools:
-                for tool in request.allowed_tools:
-                    cmd.extend(["--allowedTools", tool])
+                # Pass allowed tools as space-separated list
+                cmd.extend(["--allowedTools"] + request.allowed_tools)
+            # Use -- to separate options from prompt (required when using --allowedTools)
+            cmd.append("--")
             cmd.append(request.prompt)
 
             env = os.environ.copy()
