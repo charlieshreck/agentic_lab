@@ -226,7 +226,9 @@ data:
                         success = result.get("success", result.get("exit_code", 1) == 0)
                         self.execution_log.append(f"  -> {'OK' if success else 'FAIL'}: {output[:200]}")
                         return success, output
-                    return False, f"HTTP {response.status_code}"
+                    # Command execution not available - escalate
+                    self.execution_log.append(f"  -> INFRA MCP unavailable ({response.status_code})")
+                    return False, f"Command execution unavailable (HTTP {response.status_code})"
                 except Exception as e:
                     self.execution_log.append(f"  -> ERROR: {e}")
                     return False, str(e)

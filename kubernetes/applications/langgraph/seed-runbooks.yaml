@@ -451,7 +451,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: loader
-          image: curlimages/curl:latest
+          image: python:3.11-alpine
           command:
             - /bin/sh
             - -c
@@ -460,29 +460,45 @@ spec:
               sleep 30
 
               # Check if runbooks collection exists
-              COLLECTION_EXISTS=$(curl -s http://qdrant:6333/collections/runbooks | grep -c '"status":"ok"' || echo "0")
+              COLLECTION_EXISTS=$(wget -qO- http://qdrant:6333/collections/runbooks 2>/dev/null | grep -c '"status":"ok"' || echo "0")
 
               if [ "$COLLECTION_EXISTS" = "0" ]; then
                 echo "Creating runbooks collection..."
-                curl -X PUT http://qdrant:6333/collections/runbooks \
-                  -H "Content-Type: application/json" \
-                  -d '{
-                    "vectors": {
-                      "size": 768,
-                      "distance": "Cosine"
-                    }
-                  }'
+                wget -qO- --post-data='{"vectors":{"size":768,"distance":"Cosine"}}' \
+                  --header='Content-Type: application/json' \
+                  http://qdrant:6333/collections/runbooks || true
               fi
 
               echo "Loading seed runbooks via LangGraph..."
-              # Load each runbook through LangGraph's store endpoint
-              cat /config/runbooks.json | while read -r line; do
-                if [ -n "$line" ]; then
-                  curl -X POST http://langgraph:8000/runbook/store \
-                    -H "Content-Type: application/json" \
-                    -d "$line" || true
-                fi
-              done
+
+              # Use Python to properly parse JSON array and send each runbook
+              python3 << 'EOF'
+              import json
+              import urllib.request
+              import urllib.error
+
+              with open('/config/runbooks.json', 'r') as f:
+                  runbooks = json.load(f)
+
+              for runbook in runbooks:
+                  print(f"Loading runbook: {runbook.get('name', 'unknown')}")
+                  try:
+                      data = json.dumps(runbook).encode('utf-8')
+                      req = urllib.request.Request(
+                          'http://langgraph:8000/runbook/store',
+                          data=data,
+                          headers={'Content-Type': 'application/json'}
+                      )
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          result = resp.read().decode('utf-8')
+                          print(f"  Result: {result}")
+                  except urllib.error.URLError as e:
+                      print(f"  Error: {e}")
+                  except Exception as e:
+                      print(f"  Error: {e}")
+
+              print("All runbooks processed")
+              EOF
 
               echo "Seed runbooks loaded successfully"
           volumeMounts:

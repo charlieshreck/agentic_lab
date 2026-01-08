@@ -315,6 +315,56 @@ async def talosctl_services(node: str = "10.20.0.40") -> List[dict]:
     return services
 
 
+# HTTP endpoint for runbook executor
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel as PydanticBaseModel
+
+class ExecuteRequest(PydanticBaseModel):
+    command: str
+    timeout: int = 30
+
+class ExecuteResponse(PydanticBaseModel):
+    success: bool
+    output: str
+    error: Optional[str] = None
+
+http_app = FastAPI()
+
+@http_app.get("/health")
+async def http_health():
+    return {"status": "healthy"}
+
+@http_app.post("/execute", response_model=ExecuteResponse)
+async def execute_command(request: ExecuteRequest):
+    """
+    Execute a kubectl command for runbook automation.
+    Only allows kubectl commands for safety.
+    """
+    command = request.command.strip()
+
+    # Safety check - only allow kubectl commands
+    if not command.startswith("kubectl "):
+        raise HTTPException(status_code=400, detail="Only kubectl commands are allowed")
+
+    # Parse command into args
+    import shlex
+    try:
+        parts = shlex.split(command)
+        if parts[0] != "kubectl":
+            raise HTTPException(status_code=400, detail="Only kubectl commands are allowed")
+        kubectl_args = parts[1:]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid command syntax: {e}")
+
+    stdout, stderr, returncode = run_kubectl(kubectl_args, timeout=request.timeout)
+
+    return ExecuteResponse(
+        success=(returncode == 0),
+        output=stdout,
+        error=stderr if returncode != 0 else None
+    )
+
+
 def main():
     port = int(os.environ.get("PORT", "8000"))
     transport = os.environ.get("MCP_TRANSPORT", "sse")
@@ -323,16 +373,19 @@ def main():
 
     if transport == "http":
         from starlette.middleware.cors import CORSMiddleware
-        app = mcp.streamable_http_app()
-        app.add_middleware(
+        # Use http_app which has the /execute endpoint
+        http_app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
             allow_credentials=True,
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
         )
+        # Mount MCP routes on the http_app
+        mcp_app = mcp.streamable_http_app()
+        http_app.mount("/mcp", mcp_app)
         import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=port)
+        uvicorn.run(http_app, host="0.0.0.0", port=port)
     else:
         mcp.run(transport="sse", host="0.0.0.0", port=port)
 

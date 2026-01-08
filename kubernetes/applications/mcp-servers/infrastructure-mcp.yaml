@@ -128,10 +128,45 @@ data:
         except:
             return []
 
+    # HTTP API for runbook executor
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel as PydanticBaseModel
+    import shlex
+
+    class ExecuteRequest(PydanticBaseModel):
+        command: str
+        timeout: int = 30
+
+    class ExecuteResponse(PydanticBaseModel):
+        success: bool
+        output: str
+        error: Optional[str] = None
+
+    http_app = FastAPI()
+
+    @http_app.get("/health")
+    async def http_health():
+        return {"status": "healthy"}
+
+    @http_app.post("/execute", response_model=ExecuteResponse)
+    async def execute_command(request: ExecuteRequest):
+        """Execute a kubectl command for runbook automation."""
+        command = request.command.strip()
+        if not command.startswith("kubectl "):
+            raise HTTPException(status_code=400, detail="Only kubectl commands are allowed")
+        try:
+            parts = shlex.split(command)
+            kubectl_args = parts[1:]
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid command: {e}")
+        stdout, stderr, rc = run_kubectl(kubectl_args, timeout=request.timeout)
+        return ExecuteResponse(success=(rc == 0), output=stdout, error=stderr if rc != 0 else None)
+
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting infrastructure MCP on port {port}")
-        mcp.run(transport="sse", host="0.0.0.0", port=port)
+        import uvicorn
+        uvicorn.run(http_app, host="0.0.0.0", port=port)
 
     if __name__ == "__main__":
         main()
@@ -140,6 +175,7 @@ data:
     fastmcp>=2.7.0
     pydantic>=2.11.0
     uvicorn>=0.34.0
+    fastapi>=0.115.0
 ---
 apiVersion: apps/v1
 kind: Deployment
