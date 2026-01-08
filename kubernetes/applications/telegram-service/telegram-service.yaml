@@ -788,21 +788,31 @@ data:
             "raised_at": datetime.utcnow().isoformat()
         }
 
-        # Build message
+        # Build message - escape markdown special chars in user content
+        def escape_md(text: str) -> str:
+            if not text:
+                return ""
+            # Escape markdown special characters
+            for char in ['*', '_', '`', '[', ']']:
+                text = text.replace(char, '\\' + char)
+            return text
+
         icon = "🚨" if request.severity == "critical" else "⚠️"
-        msg = f"{icon} *AI Alert: {request.name}*\n\n"
+        msg = f"{icon} *AI Alert:* {escape_md(request.name)}\n\n"
         msg += f"*Severity:* {request.severity}\n"
-        msg += f"*Source:* {request.source}\n\n"
-        msg += f"*Description:*\n{request.description}\n"
+        msg += f"*Source:* {escape_md(request.source)}\n\n"
+        msg += f"*Description:*\n{escape_md(request.description)}\n"
         if request.suggested_fix:
-            msg += f"\n*Suggested Fix:*\n```\n{request.suggested_fix}\n```"
+            # Truncate long fixes and escape
+            fix_text = request.suggested_fix[:500] if len(request.suggested_fix) > 500 else request.suggested_fix
+            msg += f"\n*Suggested Fix:*\n{escape_md(fix_text)}"
 
         # Build keyboard with appropriate options
         has_fix = bool(request.suggested_fix)
         keyboard = build_alert_keyboard(alert_id, has_fix)
 
-        # Send to topic
-        result = await send_message(FORUM_CHAT_ID, msg, topic_id=topic_id, reply_markup=keyboard)
+        # Send to topic - use HTML parse mode to avoid markdown issues, or no parse mode
+        result = await send_message(FORUM_CHAT_ID, msg, topic_id=topic_id, reply_markup=keyboard, parse_mode="Markdown")
 
         return {
             "alert_id": alert_id,

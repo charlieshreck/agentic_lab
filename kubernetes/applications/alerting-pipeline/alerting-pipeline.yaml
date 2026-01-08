@@ -29,6 +29,9 @@ data:
 
     # Service URLs
     TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
+    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "local/qwen2.5:7b")
 
     # MCP Server endpoints
     MCP_SERVERS = {
@@ -38,6 +41,9 @@ data:
         "opnsense": os.environ.get("OPNSENSE_MCP_URL", "http://opnsense-mcp:8000"),
         "adguard": os.environ.get("ADGUARD_MCP_URL", "http://adguard-mcp:8000"),
     }
+
+    # Runbook cache (in-memory for quick lookups)
+    runbook_cache: Dict[str, dict] = {}
 
     # Poll intervals in seconds
     POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "300"))  # 5 minutes default
@@ -137,6 +143,138 @@ data:
 
     CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
 
+    # ============================================================================
+    # Local LLM Functions (via LiteLLM/Ollama)
+    # ============================================================================
+
+    async def query_local_llm(prompt: str, system_prompt: str = None) -> dict:
+        """Query local LLM via LiteLLM proxy (fast, free, private)."""
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.post(
+                    f"{LITELLM_URL}/v1/chat/completions",
+                    json={
+                        "model": LOCAL_MODEL,
+                        "messages": messages,
+                        "temperature": 0.3,
+                        "max_tokens": 1000
+                    }
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    return {"result": content}
+                return {"error": f"HTTP {response.status_code}: {response.text[:200]}"}
+            except Exception as e:
+                return {"error": str(e)}
+
+    async def get_embedding(text: str) -> List[float]:
+        """Get embedding vector from local model via LiteLLM."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    f"{LITELLM_URL}/v1/embeddings",
+                    json={
+                        "model": "embeddings",
+                        "input": text
+                    }
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("data", [{}])[0].get("embedding", [])
+                return []
+            except Exception as e:
+                logger.error(f"Embedding error: {e}")
+                return []
+
+    # ============================================================================
+    # Qdrant Runbook Functions
+    # ============================================================================
+
+    async def search_runbooks(query: str, limit: int = 3) -> List[dict]:
+        """Search Qdrant for relevant runbooks based on query."""
+        embedding = await get_embedding(query)
+        if not embedding:
+            return []
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(
+                    f"{QDRANT_URL}/collections/runbooks/points/search",
+                    json={
+                        "vector": embedding,
+                        "limit": limit,
+                        "with_payload": True,
+                        "score_threshold": 0.7  # Only return good matches
+                    }
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return [
+                        {
+                            "id": hit.get("id"),
+                            "score": hit.get("score"),
+                            "name": hit.get("payload", {}).get("name", "Unknown"),
+                            "description": hit.get("payload", {}).get("description", ""),
+                            "steps": hit.get("payload", {}).get("steps", []),
+                            "fix_command": hit.get("payload", {}).get("fix_command", ""),
+                            "source": hit.get("payload", {}).get("source", "unknown")
+                        }
+                        for hit in data.get("result", [])
+                    ]
+                return []
+            except Exception as e:
+                logger.error(f"Runbook search error: {e}")
+                return []
+
+    async def store_runbook(name: str, description: str, steps: List[str], fix_command: str = None, source: str = "claude") -> bool:
+        """Store a new runbook in Qdrant for future local handling."""
+        # Generate embedding for the description
+        embedding = await get_embedding(f"{name} {description}")
+        if not embedding:
+            logger.error("Failed to generate embedding for runbook")
+            return False
+
+        import uuid as uuid_mod
+        point_id = str(uuid_mod.uuid4())
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.put(
+                    f"{QDRANT_URL}/collections/runbooks/points",
+                    json={
+                        "points": [{
+                            "id": point_id,
+                            "vector": embedding,
+                            "payload": {
+                                "name": name,
+                                "description": description,
+                                "steps": steps,
+                                "fix_command": fix_command,
+                                "source": source,
+                                "created_at": datetime.utcnow().isoformat()
+                            }
+                        }]
+                    }
+                )
+                if response.status_code == 200:
+                    logger.info(f"Stored runbook: {name}")
+                    return True
+                logger.error(f"Failed to store runbook: {response.text}")
+                return False
+            except Exception as e:
+                logger.error(f"Runbook store error: {e}")
+                return False
+
+    # ============================================================================
+    # Claude Agent Functions (for escalation)
+    # ============================================================================
+
     async def query_via_claude_agent(query: str, timeout: int = 120) -> dict:
         """Query infrastructure via Claude Agent which can access MCP tools."""
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -222,37 +360,168 @@ data:
             except Exception:
                 return False
 
-    async def run_deep_health_check():
-        """Run comprehensive health check via Claude Agent (expensive, runs less frequently)."""
-        logger.info("Running deep health check via Claude Agent...")
+    async def analyze_issue_locally(issue_description: str) -> dict:
+        """Use local LLM to analyze an issue and determine severity/category."""
+        system_prompt = """You are a homelab infrastructure analyst. Analyze the issue and respond in JSON format:
+{
+    "severity": "critical|warning|info",
+    "category": "network|storage|compute|service",
+    "summary": "brief summary",
+    "needs_escalation": true/false,
+    "reason": "why escalation is needed or not"
+}
+Only set needs_escalation to true if the issue is complex or requires investigation."""
 
-        queries = [
-            ("UniFi", "Check UniFi network status. List any devices that are offline or have issues. Report health status."),
-            ("TrueNAS", "Check TrueNAS storage pools. Report any degraded pools or low disk space warnings."),
-            ("Proxmox", "Check Proxmox cluster status. Report any offline nodes or high resource usage."),
+        result = await query_local_llm(issue_description, system_prompt)
+        if "error" in result:
+            return {"needs_escalation": True, "reason": "Local LLM unavailable"}
+
+        try:
+            import json
+            # Try to parse JSON from response
+            response = result.get("result", "{}")
+            # Handle markdown code blocks
+            if "```json" in response:
+                response = response.split("```json")[1].split("```")[0]
+            elif "```" in response:
+                response = response.split("```")[1].split("```")[0]
+            return json.loads(response.strip())
+        except:
+            return {"needs_escalation": True, "reason": "Could not parse local analysis"}
+
+    async def handle_issue_with_runbook(issue: str, runbook: dict) -> bool:
+        """Handle a known issue using an existing runbook."""
+        logger.info(f"Handling issue with runbook: {runbook.get('name')}")
+
+        # Notify user that we're using an existing runbook
+        await raise_alert(
+            name=f"Known Issue: {runbook.get('name', 'Unknown')}",
+            severity="info",
+            description=f"Detected known issue. Applying existing runbook.\n\nIssue: {issue[:200]}",
+            source="local-llm",
+            suggested_fix=runbook.get("fix_command") or "\n".join(runbook.get("steps", [])),
+            context=f"Runbook match score: {runbook.get('score', 0):.2f}"
+        )
+        return True
+
+    async def escalate_to_claude(issue: str, source: str) -> dict:
+        """Escalate unknown issue to Claude Agent for investigation and runbook creation."""
+        logger.info(f"Escalating to Claude Agent: {issue[:100]}...")
+
+        escalation_prompt = f"""Investigate this infrastructure issue and create a runbook for future handling:
+
+Issue: {issue}
+Source: {source}
+
+Please:
+1. Analyze the issue
+2. Provide a diagnosis
+3. Suggest specific fix steps
+4. Format your response so it can be saved as a runbook
+
+End your response with a JSON block like:
+```json
+{{
+    "runbook_name": "Short descriptive name",
+    "runbook_description": "What this runbook handles",
+    "runbook_steps": ["Step 1", "Step 2", ...],
+    "fix_command": "Optional single command to fix"
+}}
+```"""
+
+        result = await query_via_claude_agent(escalation_prompt, timeout=300)
+        return result
+
+    async def run_deep_health_check():
+        """Run tiered health check: Local LLM first, escalate to Claude only if needed."""
+        logger.info("Running tiered health check...")
+
+        # Simulated health data (in production, this would come from MCP servers)
+        # For now, we'll use the Claude Agent to gather data, then process locally
+        health_queries = [
+            ("UniFi", "network", "Check UniFi network - list any offline devices or issues"),
+            ("TrueNAS", "storage", "Check TrueNAS pools - report degraded or low space"),
+            ("Proxmox", "compute", "Check Proxmox nodes - report offline or high resource usage"),
         ]
 
-        for source, query in queries:
+        for source, category, query in health_queries:
             try:
-                result = await query_via_claude_agent(query, timeout=180)
-                if "error" in result:
-                    logger.warning(f"{source} deep check failed: {result['error']}")
+                # Step 1: Get current status (still needs Claude for MCP access)
+                status_result = await query_via_claude_agent(
+                    f"Briefly check {source} status. Just list any issues found, nothing else.",
+                    timeout=120
+                )
+
+                if "error" in status_result:
+                    logger.warning(f"{source} status check failed: {status_result['error']}")
                     continue
 
-                response = result.get("result", "").lower()
+                status_text = status_result.get("result", "")
 
-                # Simple keyword detection for issues
-                alert_keywords = ["offline", "degraded", "critical", "error", "failed", "down", "unreachable"]
-                if any(kw in response for kw in alert_keywords):
+                # Step 2: Check if there are any issues
+                alert_keywords = ["offline", "degraded", "critical", "error", "failed", "down", "unreachable", "warning"]
+                if not any(kw in status_text.lower() for kw in alert_keywords):
+                    logger.info(f"{source}: No issues detected")
+                    continue
+
+                logger.info(f"{source}: Potential issue detected, analyzing locally...")
+
+                # Step 3: Analyze locally with LLM
+                analysis = await analyze_issue_locally(f"{source} issue: {status_text}")
+
+                # Step 4: Search for existing runbook
+                runbooks = await search_runbooks(f"{source} {status_text[:200]}")
+
+                if runbooks and runbooks[0].get("score", 0) > 0.75:
+                    # Known issue - handle with existing runbook
+                    logger.info(f"Found matching runbook: {runbooks[0].get('name')}")
+                    await handle_issue_with_runbook(status_text, runbooks[0])
+
+                elif analysis.get("needs_escalation", True):
+                    # Unknown issue - escalate to Claude
+                    logger.info(f"Unknown issue, escalating to Claude...")
+                    claude_result = await escalate_to_claude(status_text, source)
+
+                    if "error" not in claude_result:
+                        response = claude_result.get("result", "")
+
+                        # Raise alert with Claude's analysis
+                        await raise_alert(
+                            name=f"{source} Issue Requires Attention",
+                            severity=analysis.get("severity", "warning"),
+                            description=response[:1000],
+                            source=source.lower(),
+                            suggested_fix=analysis.get("summary", "Review Claude's analysis")
+                        )
+
+                        # Try to extract and store runbook from Claude's response
+                        try:
+                            import json
+                            if "```json" in response:
+                                json_str = response.split("```json")[1].split("```")[0]
+                                runbook_data = json.loads(json_str.strip())
+                                await store_runbook(
+                                    name=runbook_data.get("runbook_name", f"{source} issue"),
+                                    description=runbook_data.get("runbook_description", status_text[:200]),
+                                    steps=runbook_data.get("runbook_steps", []),
+                                    fix_command=runbook_data.get("fix_command"),
+                                    source="claude"
+                                )
+                                logger.info("Stored new runbook from Claude's response")
+                        except Exception as e:
+                            logger.warning(f"Could not extract runbook from response: {e}")
+                else:
+                    # Local LLM says it's not critical, just log
+                    logger.info(f"{source}: Local analysis indicates minor issue, not escalating")
                     await raise_alert(
-                        name=f"{source} Health Issue Detected",
-                        severity="warning",
-                        description=f"Health check detected potential issues:\n\n{result.get('result', '')[:500]}",
-                        source=source.lower(),
-                        suggested_fix=f"Review {source} status and address any issues found"
+                        name=f"{source}: Minor Issue",
+                        severity="info",
+                        description=f"Local analysis: {analysis.get('summary', 'Unknown')}\n\nDetails: {status_text[:300]}",
+                        source="local-llm"
                     )
+
             except Exception as e:
-                logger.error(f"Deep health check error for {source}: {e}")
+                logger.error(f"Health check error for {source}: {e}")
 
     async def check_mcp_service_health():
         """Check if MCP services are reachable (basic connectivity check)."""
@@ -392,6 +661,12 @@ spec:
               value: "http://adguard-mcp:8000"
             - name: CLAUDE_AGENT_URL
               value: "http://claude-agent:8000"
+            - name: LITELLM_URL
+              value: "http://litellm:4000"
+            - name: QDRANT_URL
+              value: "http://qdrant:6333"
+            - name: LOCAL_MODEL
+              value: "local/qwen2.5:7b"
             - name: POLL_INTERVAL
               value: "300"  # 5 minutes
             - name: DEEP_CHECK_INTERVAL
