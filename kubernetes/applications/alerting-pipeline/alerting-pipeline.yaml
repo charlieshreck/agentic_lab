@@ -29,6 +29,7 @@ data:
 
     # Service URLs
     TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
+    LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "local/qwen2.5:7b")
@@ -311,9 +312,46 @@ data:
             except Exception as e:
                 return {"error": str(e)}
 
+    async def forward_to_langgraph(alertname: str, severity: str, description: str,
+                                    source: str, namespace: str = "ai-platform"):
+        """Forward alert to LangGraph for orchestrated handling."""
+        alert_key = f"{source}:{alertname}"
+        if alert_key in raised_alerts:
+            elapsed = (datetime.utcnow() - raised_alerts[alert_key]).total_seconds()
+            if elapsed < ALERT_COOLDOWN_SECONDS:
+                logger.debug(f"Alert '{alertname}' still in cooldown ({elapsed:.0f}s)")
+                return None
+
+        logger.info(f"Forwarding to LangGraph: {alertname} ({severity})")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.post(
+                    f"{LANGGRAPH_URL}/alert",
+                    json={
+                        "id": f"alert-{source}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+                        "alertname": alertname,
+                        "severity": severity,
+                        "description": description,
+                        "namespace": namespace,
+                        "labels": {"source": source},
+                        "annotations": {}
+                    }
+                )
+                if response.status_code == 200:
+                    raised_alerts[alert_key] = datetime.utcnow()
+                    result = response.json()
+                    logger.info(f"LangGraph processing: {result}")
+                    return result
+                else:
+                    logger.error(f"LangGraph error: {response.text}")
+                    return None
+            except Exception as e:
+                logger.error(f"Error forwarding to LangGraph: {e}")
+                return None
+
     async def raise_alert(name: str, severity: str, description: str,
                           source: str, suggested_fix: str = None, context: str = None):
-        """Raise an alert via the Telegram service."""
+        """Raise an alert via the Telegram service (fallback/direct alerts)."""
         # Check cooldown
         alert_key = f"{source}:{name}"
         if alert_key in raised_alerts:
@@ -419,11 +457,10 @@ data:
         return result
 
     async def run_deep_health_check():
-        """Run tiered health check: Local LLM first, escalate to Claude only if needed."""
-        logger.info("Running tiered health check...")
+        """Run health check and forward issues to LangGraph for orchestrated handling."""
+        logger.info("Running health check (forwarding to LangGraph)...")
 
-        # Simulated health data (in production, this would come from MCP servers)
-        # For now, we'll use the Claude Agent to gather data, then process locally
+        # Use Claude Agent to gather status from MCP servers, then forward issues to LangGraph
         health_queries = [
             ("UniFi", "network", "Check UniFi network - list any offline devices or issues"),
             ("TrueNAS", "storage", "Check TrueNAS pools - report degraded or low space"),
@@ -432,7 +469,7 @@ data:
 
         for source, category, query in health_queries:
             try:
-                # Step 1: Get current status (still needs Claude for MCP access)
+                # Step 1: Get current status via Claude Agent (has MCP access)
                 status_result = await query_via_claude_agent(
                     f"Briefly check {source} status. Just list any issues found, nothing else.",
                     timeout=120
@@ -450,60 +487,33 @@ data:
                     logger.info(f"{source}: No issues detected")
                     continue
 
-                logger.info(f"{source}: Potential issue detected, analyzing locally...")
+                # Step 3: Determine severity based on keywords
+                severity = "warning"
+                critical_keywords = ["offline", "degraded", "critical", "failed", "down"]
+                if any(kw in status_text.lower() for kw in critical_keywords):
+                    severity = "critical"
 
-                # Step 3: Analyze locally with LLM
-                analysis = await analyze_issue_locally(f"{source} issue: {status_text}")
+                # Step 4: Forward to LangGraph for orchestrated handling
+                # LangGraph will: assess → search runbooks → generate solutions → request approval
+                logger.info(f"{source}: Issue detected, forwarding to LangGraph...")
+                result = await forward_to_langgraph(
+                    alertname=f"{source} Health Issue",
+                    severity=severity,
+                    description=status_text,
+                    source=source.lower(),
+                    namespace=category
+                )
 
-                # Step 4: Search for existing runbook
-                runbooks = await search_runbooks(f"{source} {status_text[:200]}")
-
-                if runbooks and runbooks[0].get("score", 0) > 0.75:
-                    # Known issue - handle with existing runbook
-                    logger.info(f"Found matching runbook: {runbooks[0].get('name')}")
-                    await handle_issue_with_runbook(status_text, runbooks[0])
-
-                elif analysis.get("needs_escalation", True):
-                    # Unknown issue - escalate to Claude
-                    logger.info(f"Unknown issue, escalating to Claude...")
-                    claude_result = await escalate_to_claude(status_text, source)
-
-                    if "error" not in claude_result:
-                        response = claude_result.get("result", "")
-
-                        # Raise alert with Claude's analysis
-                        await raise_alert(
-                            name=f"{source} Issue Requires Attention",
-                            severity=analysis.get("severity", "warning"),
-                            description=response[:1000],
-                            source=source.lower(),
-                            suggested_fix=analysis.get("summary", "Review Claude's analysis")
-                        )
-
-                        # Try to extract and store runbook from Claude's response
-                        try:
-                            import json
-                            if "```json" in response:
-                                json_str = response.split("```json")[1].split("```")[0]
-                                runbook_data = json.loads(json_str.strip())
-                                await store_runbook(
-                                    name=runbook_data.get("runbook_name", f"{source} issue"),
-                                    description=runbook_data.get("runbook_description", status_text[:200]),
-                                    steps=runbook_data.get("runbook_steps", []),
-                                    fix_command=runbook_data.get("fix_command"),
-                                    source="claude"
-                                )
-                                logger.info("Stored new runbook from Claude's response")
-                        except Exception as e:
-                            logger.warning(f"Could not extract runbook from response: {e}")
+                if result:
+                    logger.info(f"{source}: LangGraph handling - status: {result.get('status')}, solutions: {result.get('solutions_count', 0)}")
                 else:
-                    # Local LLM says it's not critical, just log
-                    logger.info(f"{source}: Local analysis indicates minor issue, not escalating")
+                    # Fallback to direct Telegram alert if LangGraph fails
+                    logger.warning(f"{source}: LangGraph unavailable, sending direct alert")
                     await raise_alert(
-                        name=f"{source}: Minor Issue",
-                        severity="info",
-                        description=f"Local analysis: {analysis.get('summary', 'Unknown')}\n\nDetails: {status_text[:300]}",
-                        source="local-llm"
+                        name=f"{source} Health Issue",
+                        severity=severity,
+                        description=status_text,
+                        source=source.lower()
                     )
 
             except Exception as e:
@@ -635,6 +645,8 @@ spec:
               value: "8000"
             - name: TELEGRAM_SERVICE_URL
               value: "http://telegram-service:8000"
+            - name: LANGGRAPH_URL
+              value: "http://langgraph:8000"
             - name: UNIFI_MCP_URL
               value: "http://unifi-mcp:8000"
             - name: TRUENAS_MCP_URL

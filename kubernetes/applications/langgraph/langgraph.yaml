@@ -29,6 +29,7 @@ data:
     POSTGRES_URL = os.environ.get("POSTGRES_URL", "postgresql://postgres:postgres@postgres:5432/langgraph")
     REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
@@ -36,6 +37,7 @@ data:
 
     # Complexity threshold for routing to Claude vs local LLM
     CLAUDE_COMPLEXITY_THRESHOLD = os.environ.get("CLAUDE_COMPLEXITY_THRESHOLD", "high")
+    RUNBOOK_MATCH_THRESHOLD = float(os.environ.get("RUNBOOK_MATCH_THRESHOLD", "0.75"))
 
     class AgentState(TypedDict):
         messages: Annotated[Sequence[BaseMessage], lambda x, y: x + y]
@@ -48,6 +50,8 @@ data:
         runbook_id: str
         topic_id: int
         thread_id: str
+        runbook_match: dict  # Matched runbook from Qdrant if found
+        handled_locally: bool  # Whether issue was handled with existing runbook
 
     pending_approvals = {}
     app = FastAPI(title="LangGraph Orchestrator")
@@ -106,6 +110,79 @@ data:
             except Exception as e:
                 logger.error("Telegram service call failed: %s", e)
                 return {"error": str(e)}
+
+    async def get_embedding(text: str):
+        """Get embedding from local model via LiteLLM."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    LITELLM_URL + "/v1/embeddings",
+                    json={"model": "embeddings", "input": text}
+                )
+                if response.status_code == 200:
+                    return response.json().get("data", [{}])[0].get("embedding", [])
+                return []
+            except Exception as e:
+                logger.error("Embedding error: %s", e)
+                return []
+
+    async def search_runbooks_qdrant(query: str, limit: int = 3):
+        """Search Qdrant for relevant runbooks."""
+        embedding = await get_embedding(query)
+        if not embedding:
+            return []
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(
+                    QDRANT_URL + "/collections/runbooks/points/search",
+                    json={"vector": embedding, "limit": limit, "with_payload": True, "score_threshold": 0.5}
+                )
+                if response.status_code == 200:
+                    return [
+                        {
+                            "id": hit.get("id"),
+                            "score": hit.get("score"),
+                            "name": hit.get("payload", {}).get("name", "Unknown"),
+                            "description": hit.get("payload", {}).get("description", ""),
+                            "steps": hit.get("payload", {}).get("steps", []),
+                            "fix_command": hit.get("payload", {}).get("fix_command", "")
+                        }
+                        for hit in response.json().get("result", [])
+                    ]
+                return []
+            except Exception as e:
+                logger.error("Runbook search error: %s", e)
+                return []
+
+    async def store_runbook_qdrant(name: str, description: str, steps: list, fix_command: str = None):
+        """Store a new runbook in Qdrant."""
+        import uuid as uuid_mod
+        embedding = await get_embedding(f"{name} {description}")
+        if not embedding:
+            return False
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.put(
+                    QDRANT_URL + "/collections/runbooks/points",
+                    json={
+                        "points": [{
+                            "id": str(uuid_mod.uuid4()),
+                            "vector": embedding,
+                            "payload": {
+                                "name": name,
+                                "description": description,
+                                "steps": steps,
+                                "fix_command": fix_command,
+                                "source": "langgraph",
+                                "created_at": datetime.utcnow().isoformat()
+                            }
+                        }]
+                    }
+                )
+                return response.status_code == 200
+            except Exception as e:
+                logger.error("Runbook store error: %s", e)
+                return False
 
     async def call_claude_agent(prompt: str, context: dict = None, allowed_tools: list = None):
         """
@@ -167,46 +244,124 @@ data:
     Respond with JSON array containing objects with: name, description, impact, risk, commands"""
 
     async def assess_alert(state):
+        """Assess alert using local LLM first, search for existing runbooks."""
         alert = state["alert"]
-        similar = await call_knowledge_mcp("search", "POST", {
-            "collection": "runbooks",
-            "query": str(alert.get("alertname", "")) + " " + str(alert.get("description", "")),
-            "limit": 3
-        })
-        prompt = build_assessment_prompt(alert, similar)
+        alert_text = f"{alert.get('alertname', '')} {alert.get('description', '')}"
+
+        # Step 1: Search Qdrant for existing runbooks (semantic search)
+        logger.info("Searching for matching runbooks...")
+        runbooks = await search_runbooks_qdrant(alert_text, limit=3)
+
+        runbook_match = None
+        if runbooks and runbooks[0].get("score", 0) >= RUNBOOK_MATCH_THRESHOLD:
+            runbook_match = runbooks[0]
+            logger.info(f"Found matching runbook: {runbook_match.get('name')} (score: {runbook_match.get('score'):.2f})")
+
+        # Step 2: Use local LLM to assess complexity and domain
+        prompt = build_assessment_prompt(alert, runbooks)
+        logger.info("Assessing alert with local LLM...")
         result = await call_litellm([{"role": "user", "content": prompt}])
+
         try:
-            assessment = json.loads(result.strip().replace("```json", "").replace("```", ""))
+            # Parse JSON from response
+            clean_result = result.strip()
+            if "```json" in clean_result:
+                clean_result = clean_result.split("```json")[1].split("```")[0]
+            elif "```" in clean_result:
+                clean_result = clean_result.split("```")[1].split("```")[0]
+            assessment = json.loads(clean_result.strip())
         except:
             assessment = {
                 "domain": "infrastructure",
                 "complexity": "medium",
                 "requires_approval": True,
-                "similar_runbook": None,
-                "similarity_score": 0,
+                "similar_runbook": runbook_match.get("name") if runbook_match else None,
+                "similarity_score": runbook_match.get("score", 0) if runbook_match else 0,
                 "recommended_topic": "infrastructure"
             }
-        return {"assessment": assessment}
+
+        # If we have a high-confidence runbook match, mark for local handling
+        if runbook_match:
+            assessment["similar_runbook"] = runbook_match.get("name")
+            assessment["similarity_score"] = runbook_match.get("score", 0)
+            if runbook_match.get("score", 0) >= RUNBOOK_MATCH_THRESHOLD:
+                assessment["complexity"] = "low"  # Known issue = low complexity
+                assessment["requires_approval"] = True  # Still ask for approval
+
+        return {
+            "assessment": assessment,
+            "runbook_match": runbook_match or {},
+            "handled_locally": False
+        }
 
     async def generate_solutions(state):
+        """Generate solutions - use existing runbook if matched, otherwise local LLM or Claude."""
         alert = state["alert"]
         assessment = state["assessment"]
+        runbook_match = state.get("runbook_match", {})
+
+        # If we have a high-confidence runbook match, use it directly
+        if runbook_match and runbook_match.get("score", 0) >= RUNBOOK_MATCH_THRESHOLD:
+            logger.info(f"Using existing runbook: {runbook_match.get('name')}")
+            solutions = [{
+                "name": f"Apply Runbook: {runbook_match.get('name')}",
+                "description": runbook_match.get("description", "Apply existing runbook"),
+                "impact": "low",
+                "risk": "low",
+                "commands": runbook_match.get("steps", []),
+                "fix_command": runbook_match.get("fix_command"),
+                "source": "runbook",
+                "runbook_id": runbook_match.get("id")
+            }]
+            return {"solutions": solutions, "handled_locally": True}
+
+        # No runbook match - generate solutions
         prompt = build_solutions_prompt(alert, assessment)
 
-        # Route to Claude for complex tasks, local LLM for simple ones
+        # Route to Claude for complex/unknown tasks, local LLM for simple ones
         if should_use_claude(assessment):
             logger.info("Routing to Claude Agent for complex solution generation")
+            # Ask Claude to also create a runbook for future use
+            escalation_prompt = (
+                f"{prompt}\n\n"
+                "Also provide a runbook for future reference. End with a JSON block containing: "
+                "runbook_name, runbook_description, runbook_steps (array), fix_command (optional)."
+            )
             result = await call_claude_agent(
-                prompt,
+                escalation_prompt,
                 context={"alert": alert, "assessment": assessment},
                 allowed_tools=["Read", "Glob", "Grep", "Bash"]
             )
+
+            # Try to extract and store runbook from Claude's response
+            if "runbook_name" in result or "```json" in result:
+                try:
+                    if "```json" in result:
+                        json_str = result.split("```json")[-1].split("```")[0]
+                        runbook_data = json.loads(json_str.strip())
+                        await store_runbook_qdrant(
+                            name=runbook_data.get("runbook_name", f"Alert: {alert.get('alertname')}"),
+                            description=runbook_data.get("runbook_description", alert.get("description", "")),
+                            steps=runbook_data.get("runbook_steps", []),
+                            fix_command=runbook_data.get("fix_command")
+                        )
+                        logger.info("Stored new runbook from Claude's response")
+                except Exception as e:
+                    logger.warning(f"Could not extract runbook from response: {e}")
         else:
             logger.info("Using local LLM for solution generation")
             result = await call_litellm([{"role": "user", "content": prompt}])
 
         try:
-            solutions = json.loads(result.strip().replace("```json", "").replace("```", ""))
+            clean_result = result.strip()
+            if "```json" in clean_result:
+                # Get the first JSON block (solutions), not the runbook
+                clean_result = clean_result.split("```json")[1].split("```")[0]
+            elif "```" in clean_result:
+                clean_result = clean_result.split("```")[1].split("```")[0]
+            solutions = json.loads(clean_result.strip())
+            if not isinstance(solutions, list):
+                solutions = [solutions]
         except:
             solutions = [{
                 "name": "Manual Investigation",
@@ -215,7 +370,8 @@ data:
                 "risk": "low",
                 "commands": []
             }]
-        return {"solutions": solutions}
+
+        return {"solutions": solutions, "handled_locally": False}
 
     async def request_approval(state):
         alert = state["alert"]
@@ -313,7 +469,9 @@ data:
             "execution_result": {},
             "runbook_id": "",
             "topic_id": 0,
-            "thread_id": alert_dict["id"]
+            "thread_id": alert_dict["id"],
+            "runbook_match": {},
+            "handled_locally": False
         }
         try:
             result = await graph.ainvoke(initial_state)
@@ -481,12 +639,18 @@ spec:
               value: "redis://redis:6379"
             - name: LITELLM_URL
               value: "http://litellm:4000"
+            - name: QDRANT_URL
+              value: "http://qdrant:6333"
+            - name: CLAUDE_AGENT_URL
+              value: "http://claude-agent:8000"
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
             - name: INFRASTRUCTURE_MCP_URL
               value: "http://infrastructure-mcp:8000"
             - name: TELEGRAM_SERVICE_URL
               value: "http://telegram-service:8000"
+            - name: RUNBOOK_MATCH_THRESHOLD
+              value: "0.75"
           volumeMounts:
             - name: code
               mountPath: /code
