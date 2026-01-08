@@ -125,17 +125,38 @@ data:
         return topic_id
 
     async def initialize_standing_topics():
+        """Create standing forum topics if they don't exist."""
         global topics
         standing = [
-            {"key": "critical", "name": "Critical Alerts"},
-            {"key": "arr_suite", "name": "Arr Suite"},
-            {"key": "infrastructure", "name": "Infrastructure"},
-            {"key": "home_assistant", "name": "Home Assistant"},
-            {"key": "weekly_reports", "name": "Weekly Reports"},
-            {"key": "resolved", "name": "Resolved"}
+            {"key": "critical", "name": "🚨 Critical Alerts", "color": 0xFF0000},
+            {"key": "arr_suite", "name": "📺 Arr Suite", "color": 0x6FB9F0},
+            {"key": "infrastructure", "name": "🔧 Infrastructure", "color": 0x8EEE98},
+            {"key": "home_assistant", "name": "🏠 Home Assistant", "color": 0xFFD700},
+            {"key": "weekly_reports", "name": "📊 Weekly Reports", "color": 0xE066FF},
+            {"key": "resolved", "name": "✅ Resolved", "color": 0x808080}
         ]
+
+        if not FORUM_CHAT_ID:
+            logger.warning("No FORUM_CHAT_ID set, skipping topic creation")
+            for topic in standing:
+                topics[topic["key"]] = {"name": topic["name"], "topic_id": None}
+            return
+
         for topic in standing:
-            topics[topic["key"]] = {"name": topic["name"], "topic_id": 1}
+            try:
+                # Try to create the topic (will fail if already exists with same name)
+                topic_id = await create_forum_topic(topic["name"], icon_color=topic.get("color"))
+                if topic_id:
+                    topics[topic["key"]] = {"name": topic["name"], "topic_id": topic_id}
+                    logger.info(f"Created topic '{topic['key']}' with id {topic_id}")
+                else:
+                    # Topic creation failed (might already exist) - use None to send to General
+                    topics[topic["key"]] = {"name": topic["name"], "topic_id": None}
+                    logger.warning(f"Could not create topic '{topic['name']}', will use General")
+            except Exception as e:
+                logger.error(f"Error creating topic '{topic['name']}': {e}")
+                topics[topic["key"]] = {"name": topic["name"], "topic_id": None}
+
         logger.info("Initialized %d standing topics", len(topics))
 
     async def build_approval_keyboard(alert_id, solutions):
@@ -724,7 +745,7 @@ data:
                 "parse_mode": "Markdown"
             })
             # Notify in critical topic
-            critical_topic_id = topics.get("critical", {}).get("topic_id", 1)
+            critical_topic_id = topics.get("critical", {}).get("topic_id")
             await send_message(
                 FORUM_CHAT_ID,
                 f"🚨 *ESCALATED ALERT*\n\n*{alert['name']}*\n\nEscalated by @{user}\nOriginal topic: {topic_id}",
@@ -738,7 +759,7 @@ data:
         solutions = request.solutions
         context = request.context
         topic_key = request.topic
-        topic_id = topics.get(topic_key, {}).get("topic_id", 1)
+        topic_id = topics.get(topic_key, {}).get("topic_id")
         text = "*" + str(alert.get("alertname", "Alert")) + "*\n\n"
         text += str(alert.get("description", "")) + "\n\n"
         similar = context.get("similar_runbook")
@@ -756,7 +777,7 @@ data:
 
     @app.post("/notify")
     async def send_notification(topic: str, message: str):
-        topic_id = topics.get(topic, {}).get("topic_id", 1)
+        topic_id = topics.get(topic, {}).get("topic_id")
         result = await send_message(FORUM_CHAT_ID, message, topic_id=topic_id)
         return {"ok": result.get("ok", False)}
 
@@ -772,7 +793,7 @@ data:
         topic_id = await create_alert_topic(request.name, request.severity)
         if not topic_id:
             # Fallback to infrastructure topic
-            topic_id = topics.get("infrastructure", {}).get("topic_id", 1)
+            topic_id = topics.get("infrastructure", {}).get("topic_id")
 
         # Store alert
         active_alerts[alert_id] = {
