@@ -11,7 +11,8 @@ data:
     """Telegram Service for Human-in-the-Loop Workflows."""
     import os
     import logging
-    from typing import Optional
+    import uuid
+    from typing import Optional, Dict, List, Any
     from datetime import datetime
 
     from fastapi import FastAPI, Request, HTTPException
@@ -37,6 +38,10 @@ data:
     polling_task = None
     last_update_id = 0
     app = FastAPI(title="Telegram Service")
+
+    # Session store for conversation continuity
+    # Key: "{chat_id}:{topic_id}" -> {session_id, messages: [], last_response, status}
+    planning_sessions = {}
 
     class ApprovalRequest(BaseModel):
         alert_id: str
@@ -182,9 +187,20 @@ data:
         data = callback.get("data", "")
         user = callback.get("from", {}).get("username", "unknown")
         logger.info("Callback from @%s: %s", user, data)
-        await telegram_request("answerCallbackQuery", {"callback_query_id": callback_id})
+
         parts = data.split(":")
         action = parts[0]
+
+        # Handle planning workflow callbacks
+        if action == "plan" and len(parts) >= 3:
+            plan_action = parts[1]  # continue, approve, decline
+            session_id = parts[2]
+            await handle_planning_callback(callback, plan_action, session_id)
+            return
+
+        # Default: answer callback for other actions
+        await telegram_request("answerCallbackQuery", {"callback_query_id": callback_id})
+
         alert_id = parts[1] if len(parts) > 1 else None
         option = parts[2] if len(parts) > 2 else None
         if action == "approve" and alert_id and option:
@@ -256,15 +272,26 @@ data:
 
     async def handle_message(message):
         import re
-        raw_text = message.get("text", "").lower().strip()
-        # Strip bot mentions and leading slashes
-        text = re.sub(r'@\w+', '', raw_text).strip().lstrip('/')
+        raw_text = message.get("text", "").strip()
+        # Strip bot mentions and leading slashes for command detection
+        text = re.sub(r'@\w+', '', raw_text).strip().lstrip('/').lower()
         chat_id = message.get("chat", {}).get("id")
         topic_id = message.get("message_thread_id")
-        logger.info("Processing message: '%s' (parsed: '%s') chat=%s", raw_text, text, chat_id)
+        session_key = f"{chat_id}:{topic_id}"
+        username = message.get("from", {}).get("username", "unknown")
+        logger.info("Processing message: '%s' (parsed: '%s') chat=%s", raw_text[:50], text[:50], chat_id)
+
         if not text:
             logger.info("Empty text, ignoring")
             return
+
+        # Check for active planning session waiting for continuation
+        session = planning_sessions.get(session_key)
+        if session and session.get("status") == "awaiting_input":
+            logger.info("Continuing session %s", session["session_id"][:8])
+            await continue_planning_session(chat_id, topic_id, raw_text, username, session)
+            return
+
         if text == "status":
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(LANGGRAPH_URL + "/status")
@@ -276,20 +303,73 @@ data:
             status_text += "*Learning Queue:* " + str(status.get("learning_queue", 0)) + "\n"
             await send_message(chat_id, status_text, topic_id=topic_id)
         elif text == "help":
-            help_text = "*Available Commands*\n\n- `status` - Show system status\n- `help` - Show this help\n- Or just ask any question to query the AI agent\n"
+            help_text = "*Available Commands*\n\n"
+            help_text += "- `status` - Show system status\n"
+            help_text += "- `help` - Show this help\n"
+            help_text += "- `cancel` - Cancel current planning session\n"
+            help_text += "- Or just ask any question to start a planning session\n"
             await send_message(chat_id, help_text, topic_id=topic_id)
+        elif text == "cancel":
+            if session_key in planning_sessions:
+                del planning_sessions[session_key]
+                await send_message(chat_id, "Planning session cancelled.", topic_id=topic_id)
+            else:
+                await send_message(chat_id, "No active planning session.", topic_id=topic_id)
         else:
-            # Forward any other message to Claude Agent
-            logger.info("Forwarding to Claude Agent...")
+            # Start new planning session with Claude Agent
+            logger.info("Starting new planning session...")
             try:
-                await process_agent_query(chat_id, topic_id, raw_text, message.get("from", {}).get("username", "unknown"))
+                await process_agent_query(chat_id, topic_id, raw_text, username)
             except Exception as e:
                 logger.error("Failed to forward to agent: %s", e)
                 await send_message(chat_id, "*Error:* Failed to process query: " + str(e), topic_id=topic_id)
 
-    async def process_agent_query(chat_id, topic_id, query, username):
+    def build_planning_keyboard(session_id: str) -> dict:
+        """Build inline keyboard for planning approval workflow."""
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "✏️ Continue Planning", "callback_data": f"plan:continue:{session_id}"},
+                    {"text": "✅ Approve & Deploy", "callback_data": f"plan:approve:{session_id}"}
+                ],
+                [
+                    {"text": "❌ Decline", "callback_data": f"plan:decline:{session_id}"}
+                ]
+            ]
+        }
+
+    async def process_agent_query(chat_id, topic_id, query, username, session=None):
         """Forward query to Claude Agent using async mode with polling."""
         logger.info("Agent query from @%s: %s", username, query[:100])
+        session_key = f"{chat_id}:{topic_id}"
+
+        # Create or update session
+        if session is None:
+            session_id = str(uuid.uuid4())
+            session = {
+                "session_id": session_id,
+                "messages": [],
+                "last_response": None,
+                "status": "processing",
+                "username": username
+            }
+            planning_sessions[session_key] = session
+        else:
+            session_id = session["session_id"]
+            session["status"] = "processing"
+
+        # Add user message to history
+        session["messages"].append({"role": "user", "content": query})
+
+        # Build prompt with conversation history for continuations
+        if len(session["messages"]) > 1:
+            prompt = "Previous conversation:\n"
+            for msg in session["messages"][:-1]:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                prompt += f"\n{role}: {msg['content']}\n"
+            prompt += f"\nUser's follow-up: {query}\n\nPlease continue the planning based on this feedback."
+        else:
+            prompt = query
 
         # Send "thinking" indicator
         thinking_msg = await send_message(chat_id, "_Processing your request..._", topic_id=topic_id)
@@ -301,8 +381,8 @@ data:
                 response = await client.post(
                     CLAUDE_AGENT_URL + "/agent/run",
                     json={
-                        "prompt": query,
-                        "context": {"username": username, "source": "telegram"},
+                        "prompt": prompt,
+                        "context": {"username": username, "source": "telegram", "session_id": session_id},
                         "max_turns": 10,
                         "working_directory": "/workspace",
                         "async_mode": True,
@@ -327,6 +407,7 @@ data:
 
                 # Poll for completion (check every 5 seconds, max 15 minutes)
                 max_polls = 180  # 15 min / 5 sec
+                success = False
                 for i in range(max_polls):
                     await asyncio.sleep(5)
                     status_resp = await client.get(CLAUDE_AGENT_URL + "/task/" + task_id)
@@ -334,8 +415,7 @@ data:
 
                     if status.get("status") == "completed":
                         answer = status.get("result", "No response generated")
-                        if len(answer) > 4000:
-                            answer = answer[:4000] + "\n\n...truncated"
+                        success = True
                         break
                     elif status.get("status") == "failed":
                         answer = "Error: " + status.get("error", "Unknown error")
@@ -351,23 +431,115 @@ data:
                 else:
                     answer = "Timeout: Task took too long (15 min limit). Task ID: " + task_id
 
-                # Delete thinking message and send response
+                # Delete thinking message
                 if thinking_msg_id:
                     await telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": thinking_msg_id})
-                await telegram_request("sendMessage", {
-                    "chat_id": chat_id,
-                    "text": answer,
-                    "message_thread_id": topic_id
-                } if topic_id else {
-                    "chat_id": chat_id,
-                    "text": answer
-                })
+
+                # Store response in session
+                if success:
+                    session["messages"].append({"role": "assistant", "content": answer})
+                    session["last_response"] = answer
+                    session["status"] = "awaiting_decision"
+
+                # Truncate for Telegram if needed
+                display_answer = answer
+                if len(display_answer) > 3800:
+                    display_answer = display_answer[:3800] + "\n\n...truncated"
+
+                # Send response with approval keyboard (only on success)
+                if success:
+                    keyboard = build_planning_keyboard(session_id)
+                    msg_data = {
+                        "chat_id": chat_id,
+                        "text": display_answer + "\n\n---\n_What would you like to do?_",
+                        "reply_markup": keyboard
+                    }
+                    if topic_id:
+                        msg_data["message_thread_id"] = topic_id
+                    await telegram_request("sendMessage", msg_data)
+                else:
+                    # Error - no keyboard
+                    session["status"] = "failed"
+                    msg_data = {"chat_id": chat_id, "text": display_answer}
+                    if topic_id:
+                        msg_data["message_thread_id"] = topic_id
+                    await telegram_request("sendMessage", msg_data)
 
         except Exception as e:
             logger.error("Agent query failed: %s", e)
+            session["status"] = "failed"
             if thinking_msg_id:
                 await telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": thinking_msg_id})
             await send_message(chat_id, "*Error:* " + str(e), topic_id=topic_id)
+
+    async def continue_planning_session(chat_id, topic_id, query, username, session):
+        """Continue an existing planning session with additional input."""
+        logger.info("Continuing session %s with: %s", session["session_id"][:8], query[:50])
+        await process_agent_query(chat_id, topic_id, query, username, session)
+
+    async def handle_planning_callback(callback, action, session_id):
+        """Handle planning workflow callbacks (continue/approve/decline)."""
+        message = callback.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        topic_id = message.get("message_thread_id")
+        session_key = f"{chat_id}:{topic_id}"
+        user = callback.get("from", {}).get("username", "unknown")
+
+        # Find session
+        session = planning_sessions.get(session_key)
+        if not session or session.get("session_id") != session_id:
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Session expired or not found",
+                "show_alert": True
+            })
+            return
+
+        if action == "continue":
+            # Set session to await input
+            session["status"] = "awaiting_input"
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Send your feedback or changes..."
+            })
+            # Update message to remove keyboard and prompt for input
+            await telegram_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message.get("message_id"),
+                "text": message.get("text", "").replace("\n\n---\n_What would you like to do?_", "") + "\n\n---\n_Send your feedback or changes to continue planning..._"
+            })
+
+        elif action == "approve":
+            session["status"] = "approved"
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Approved! Starting deployment..."
+            })
+            # Update message
+            await telegram_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message.get("message_id"),
+                "text": message.get("text", "").replace("\n\n---\n_What would you like to do?_", "") + f"\n\n---\n✅ *Approved by @{user}*\n_Starting deployment..._",
+                "parse_mode": "Markdown"
+            })
+            # TODO: Trigger actual deployment via Claude Agent with "execute" flag
+            # For now, send the plan back to Claude to execute
+            await send_message(chat_id, "_Deployment feature coming soon. Plan saved for reference._", topic_id=topic_id)
+            del planning_sessions[session_key]
+
+        elif action == "decline":
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Plan declined"
+            })
+            # Update message
+            await telegram_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message.get("message_id"),
+                "text": message.get("text", "").replace("\n\n---\n_What would you like to do?_", "") + f"\n\n---\n❌ *Declined by @{user}*",
+                "parse_mode": "Markdown"
+            })
+            del planning_sessions[session_key]
 
     @app.post("/approval")
     async def send_approval_request(request: ApprovalRequest):
