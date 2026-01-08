@@ -1,0 +1,136 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-agent
+  namespace: ai-platform
+  labels:
+    app: claude-agent
+    component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claude-agent
+  template:
+    metadata:
+      labels:
+        app: claude-agent
+        component: agent
+    spec:
+      containers:
+        - name: claude-agent
+          image: node:22-bookworm
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== Installing Claude Code ==="
+              npm install -g @anthropic-ai/claude-code
+
+              echo "=== Installing Python dependencies ==="
+              apt-get update && apt-get install -y python3 python3-pip python3-venv --no-install-recommends
+              python3 -m venv /opt/venv
+              . /opt/venv/bin/activate
+              pip install --no-cache-dir -r /app/requirements.txt
+
+              echo "=== Setting up Claude credentials ==="
+              mkdir -p /root/.claude
+              if [ -f /secrets/claude/CREDENTIALS_JSON_B64 ]; then
+                  base64 -d /secrets/claude/CREDENTIALS_JSON_B64 > /root/.claude/.credentials.json
+                  chmod 600 /root/.claude/.credentials.json
+                  echo "✓ Claude credentials configured"
+              fi
+
+              echo "=== Setting up kubeconfigs ==="
+              mkdir -p /root/.kube
+              if [ -f /secrets/claude/KUBECONFIG_MERGED_B64 ]; then
+                  base64 -d /secrets/claude/KUBECONFIG_MERGED_B64 > /root/.kube/config
+                  chmod 600 /root/.kube/config
+                  echo "✓ Kubeconfig configured (prod, monit, agentic)"
+              fi
+
+              echo "=== Creating workspace ==="
+              mkdir -p /workspace
+
+              echo "=== Starting API Server ==="
+              cd /app
+              exec uvicorn main:app --host 0.0.0.0 --port 8000
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: HOME
+              value: "/root"
+            - name: PATH
+              value: "/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
+            - name: KNOWLEDGE_MCP_URL
+              value: "http://knowledge-mcp:8000"
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp:8000"
+            - name: HOME_ASSISTANT_MCP_URL
+              value: "http://home-assistant-mcp:8000"
+            - name: ARR_SUITE_MCP_URL
+              value: "http://arr-suite-mcp:8000"
+            # Do NOT set ANTHROPIC_API_KEY - use subscription auth
+          volumeMounts:
+            - name: code
+              mountPath: /app
+            - name: claude-credentials
+              mountPath: /secrets/claude
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+            - name: claude-home
+              mountPath: /root/.claude
+            - name: kube-dir
+              mountPath: /root/.kube
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 10
+      volumes:
+        - name: code
+          configMap:
+            name: claude-agent-code
+            defaultMode: 0755
+        - name: claude-credentials
+          secret:
+            secretName: claude-credentials
+        - name: workspace
+          emptyDir: {}
+        - name: claude-home
+          emptyDir: {}
+        - name: kube-dir
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-agent
+  namespace: ai-platform
+  labels:
+    app: claude-agent
+spec:
+  selector:
+    app: claude-agent
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP

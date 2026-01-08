@@ -10,3 +10,12 @@ resources:
   - knowledge-mcp.yaml
   - home-assistant-mcp.yaml
   - arr-suite-mcp.yaml
+  # New MCP servers
+  - proxmox-mcp.yaml
+  - opnsense-mcp.yaml
+  - adguard-mcp.yaml
+  - cloudflare-mcp.yaml
+  - unifi-mcp.yaml
+  - truenas-mcp.yaml
+  - homepage-mcp.yaml
+  - infisical-mcp.yaml

@@ -29,9 +29,13 @@ data:
     POSTGRES_URL = os.environ.get("POSTGRES_URL", "postgresql://postgres:postgres@postgres:5432/langgraph")
     REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
     TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
+
+    # Complexity threshold for routing to Claude vs local LLM
+    CLAUDE_COMPLEXITY_THRESHOLD = os.environ.get("CLAUDE_COMPLEXITY_THRESHOLD", "high")
 
     class AgentState(TypedDict):
         messages: Annotated[Sequence[BaseMessage], lambda x, y: x + y]
@@ -103,6 +107,46 @@ data:
                 logger.error("Telegram service call failed: %s", e)
                 return {"error": str(e)}
 
+    async def call_claude_agent(prompt: str, context: dict = None, allowed_tools: list = None):
+        """
+        Call Claude Agent for complex agentic tasks.
+        Uses subscription-based Claude Code for full tool access.
+        """
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                payload = {
+                    "prompt": prompt,
+                    "context": context or {},
+                    "allowed_tools": allowed_tools or ["Read", "Glob", "Grep", "Bash", "WebSearch"],
+                    "max_turns": 10,
+                    "working_directory": "/workspace"
+                }
+                response = await client.post(
+                    CLAUDE_AGENT_URL + "/agent/run",
+                    json=payload
+                )
+                response.raise_for_status()
+                result = response.json()
+                if result.get("success"):
+                    return result.get("result", "")
+                else:
+                    logger.error("Claude Agent error: %s", result.get("error"))
+                    return "Error: " + result.get("error", "Unknown error")
+            except Exception as e:
+                logger.error("Claude Agent call failed: %s", e)
+                # Fallback to local LLM
+                return await call_litellm([{"role": "user", "content": prompt}])
+
+    def should_use_claude(assessment: dict) -> bool:
+        """Determine if task should be routed to Claude based on complexity."""
+        complexity = assessment.get("complexity", "medium")
+        threshold = CLAUDE_COMPLEXITY_THRESHOLD
+
+        complexity_levels = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+        threshold_levels = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+
+        return complexity_levels.get(complexity, 2) >= threshold_levels.get(threshold, 3)
+
     def build_assessment_prompt(alert, similar):
         return """Analyze this alert and provide assessment:
     Alert: """ + str(alert.get("alertname", "unknown")) + """
@@ -148,7 +192,19 @@ data:
         alert = state["alert"]
         assessment = state["assessment"]
         prompt = build_solutions_prompt(alert, assessment)
-        result = await call_litellm([{"role": "user", "content": prompt}])
+
+        # Route to Claude for complex tasks, local LLM for simple ones
+        if should_use_claude(assessment):
+            logger.info("Routing to Claude Agent for complex solution generation")
+            result = await call_claude_agent(
+                prompt,
+                context={"alert": alert, "assessment": assessment},
+                allowed_tools=["Read", "Glob", "Grep", "Bash"]
+            )
+        else:
+            logger.info("Using local LLM for solution generation")
+            result = await call_litellm([{"role": "user", "content": prompt}])
+
         try:
             solutions = json.loads(result.strip().replace("```json", "").replace("```", ""))
         except:
@@ -328,6 +384,33 @@ data:
     @app.get("/status")
     async def get_status():
         return {"pending_count": len(pending_approvals), "auto_executed": 0, "active_runbooks": 0, "learning_queue": 0}
+
+    class QueryRequest(BaseModel):
+        prompt: str
+        use_claude: bool = False
+        context: Optional[dict] = None
+
+    @app.post("/query")
+    async def query_llm(request: QueryRequest):
+        """
+        Direct query endpoint for LLM access.
+        Routes to Claude Agent or local LLM based on use_claude flag.
+        """
+        if request.use_claude:
+            result = await call_claude_agent(
+                request.prompt,
+                context=request.context,
+                allowed_tools=["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+            )
+        else:
+            result = await call_litellm([{"role": "user", "content": request.prompt}])
+        return {"response": result}
+
+    @app.post("/claude/run")
+    async def run_claude_task(prompt: str, context: Optional[dict] = None):
+        """Direct endpoint to run a Claude Agent task."""
+        result = await call_claude_agent(prompt, context=context)
+        return {"response": result}
 
     @app.get("/health")
     async def health():

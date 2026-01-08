@@ -1,0 +1,247 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-agent-code
+  namespace: ai-platform
+data:
+  # API wrapper that exposes Claude Agent SDK as HTTP endpoints
+  main.py: |
+    #!/usr/bin/env python3
+    """
+    Claude Agent API Wrapper
+
+    Exposes Claude Code CLI capabilities via HTTP API for the LangGraph orchestrator.
+    Uses subscription authentication (not API keys).
+    """
+    import asyncio
+    import json
+    import os
+    import base64
+    import subprocess
+    from pathlib import Path
+    from typing import Optional, List, Dict, Any
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI, HTTPException, BackgroundTasks
+    from pydantic import BaseModel
+    import httpx
+
+    # ============================================================================
+    # Configuration
+    # ============================================================================
+
+    CLAUDE_HOME = Path("/root/.claude")
+    CREDENTIALS_FILE = CLAUDE_HOME / ".credentials.json"
+
+    # MCP Server endpoints (in-cluster)
+    MCP_SERVERS = {
+        "knowledge": os.getenv("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000"),
+        "infrastructure": os.getenv("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
+        "home-assistant": os.getenv("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000"),
+        "arr-suite": os.getenv("ARR_SUITE_MCP_URL", "http://arr-suite-mcp:8000"),
+    }
+
+    # ============================================================================
+    # Models
+    # ============================================================================
+
+    class AgentRequest(BaseModel):
+        prompt: str
+        context: Optional[Dict[str, Any]] = None
+        allowed_tools: Optional[List[str]] = None
+        max_turns: int = 10
+        working_directory: str = "/workspace"
+
+    class AgentResponse(BaseModel):
+        success: bool
+        result: Optional[str] = None
+        error: Optional[str] = None
+        tool_calls: List[Dict[str, Any]] = []
+        tokens_used: Optional[int] = None
+
+    class HealthResponse(BaseModel):
+        status: str
+        claude_authenticated: bool
+        mcp_servers: Dict[str, bool]
+
+    # ============================================================================
+    # Startup
+    # ============================================================================
+
+    async def setup_credentials():
+        """Decode and write credentials from Infisical secret."""
+        CLAUDE_HOME.mkdir(parents=True, exist_ok=True)
+
+        # Read base64-encoded credentials from mounted secret
+        creds_b64_file = Path("/secrets/claude/CREDENTIALS_JSON_B64")
+        if creds_b64_file.exists():
+            creds_b64 = creds_b64_file.read_text().strip()
+            creds_json = base64.b64decode(creds_b64).decode('utf-8')
+            CREDENTIALS_FILE.write_text(creds_json)
+            os.chmod(CREDENTIALS_FILE, 0o600)
+            print("✓ Claude credentials configured")
+        else:
+            print("⚠ No credentials file found at /secrets/claude/CREDENTIALS_JSON_B64")
+
+    async def check_mcp_health() -> Dict[str, bool]:
+        """Check connectivity to MCP servers."""
+        results = {}
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for name, url in MCP_SERVERS.items():
+                try:
+                    resp = await client.get(f"{url}/health")
+                    results[name] = resp.status_code == 200
+                except Exception:
+                    results[name] = False
+        return results
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await setup_credentials()
+        yield
+
+    app = FastAPI(
+        title="Claude Agent API",
+        description="HTTP API wrapper for Claude Code CLI with subscription auth",
+        version="1.0.0",
+        lifespan=lifespan
+    )
+
+    # ============================================================================
+    # Endpoints
+    # ============================================================================
+
+    @app.get("/health", response_model=HealthResponse)
+    async def health_check():
+        """Check service health and dependencies."""
+        claude_auth = CREDENTIALS_FILE.exists()
+        mcp_health = await check_mcp_health()
+
+        return HealthResponse(
+            status="healthy" if claude_auth else "degraded",
+            claude_authenticated=claude_auth,
+            mcp_servers=mcp_health
+        )
+
+    @app.post("/agent/run", response_model=AgentResponse)
+    async def run_agent(request: AgentRequest):
+        """
+        Execute a Claude agent task.
+
+        This invokes Claude Code CLI as a subprocess with the given prompt.
+        The agent has access to MCP tools and can perform agentic tasks.
+        """
+        try:
+            # Build the claude command
+            cmd = [
+                "claude",
+                "--print",  # Print output to stdout
+                "--dangerously-skip-permissions",  # Non-interactive mode
+            ]
+
+            # Add allowed tools if specified
+            if request.allowed_tools:
+                for tool in request.allowed_tools:
+                    cmd.extend(["--allowedTools", tool])
+
+            # Add the prompt
+            cmd.append(request.prompt)
+
+            # Set up environment
+            env = os.environ.copy()
+            env["HOME"] = "/root"
+            env["CLAUDE_CODE_ENTRYPOINT"] = "agent-api"
+
+            # Run Claude Code CLI
+            result = subprocess.run(
+                cmd,
+                cwd=request.working_directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+
+            if result.returncode == 0:
+                return AgentResponse(
+                    success=True,
+                    result=result.stdout,
+                    tool_calls=[]  # TODO: Parse tool calls from output
+                )
+            else:
+                return AgentResponse(
+                    success=False,
+                    error=result.stderr or "Unknown error",
+                    result=result.stdout
+                )
+
+        except subprocess.TimeoutExpired:
+            return AgentResponse(
+                success=False,
+                error="Agent execution timed out (5 minute limit)"
+            )
+        except Exception as e:
+            return AgentResponse(
+                success=False,
+                error=str(e)
+            )
+
+    @app.post("/agent/query")
+    async def query_agent(prompt: str, context: Optional[Dict[str, Any]] = None):
+        """
+        Simple query endpoint for quick questions.
+        Wraps run_agent with defaults for query-style interactions.
+        """
+        request = AgentRequest(
+            prompt=prompt,
+            context=context,
+            max_turns=3,
+            allowed_tools=["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+        )
+        return await run_agent(request)
+
+    @app.get("/mcp/servers")
+    async def list_mcp_servers():
+        """List available MCP servers and their status."""
+        return {
+            "servers": MCP_SERVERS,
+            "health": await check_mcp_health()
+        }
+
+  init.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Claude Agent Initialization ==="
+
+    # Create .claude directory
+    mkdir -p /root/.claude
+
+    # Decode credentials from secret
+    if [ -f /secrets/claude/CREDENTIALS_JSON_B64 ]; then
+        echo "Decoding Claude credentials..."
+        base64 -d /secrets/claude/CREDENTIALS_JSON_B64 > /root/.claude/.credentials.json
+        chmod 600 /root/.claude/.credentials.json
+        echo "✓ Credentials configured"
+    else
+        echo "⚠ Warning: No credentials found"
+    fi
+
+    # Verify Claude Code is installed
+    if command -v claude &> /dev/null; then
+        echo "✓ Claude Code CLI available"
+        claude --version || true
+    else
+        echo "✗ Claude Code CLI not found"
+        exit 1
+    fi
+
+    echo "=== Starting API Server ==="
+    exec uvicorn main:app --host 0.0.0.0 --port 8000
+
+  requirements.txt: |
+    fastapi>=0.109.0
+    uvicorn[standard]>=0.27.0
+    httpx>=0.26.0
+    pydantic>=2.5.0

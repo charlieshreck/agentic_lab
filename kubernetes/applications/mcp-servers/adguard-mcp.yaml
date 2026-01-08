@@ -1,0 +1,109 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: adguard-mcp-code
+  namespace: ai-platform
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """AdGuard Home MCP server for DNS management."""
+    import os, logging, httpx
+    from typing import List, Dict, Any
+    from fastmcp import FastMCP
+
+    logging.basicConfig(level=logging.INFO)
+    ADGUARD_HOST = os.environ.get("ADGUARD_HOST", "http://10.10.0.1:3000")
+    ADGUARD_USER = os.environ.get("ADGUARD_USER", "admin")
+    ADGUARD_PASSWORD = os.environ.get("ADGUARD_PASSWORD", "")
+
+    mcp = FastMCP(name="adguard-mcp", instructions="MCP server for AdGuard Home DNS.")
+
+    async def adguard_api(endpoint: str) -> Dict[str, Any]:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{ADGUARD_HOST}/{endpoint}", auth=(ADGUARD_USER, ADGUARD_PASSWORD))
+            response.raise_for_status()
+            return response.json()
+
+    @mcp.tool()
+    async def get_stats() -> Dict[str, Any]:
+        """Get DNS statistics."""
+        try: return await adguard_api("control/stats")
+        except Exception as e: return {"error": str(e)}
+
+    @mcp.tool()
+    async def get_query_log(limit: int = 100) -> List[Dict[str, Any]]:
+        """Get recent DNS queries."""
+        try:
+            result = await adguard_api(f"control/querylog?limit={limit}")
+            return result.get("data", [])
+        except Exception as e: return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def get_filtering_status() -> Dict[str, Any]:
+        """Get filtering status."""
+        try: return await adguard_api("control/filtering/status")
+        except Exception as e: return {"error": str(e)}
+
+    if __name__ == "__main__":
+        import uvicorn
+        uvicorn.run(mcp.get_app(), host="0.0.0.0", port=8000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adguard-mcp
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adguard-mcp
+  template:
+    metadata:
+      labels:
+        app: adguard-mcp
+    spec:
+      containers:
+        - name: adguard-mcp
+          image: python:3.11-slim
+          command: ["sh", "-c"]
+          args:
+            - pip install --no-cache-dir fastmcp httpx uvicorn && python /app/main.py
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ADGUARD_HOST
+              value: "http://10.10.0.1:3000"
+            - name: ADGUARD_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-adguard
+                  key: username
+            - name: ADGUARD_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-adguard
+                  key: password
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests: {memory: "128Mi", cpu: "100m"}
+            limits: {memory: "256Mi", cpu: "500m"}
+      volumes:
+        - name: code
+          configMap:
+            name: adguard-mcp-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adguard-mcp
+  namespace: ai-platform
+spec:
+  selector:
+    app: adguard-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000

@@ -1,0 +1,96 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openwebui
+  namespace: ai-platform
+  labels:
+    app: openwebui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openwebui
+  template:
+    metadata:
+      labels:
+        app: openwebui
+    spec:
+      containers:
+        - name: openwebui
+          image: ghcr.io/open-webui/open-webui:main
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama:11434"
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: WEBUI_SECRET_KEY
+            - name: ENABLE_SIGNUP
+              value: "false"
+            - name: DEFAULT_USER_ROLE
+              value: "user"
+            # Disable external model providers - use local only
+            - name: ENABLE_OPENAI_API
+              value: "false"
+            - name: ENABLE_OLLAMA_API
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openwebui-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openwebui-data
+  namespace: ai-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openwebui
+  namespace: ai-platform
+  labels:
+    app: openwebui
+spec:
+  selector:
+    app: openwebui
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  type: ClusterIP

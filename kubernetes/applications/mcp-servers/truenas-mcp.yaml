@@ -1,0 +1,135 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: truenas-mcp-code
+  namespace: ai-platform
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """TrueNAS MCP server for storage management."""
+    import os, logging, httpx
+    from typing import List, Dict, Any
+    from fastmcp import FastMCP
+
+    logging.basicConfig(level=logging.INFO)
+    TRUENAS_HOST = os.environ.get("TRUENAS_HOST", "https://10.10.0.20")
+    TRUENAS_API_KEY = os.environ.get("TRUENAS_API_KEY", "")
+
+    mcp = FastMCP(name="truenas-mcp", instructions="MCP server for TrueNAS storage management.")
+
+    async def truenas_api(endpoint: str, method: str = "GET", data: dict = None) -> Any:
+        headers = {"Authorization": f"Bearer {TRUENAS_API_KEY}"}
+        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+            url = f"{TRUENAS_HOST}/api/v2.0{endpoint}"
+            if method == "GET":
+                response = await client.get(url, headers=headers)
+            else:
+                response = await client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            return response.json()
+
+    @mcp.tool()
+    async def list_pools() -> List[Dict[str, Any]]:
+        """List storage pools."""
+        try: return await truenas_api("/pool")
+        except Exception as e: return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def list_datasets(pool: str = None) -> List[Dict[str, Any]]:
+        """List datasets/filesystems."""
+        try:
+            datasets = await truenas_api("/pool/dataset")
+            if pool:
+                datasets = [d for d in datasets if d.get("pool") == pool]
+            return datasets
+        except Exception as e: return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def get_system_info() -> Dict[str, Any]:
+        """Get system information."""
+        try: return await truenas_api("/system/info")
+        except Exception as e: return {"error": str(e)}
+
+    @mcp.tool()
+    async def list_shares() -> Dict[str, Any]:
+        """List all shares (SMB, NFS, iSCSI)."""
+        try:
+            smb = await truenas_api("/sharing/smb")
+            nfs = await truenas_api("/sharing/nfs")
+            return {"smb": smb, "nfs": nfs}
+        except Exception as e: return {"error": str(e)}
+
+    @mcp.tool()
+    async def get_alerts() -> List[Dict[str, Any]]:
+        """Get active alerts."""
+        try: return await truenas_api("/alert/list")
+        except Exception as e: return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def list_snapshots(dataset: str = None) -> List[Dict[str, Any]]:
+        """List ZFS snapshots."""
+        try:
+            snapshots = await truenas_api("/zfs/snapshot")
+            if dataset:
+                snapshots = [s for s in snapshots if s.get("dataset") == dataset]
+            return snapshots
+        except Exception as e: return [{"error": str(e)}]
+
+    if __name__ == "__main__":
+        import uvicorn
+        uvicorn.run(mcp.get_app(), host="0.0.0.0", port=8000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: truenas-mcp
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: truenas-mcp
+  template:
+    metadata:
+      labels:
+        app: truenas-mcp
+    spec:
+      containers:
+        - name: truenas-mcp
+          image: python:3.11-slim
+          command: ["sh", "-c"]
+          args:
+            - pip install --no-cache-dir fastmcp httpx uvicorn && python /app/main.py
+          ports:
+            - containerPort: 8000
+          env:
+            - name: TRUENAS_HOST
+              value: "https://10.10.0.20"
+            - name: TRUENAS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-truenas
+                  key: API_KEY
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests: {memory: "128Mi", cpu: "100m"}
+            limits: {memory: "256Mi", cpu: "500m"}
+      volumes:
+        - name: code
+          configMap:
+            name: truenas-mcp-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: truenas-mcp
+  namespace: ai-platform
+spec:
+  selector:
+    app: truenas-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000

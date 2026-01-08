@@ -232,6 +232,54 @@ Comprehensive architecture documentation is available in the `docs/` directory:
 
 ---
 
+## Infisical Access (Claude Sessions)
+
+Machine Identity credentials are stored securely for programmatic access to Infisical secrets.
+
+### Location
+```
+/root/.config/infisical/
+├── machine-identity.json   # Client ID & Secret (chmod 600)
+├── get-token.sh            # Fetches short-lived access token
+└── secrets.sh              # Helper for CRUD operations
+```
+
+### Usage
+```bash
+# Get a secret
+/root/.config/infisical/secrets.sh get /agentic-platform/telegram BOT_TOKEN
+
+# Set a secret
+/root/.config/infisical/secrets.sh set /agentic-platform/llm API_KEY "value"
+
+# List secrets at path
+/root/.config/infisical/secrets.sh list /agentic-platform
+
+# List folders
+/root/.config/infisical/secrets.sh folders /agentic-platform
+
+# Create folder
+/root/.config/infisical/secrets.sh mkdir /agentic-platform newservice
+```
+
+### Current Secret Paths
+```
+/agentic-platform/
+├── Gemini/
+│   └── GEMINI_API_KEY
+└── telegram/
+    ├── BOT_TOKEN
+    └── CHAT_ID
+```
+
+### Machine Identity Details
+- **Workspace ID**: 9383e039-68ca-4bab-bc3c-aa06fdb82627
+- **Environment**: prod
+- **Permissions**: Full CRUD on secrets and folders
+- **Token TTL**: 30 days (auto-refreshed on each call)
+
+---
+
 ## Contributing
 
 This is a personal homelab project. The repository is public for transparency and knowledge sharing, but contributions are not expected.

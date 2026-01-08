@@ -1,0 +1,162 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxmox-mcp-code
+  namespace: ai-platform
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """Proxmox VE MCP server for hypervisor management."""
+    import os
+    import logging
+    from typing import List, Dict, Any
+    from fastmcp import FastMCP
+    from pydantic import BaseModel
+    import httpx
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    PROXMOX_HOST = os.environ.get("PROXMOX_HOST", "https://10.10.0.10:8006")
+    PROXMOX_USER = os.environ.get("PROXMOX_USER", "root@pam")
+    PROXMOX_TOKEN_ID = os.environ.get("PROXMOX_TOKEN_ID", "")
+    PROXMOX_TOKEN_SECRET = os.environ.get("PROXMOX_TOKEN_SECRET", "")
+
+    mcp = FastMCP(
+        name="proxmox-mcp",
+        instructions="MCP server for Proxmox VE hypervisor management."
+    )
+
+    class VMInfo(BaseModel):
+        vmid: int
+        name: str
+        status: str
+        node: str
+
+    async def proxmox_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
+        headers = {"Authorization": f"PVEAPIToken={PROXMOX_USER}!{PROXMOX_TOKEN_ID}={PROXMOX_TOKEN_SECRET}"}
+        url = f"{PROXMOX_HOST}/api2/json{endpoint}"
+        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+            if method == "GET":
+                response = await client.get(url, headers=headers)
+            else:
+                response = await client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            return response.json().get("data", {})
+
+    @mcp.tool()
+    async def list_nodes() -> List[Dict[str, Any]]:
+        """List all Proxmox cluster nodes."""
+        try:
+            return await proxmox_api("/nodes")
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def list_vms(node: str = None) -> List[Dict[str, Any]]:
+        """List all VMs."""
+        try:
+            if node:
+                return await proxmox_api(f"/nodes/{node}/qemu")
+            nodes = await proxmox_api("/nodes")
+            all_vms = []
+            for n in nodes:
+                vms = await proxmox_api(f"/nodes/{n['node']}/qemu")
+                all_vms.extend(vms)
+            return all_vms
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def get_vm_status(node: str, vmid: int) -> Dict[str, Any]:
+        """Get VM status."""
+        try:
+            return await proxmox_api(f"/nodes/{node}/qemu/{vmid}/status/current")
+        except Exception as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def start_vm(node: str, vmid: int) -> Dict[str, Any]:
+        """Start a VM."""
+        try:
+            return await proxmox_api(f"/nodes/{node}/qemu/{vmid}/status/start", "POST")
+        except Exception as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def stop_vm(node: str, vmid: int) -> Dict[str, Any]:
+        """Stop a VM."""
+        try:
+            return await proxmox_api(f"/nodes/{node}/qemu/{vmid}/status/stop", "POST")
+        except Exception as e:
+            return {"error": str(e)}
+
+    if __name__ == "__main__":
+        import uvicorn
+        uvicorn.run(mcp.get_app(), host="0.0.0.0", port=8000)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxmox-mcp
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxmox-mcp
+  template:
+    metadata:
+      labels:
+        app: proxmox-mcp
+    spec:
+      containers:
+        - name: proxmox-mcp
+          image: python:3.11-slim
+          command: ["sh", "-c"]
+          args:
+            - pip install --no-cache-dir fastmcp httpx pydantic uvicorn && python /app/main.py
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PROXMOX_HOST
+              value: "https://10.10.0.10:8006"
+            - name: PROXMOX_USER
+              value: "root@pam"
+            - name: PROXMOX_TOKEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-proxmox
+                  key: TOKEN_ID
+            - name: PROXMOX_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-proxmox
+                  key: API_TOKEN
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: code
+          configMap:
+            name: proxmox-mcp-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxmox-mcp
+  namespace: ai-platform
+spec:
+  selector:
+    app: proxmox-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
