@@ -362,15 +362,12 @@ data:
 
     async def analyze_issue_locally(issue_description: str) -> dict:
         """Use local LLM to analyze an issue and determine severity/category."""
-        system_prompt = """You are a homelab infrastructure analyst. Analyze the issue and respond in JSON format:
-{
-    "severity": "critical|warning|info",
-    "category": "network|storage|compute|service",
-    "summary": "brief summary",
-    "needs_escalation": true/false,
-    "reason": "why escalation is needed or not"
-}
-Only set needs_escalation to true if the issue is complex or requires investigation."""
+        system_prompt = (
+            "You are a homelab infrastructure analyst. Analyze the issue and respond in JSON format with these fields: "
+            "severity (critical/warning/info), category (network/storage/compute/service), summary (brief description), "
+            "needs_escalation (true/false), reason (why escalation is needed or not). "
+            "Only set needs_escalation to true if the issue is complex or requires investigation."
+        )
 
         result = await query_local_llm(issue_description, system_prompt)
         if "error" in result:
@@ -408,26 +405,15 @@ Only set needs_escalation to true if the issue is complex or requires investigat
         """Escalate unknown issue to Claude Agent for investigation and runbook creation."""
         logger.info(f"Escalating to Claude Agent: {issue[:100]}...")
 
-        escalation_prompt = f"""Investigate this infrastructure issue and create a runbook for future handling:
-
-Issue: {issue}
-Source: {source}
-
-Please:
-1. Analyze the issue
-2. Provide a diagnosis
-3. Suggest specific fix steps
-4. Format your response so it can be saved as a runbook
-
-End your response with a JSON block like:
-```json
-{{
-    "runbook_name": "Short descriptive name",
-    "runbook_description": "What this runbook handles",
-    "runbook_steps": ["Step 1", "Step 2", ...],
-    "fix_command": "Optional single command to fix"
-}}
-```"""
+        escalation_prompt = (
+            f"Investigate this infrastructure issue and create a runbook for future handling.\n\n"
+            f"Issue: {issue}\n"
+            f"Source: {source}\n\n"
+            f"Please: 1) Analyze the issue, 2) Provide a diagnosis, 3) Suggest specific fix steps, "
+            f"4) Format your response so it can be saved as a runbook.\n\n"
+            f"End your response with a JSON block containing: runbook_name, runbook_description, "
+            f"runbook_steps (array), and fix_command (optional)."
+        )
 
         result = await query_via_claude_agent(escalation_prompt, timeout=300)
         return result
