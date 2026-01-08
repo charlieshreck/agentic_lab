@@ -254,9 +254,13 @@ data:
             await send_message(message.get("chat", {}).get("id"), "Alert " + alert_id + " not found or expired", topic_id=message.get("message_thread_id"))
 
     async def handle_message(message):
-        text = message.get("text", "").lower().strip()
+        import re
+        raw_text = message.get("text", "").lower().strip()
+        # Strip bot mentions and leading slashes
+        text = re.sub(r'@\w+', '', raw_text).strip().lstrip('/')
         chat_id = message.get("chat", {}).get("id")
         topic_id = message.get("message_thread_id")
+        logger.info("Processing message: '%s' (parsed: '%s')", raw_text, text)
         if text == "status":
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(LANGGRAPH_URL + "/status")
