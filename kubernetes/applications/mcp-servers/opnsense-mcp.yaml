@@ -8,46 +8,153 @@ data:
   main.py: |
     #!/usr/bin/env python3
     """OPNsense MCP server for firewall management."""
-    import os, logging, httpx
-    from typing import List, Dict, Any
+    import os
+    import json
+    import logging
+    from typing import Optional, List, Dict, Any
+    from enum import Enum
     from fastmcp import FastMCP
+    from pydantic import BaseModel, Field, ConfigDict
+    import httpx
 
     logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
     OPNSENSE_HOST = os.environ.get("OPNSENSE_HOST", "https://10.10.0.1")
     OPNSENSE_KEY = os.environ.get("OPNSENSE_KEY", "")
     OPNSENSE_SECRET = os.environ.get("OPNSENSE_SECRET", "")
 
-    mcp = FastMCP(name="opnsense-mcp", instructions="MCP server for OPNsense firewall.")
+    mcp = FastMCP(
+        name="opnsense_mcp",
+        instructions="MCP server for OPNsense firewall. Provides tools for interface stats, firewall rules, DHCP leases, and gateway status."
+    )
 
-    async def opnsense_api(endpoint: str) -> Dict[str, Any]:
+    class ResponseFormat(str, Enum):
+        MARKDOWN = "markdown"
+        JSON = "json"
+
+    class BaseInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class DHCPSearchInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+        search: Optional[str] = Field(default=None, description="Filter leases by hostname or IP")
+
+    async def _opnsense_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
         async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
-            response = await client.get(f"{OPNSENSE_HOST}/api{endpoint}", auth=(OPNSENSE_KEY, OPNSENSE_SECRET))
+            if method == "GET":
+                response = await client.get(f"{OPNSENSE_HOST}/api{endpoint}", auth=(OPNSENSE_KEY, OPNSENSE_SECRET))
+            else:
+                response = await client.post(f"{OPNSENSE_HOST}/api{endpoint}", auth=(OPNSENSE_KEY, OPNSENSE_SECRET), json=data)
             response.raise_for_status()
             return response.json()
 
-    @mcp.tool()
-    async def get_interfaces() -> List[Dict[str, Any]]:
-        """List network interfaces."""
-        try: return await opnsense_api("/diagnostics/interface/getInterfaceStatistics")
-        except Exception as e: return [{"error": str(e)}]
+    def _handle_error(e: Exception) -> str:
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            if status == 401:
+                return "Error: Authentication failed. Check OPNSENSE_KEY and OPNSENSE_SECRET."
+            elif status == 403:
+                return "Error: Permission denied. API key lacks required privileges."
+            return f"Error: OPNsense API returned status {status}."
+        elif isinstance(e, httpx.TimeoutException):
+            return "Error: Request timed out. Check connectivity to OPNsense."
+        return f"Error: {type(e).__name__}: {str(e)}"
 
-    @mcp.tool()
-    async def get_firewall_rules() -> List[Dict[str, Any]]:
-        """List firewall rules."""
-        try: return await opnsense_api("/firewall/filter/searchRule")
-        except Exception as e: return [{"error": str(e)}]
+    @mcp.tool(
+        name="opnsense_get_interfaces",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def opnsense_get_interfaces(params: BaseInput) -> str:
+        """Get network interface statistics including traffic, packets, and errors."""
+        try:
+            data = await _opnsense_api("/diagnostics/interface/getInterfaceStatistics")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps(data, indent=2)
 
-    @mcp.tool()
-    async def get_dhcp_leases() -> List[Dict[str, Any]]:
-        """List DHCP leases."""
-        try: return await opnsense_api("/dhcpv4/leases/searchLease")
-        except Exception as e: return [{"error": str(e)}]
+            lines = ["# OPNsense Interfaces", ""]
+            for iface, stats in data.items():
+                if isinstance(stats, dict):
+                    lines.append(f"## {iface}")
+                    lines.append(f"- **Status**: {'🟢 Up' if stats.get('status') == 'up' else '🔴 Down'}")
+                    lines.append(f"- **IPv4**: {stats.get('ipv4', 'N/A')}")
+                    lines.append(f"- **In**: {stats.get('bytes received', 0):,} bytes")
+                    lines.append(f"- **Out**: {stats.get('bytes transmitted', 0):,} bytes")
+                    lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
 
-    @mcp.tool()
-    async def get_gateway_status() -> Dict[str, Any]:
-        """Get gateway status."""
-        try: return await opnsense_api("/routes/gateway/status")
-        except Exception as e: return {"error": str(e)}
+    @mcp.tool(
+        name="opnsense_get_firewall_rules",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def opnsense_get_firewall_rules(params: BaseInput) -> str:
+        """List all firewall filter rules with action, interface, source, and destination."""
+        try:
+            data = await _opnsense_api("/firewall/filter/searchRule")
+            rules = data.get("rows", [])
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"rules": rules, "count": len(rules)}, indent=2)
+
+            lines = ["# Firewall Rules", "", f"Found {len(rules)} rule(s)", ""]
+            for r in rules[:20]:  # Limit output
+                action = "✅ Pass" if r.get("action") == "pass" else "🚫 Block"
+                lines.append(f"- {action} | {r.get('interface', 'any')} | {r.get('source_net', 'any')} → {r.get('destination_net', 'any')} ({r.get('description', 'No desc')})")
+            if len(rules) > 20:
+                lines.append(f"\n... and {len(rules) - 20} more rules")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="opnsense_get_dhcp_leases",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def opnsense_get_dhcp_leases(params: DHCPSearchInput) -> str:
+        """List active DHCP leases with hostname, IP, MAC, and lease time."""
+        try:
+            data = await _opnsense_api("/dhcpv4/leases/searchLease")
+            leases = data.get("rows", [])
+            if params.search:
+                leases = [l for l in leases if params.search.lower() in str(l).lower()]
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"leases": leases, "count": len(leases)}, indent=2)
+
+            lines = ["# DHCP Leases", "", f"Found {len(leases)} lease(s)", ""]
+            for l in leases:
+                lines.append(f"- **{l.get('hostname', 'unknown')}**: {l.get('address')} ({l.get('mac')}) - {l.get('status', 'active')}")
+            return "\n".join(lines) if leases else "No DHCP leases found."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="opnsense_get_gateway_status",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def opnsense_get_gateway_status(params: BaseInput) -> str:
+        """Get status of all configured gateways including latency and packet loss."""
+        try:
+            data = await _opnsense_api("/routes/gateway/status")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps(data, indent=2)
+
+            lines = ["# Gateway Status", ""]
+            items = data.get("items", data) if isinstance(data, dict) else []
+            for gw in (items if isinstance(items, list) else [items]):
+                if isinstance(gw, dict):
+                    status = "🟢" if gw.get("status_translated", "").lower() == "online" else "🔴"
+                    lines.append(f"## {gw.get('name', 'Unknown')} {status}")
+                    lines.append(f"- **Gateway**: {gw.get('gateway', 'N/A')}")
+                    lines.append(f"- **RTT**: {gw.get('delay', 'N/A')}")
+                    lines.append(f"- **Loss**: {gw.get('loss', 'N/A')}")
+                    lines.append("")
+            return "\n".join(lines) if lines else json.dumps(data, indent=2)
+        except Exception as e:
+            return _handle_error(e)
 
     if __name__ == "__main__":
         import uvicorn

@@ -8,47 +8,171 @@ data:
   main.py: |
     #!/usr/bin/env python3
     """UniFi MCP server for network management."""
-    import os, logging, httpx
-    from typing import List, Dict, Any
+    import os
+    import json
+    import logging
+    from typing import Optional, List, Dict, Any
+    from enum import Enum
     from fastmcp import FastMCP
+    from pydantic import BaseModel, Field, ConfigDict
+    import httpx
 
     logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
     UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.1:443")
     UNIFI_API_KEY = os.environ.get("UNIFI_API_KEY", "")
     UNIFI_SITE = os.environ.get("UNIFI_SITE", "default")
 
-    mcp = FastMCP(name="unifi-mcp", instructions="MCP server for UniFi network.")
+    mcp = FastMCP(
+        name="unifi_mcp",
+        instructions="MCP server for UniFi Network. Provides tools for client management, device status, network health, and alarms."
+    )
 
-    async def unifi_api(endpoint: str) -> Any:
+    class ResponseFormat(str, Enum):
+        MARKDOWN = "markdown"
+        JSON = "json"
+
+    class BaseInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class ClientSearchInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+        search: Optional[str] = Field(default=None, description="Filter by hostname, IP, or MAC address")
+
+    async def _unifi_api(endpoint: str) -> Any:
         headers = {"X-API-KEY": UNIFI_API_KEY}
         async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
             response = await client.get(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers)
             response.raise_for_status()
             return response.json().get("data", [])
 
-    @mcp.tool()
-    async def list_clients() -> List[Dict[str, Any]]:
-        """List connected clients."""
-        try: return await unifi_api("/stat/sta")
-        except Exception as e: return [{"error": str(e)}]
+    def _handle_error(e: Exception) -> str:
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            if status == 401:
+                return "Error: Invalid API key. Check UNIFI_API_KEY."
+            elif status == 403:
+                return "Error: API key lacks permissions. Ensure it has network read access."
+            return f"Error: UniFi API returned status {status}."
+        elif isinstance(e, httpx.TimeoutException):
+            return "Error: Request timed out. Check connectivity to UniFi controller."
+        return f"Error: {type(e).__name__}: {str(e)}"
 
-    @mcp.tool()
-    async def list_devices() -> List[Dict[str, Any]]:
-        """List UniFi devices."""
-        try: return await unifi_api("/stat/device")
-        except Exception as e: return [{"error": str(e)}]
+    def _format_bytes(b: int) -> str:
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if b < 1024:
+                return f"{b:.1f} {unit}"
+            b /= 1024
+        return f"{b:.1f} PB"
 
-    @mcp.tool()
-    async def get_health() -> List[Dict[str, Any]]:
-        """Get network health."""
-        try: return await unifi_api("/stat/health")
-        except Exception as e: return [{"error": str(e)}]
+    @mcp.tool(
+        name="unifi_list_clients",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def unifi_list_clients(params: ClientSearchInput) -> str:
+        """List all connected clients with IP, MAC, hostname, and traffic stats."""
+        try:
+            clients = await _unifi_api("/stat/sta")
+            if params.search:
+                search = params.search.lower()
+                clients = [c for c in clients if search in str(c).lower()]
 
-    @mcp.tool()
-    async def get_alarms() -> List[Dict[str, Any]]:
-        """Get active alarms."""
-        try: return await unifi_api("/stat/alarm")
-        except Exception as e: return [{"error": str(e)}]
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"clients": clients, "count": len(clients)}, indent=2)
+
+            lines = ["# Connected Clients", "", f"Found {len(clients)} client(s)", ""]
+            for c in sorted(clients, key=lambda x: x.get("hostname", x.get("mac", ""))):
+                name = c.get("hostname") or c.get("name") or c.get("mac", "Unknown")
+                ip = c.get("ip", "N/A")
+                signal = c.get("signal", c.get("rssi"))
+                signal_str = f" (Signal: {signal} dBm)" if signal else ""
+                tx = _format_bytes(c.get("tx_bytes", 0))
+                rx = _format_bytes(c.get("rx_bytes", 0))
+                lines.append(f"- **{name}**: {ip}{signal_str} | ↑{tx} ↓{rx}")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="unifi_list_devices",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def unifi_list_devices(params: BaseInput) -> str:
+        """List all UniFi network devices (APs, switches, gateways) with status."""
+        try:
+            devices = await _unifi_api("/stat/device")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"devices": devices, "count": len(devices)}, indent=2)
+
+            lines = ["# UniFi Devices", "", f"Found {len(devices)} device(s)", ""]
+            for d in devices:
+                status = "🟢" if d.get("state") == 1 else "🔴"
+                name = d.get("name", d.get("mac", "Unknown"))
+                model = d.get("model", "Unknown")
+                clients = d.get("num_sta", 0)
+                uptime = d.get("uptime", 0) // 3600
+                lines.append(f"## {name} {status}")
+                lines.append(f"- **Model**: {model}")
+                lines.append(f"- **IP**: {d.get('ip', 'N/A')}")
+                lines.append(f"- **Clients**: {clients}")
+                lines.append(f"- **Uptime**: {uptime} hours")
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="unifi_get_health",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def unifi_get_health(params: BaseInput) -> str:
+        """Get network health summary including WAN, LAN, and WLAN status."""
+        try:
+            health = await _unifi_api("/stat/health")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"health": health}, indent=2)
+
+            lines = ["# Network Health", ""]
+            for h in health:
+                subsystem = h.get("subsystem", "Unknown").upper()
+                status = "🟢" if h.get("status") == "ok" else "🔴"
+                lines.append(f"## {subsystem} {status}")
+                if h.get("num_user"):
+                    lines.append(f"- **Users**: {h.get('num_user')}")
+                if h.get("num_guest"):
+                    lines.append(f"- **Guests**: {h.get('num_guest')}")
+                if h.get("tx_bytes-r"):
+                    lines.append(f"- **TX Rate**: {_format_bytes(h.get('tx_bytes-r', 0))}/s")
+                if h.get("rx_bytes-r"):
+                    lines.append(f"- **RX Rate**: {_format_bytes(h.get('rx_bytes-r', 0))}/s")
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="unifi_get_alarms",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def unifi_get_alarms(params: BaseInput) -> str:
+        """Get active alarms and alerts from the UniFi controller."""
+        try:
+            alarms = await _unifi_api("/stat/alarm")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"alarms": alarms, "count": len(alarms)}, indent=2)
+
+            if not alarms:
+                return "# Alarms\n\n✅ No active alarms."
+
+            lines = ["# Active Alarms", "", f"Found {len(alarms)} alarm(s)", ""]
+            for a in alarms[:20]:
+                lines.append(f"- ⚠️ **{a.get('key', 'Unknown')}**: {a.get('msg', 'No message')}")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
 
     if __name__ == "__main__":
         import uvicorn

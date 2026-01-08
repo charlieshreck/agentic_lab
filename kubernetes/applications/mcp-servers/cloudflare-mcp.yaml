@@ -8,57 +8,153 @@ data:
   main.py: |
     #!/usr/bin/env python3
     """Cloudflare MCP server for DNS and tunnel management."""
-    import os, logging, httpx
-    from typing import List, Dict, Any
+    import os
+    import json
+    import logging
+    from typing import Optional, List, Dict, Any
+    from enum import Enum
     from fastmcp import FastMCP
+    from pydantic import BaseModel, Field, ConfigDict
+    import httpx
 
     logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
     CF_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "")
     CF_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
 
-    mcp = FastMCP(name="cloudflare-mcp", instructions="MCP server for Cloudflare DNS and tunnels.")
+    mcp = FastMCP(
+        name="cloudflare_mcp",
+        instructions="MCP server for Cloudflare. Provides tools for DNS zone management, DNS records, and Cloudflare Tunnel status."
+    )
 
-    async def cf_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
-        headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
+    class ResponseFormat(str, Enum):
+        MARKDOWN = "markdown"
+        JSON = "json"
+
+    class BaseInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class ZoneInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        zone_id: str = Field(..., description="Zone ID (32-char hex string)", min_length=32, max_length=32)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class TunnelInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        tunnel_id: str = Field(..., description="Tunnel UUID", min_length=36, max_length=36)
+
+    async def _cf_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=30.0) as client:
+            url = f"https://api.cloudflare.com/client/v4{endpoint}"
             if method == "GET":
-                response = await client.get(f"https://api.cloudflare.com/client/v4{endpoint}", headers=headers)
-            else:
-                response = await client.post(f"https://api.cloudflare.com/client/v4{endpoint}", headers=headers, json=data)
+                response = await client.get(url, headers=headers)
+            elif method == "POST":
+                response = await client.post(url, headers=headers, json=data)
+            elif method == "PUT":
+                response = await client.put(url, headers=headers, json=data)
+            elif method == "DELETE":
+                response = await client.delete(url, headers=headers)
             response.raise_for_status()
             return response.json()
 
-    @mcp.tool()
-    async def list_zones() -> List[Dict[str, Any]]:
-        """List DNS zones."""
-        try:
-            result = await cf_api("/zones")
-            return result.get("result", [])
-        except Exception as e: return [{"error": str(e)}]
+    def _handle_error(e: Exception) -> str:
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            if status == 401:
+                return "Error: Invalid API token. Check CLOUDFLARE_API_TOKEN."
+            elif status == 403:
+                return "Error: Token lacks required permissions for this operation."
+            elif status == 404:
+                return "Error: Resource not found. Check zone_id or tunnel_id."
+            return f"Error: Cloudflare API returned status {status}."
+        elif isinstance(e, httpx.TimeoutException):
+            return "Error: Request timed out connecting to Cloudflare API."
+        return f"Error: {type(e).__name__}: {str(e)}"
 
-    @mcp.tool()
-    async def list_dns_records(zone_id: str) -> List[Dict[str, Any]]:
-        """List DNS records for a zone."""
+    @mcp.tool(
+        name="cloudflare_list_zones",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def cloudflare_list_zones(params: BaseInput) -> str:
+        """List all DNS zones in the Cloudflare account with status and nameservers."""
         try:
-            result = await cf_api(f"/zones/{zone_id}/dns_records")
-            return result.get("result", [])
-        except Exception as e: return [{"error": str(e)}]
+            result = await _cf_api("/zones")
+            zones = result.get("result", [])
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"zones": zones, "count": len(zones)}, indent=2)
 
-    @mcp.tool()
-    async def list_tunnels() -> List[Dict[str, Any]]:
-        """List Cloudflare tunnels."""
-        try:
-            result = await cf_api(f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel")
-            return result.get("result", [])
-        except Exception as e: return [{"error": str(e)}]
+            lines = ["# Cloudflare DNS Zones", "", f"Found {len(zones)} zone(s)", ""]
+            for z in zones:
+                status = "🟢 Active" if z.get("status") == "active" else f"⚠️ {z.get('status')}"
+                lines.append(f"## {z.get('name')} ({status})")
+                lines.append(f"- **ID**: `{z.get('id')}`")
+                lines.append(f"- **Plan**: {z.get('plan', {}).get('name', 'Unknown')}")
+                lines.append(f"- **Nameservers**: {', '.join(z.get('name_servers', []))}")
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
 
-    @mcp.tool()
-    async def get_tunnel_status(tunnel_id: str) -> Dict[str, Any]:
-        """Get tunnel status."""
+    @mcp.tool(
+        name="cloudflare_list_dns_records",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def cloudflare_list_dns_records(params: ZoneInput) -> str:
+        """List all DNS records for a specific zone. Use cloudflare_list_zones first to get zone_id."""
         try:
-            result = await cf_api(f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{tunnel_id}")
-            return result.get("result", {})
-        except Exception as e: return {"error": str(e)}
+            result = await _cf_api(f"/zones/{params.zone_id}/dns_records")
+            records = result.get("result", [])
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"records": records, "count": len(records)}, indent=2)
+
+            lines = ["# DNS Records", "", f"Found {len(records)} record(s)", ""]
+            for r in records:
+                proxied = "☁️" if r.get("proxied") else "⚡"
+                lines.append(f"- {proxied} **{r.get('type')}** `{r.get('name')}` → `{r.get('content')[:50]}` (TTL: {r.get('ttl')})")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="cloudflare_list_tunnels",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def cloudflare_list_tunnels(params: BaseInput) -> str:
+        """List all Cloudflare Tunnels in the account with status and connections."""
+        try:
+            result = await _cf_api(f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel")
+            tunnels = result.get("result", [])
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"tunnels": tunnels, "count": len(tunnels)}, indent=2)
+
+            lines = ["# Cloudflare Tunnels", "", f"Found {len(tunnels)} tunnel(s)", ""]
+            for t in tunnels:
+                status = "🟢" if t.get("status") == "healthy" else "🔴"
+                conns = len(t.get("connections", []))
+                lines.append(f"## {t.get('name')} {status}")
+                lines.append(f"- **ID**: `{t.get('id')}`")
+                lines.append(f"- **Status**: {t.get('status')}")
+                lines.append(f"- **Connections**: {conns}")
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="cloudflare_get_tunnel_status",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def cloudflare_get_tunnel_status(params: TunnelInput) -> str:
+        """Get detailed status of a specific Cloudflare Tunnel including active connections."""
+        try:
+            result = await _cf_api(f"/accounts/{CF_ACCOUNT_ID}/cfd_tunnel/{params.tunnel_id}")
+            tunnel = result.get("result", {})
+            return json.dumps(tunnel, indent=2)
+        except Exception as e:
+            return _handle_error(e)
 
     if __name__ == "__main__":
         import uvicorn

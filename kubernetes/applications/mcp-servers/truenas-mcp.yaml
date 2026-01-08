@@ -8,120 +8,277 @@ data:
   main.py: |
     #!/usr/bin/env python3
     """TrueNAS MCP server for storage management across multiple instances."""
-    import os, logging, httpx
-    from typing import List, Dict, Any
+    import os
+    import json
+    import logging
+    from typing import Optional, List, Dict, Any
+    from enum import Enum
     from fastmcp import FastMCP
+    from pydantic import BaseModel, Field, ConfigDict
+    import httpx
 
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    # Multi-instance configuration
     INSTANCES = {
         "hdd": {
             "host": os.environ.get("TRUENAS_HDD_HOST", "https://truenas.hdd.kernow.io"),
-            "api_key": os.environ.get("TRUENAS_HDD_API_KEY", "")
+            "api_key": os.environ.get("TRUENAS_HDD_API_KEY", ""),
+            "description": "Bulk storage for backups and archives"
         },
         "media": {
             "host": os.environ.get("TRUENAS_MEDIA_HOST", "https://truenas.kernow.io"),
-            "api_key": os.environ.get("TRUENAS_MEDIA_API_KEY", "")
+            "api_key": os.environ.get("TRUENAS_MEDIA_API_KEY", ""),
+            "description": "Media files for Plex/arr suite"
         }
     }
 
-    mcp = FastMCP(name="truenas-mcp", instructions="MCP server for TrueNAS storage management. Supports two instances: 'hdd' (bulk storage) and 'media' (media files).")
+    mcp = FastMCP(
+        name="truenas_mcp",
+        instructions="MCP server for TrueNAS storage. Supports two instances: 'hdd' (bulk storage) and 'media' (media files). List instances first to see available options."
+    )
 
-    async def truenas_api(instance: str, endpoint: str, method: str = "GET", data: dict = None) -> Any:
+    class ResponseFormat(str, Enum):
+        MARKDOWN = "markdown"
+        JSON = "json"
+
+    class InstanceInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        instance: str = Field(default="hdd", description="TrueNAS instance: 'hdd' or 'media'")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class DatasetInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        instance: str = Field(default="hdd", description="TrueNAS instance: 'hdd' or 'media'")
+        pool: Optional[str] = Field(default=None, description="Filter by pool name")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    class SnapshotInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        instance: str = Field(default="hdd", description="TrueNAS instance: 'hdd' or 'media'")
+        dataset: Optional[str] = Field(default=None, description="Filter by dataset name")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+
+    async def _truenas_api(instance: str, endpoint: str) -> Any:
         if instance not in INSTANCES:
-            return {"error": f"Unknown instance: {instance}. Use 'hdd' or 'media'"}
+            raise ValueError(f"Unknown instance: {instance}. Use 'hdd' or 'media'")
         config = INSTANCES[instance]
         headers = {"Authorization": f"Bearer {config['api_key']}"}
         async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
-            url = f"{config['host']}/api/v2.0{endpoint}"
-            if method == "GET":
-                response = await client.get(url, headers=headers)
-            else:
-                response = await client.post(url, headers=headers, json=data)
+            response = await client.get(f"{config['host']}/api/v2.0{endpoint}", headers=headers)
             response.raise_for_status()
             return response.json()
 
-    @mcp.tool()
-    async def list_instances() -> List[Dict[str, str]]:
-        """List available TrueNAS instances."""
-        return [{"name": k, "host": v["host"]} for k, v in INSTANCES.items()]
+    def _handle_error(e: Exception) -> str:
+        if isinstance(e, ValueError):
+            return f"Error: {str(e)}"
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            if status == 401:
+                return "Error: Invalid API key. Check TRUENAS_*_API_KEY."
+            elif status == 403:
+                return "Error: API key lacks permissions."
+            return f"Error: TrueNAS API returned status {status}."
+        elif isinstance(e, httpx.TimeoutException):
+            return "Error: Request timed out. Check connectivity to TrueNAS."
+        return f"Error: {type(e).__name__}: {str(e)}"
 
-    @mcp.tool()
-    async def list_pools(instance: str = "hdd") -> List[Dict[str, Any]]:
-        """List storage pools. Instance: 'hdd' or 'media'."""
-        try: return await truenas_api(instance, "/pool")
-        except Exception as e: return [{"error": str(e)}]
+    def _format_bytes(b: int) -> str:
+        if b is None:
+            return "N/A"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+            if b < 1024:
+                return f"{b:.1f} {unit}"
+            b /= 1024
+        return f"{b:.1f} EB"
 
-    @mcp.tool()
-    async def list_datasets(instance: str = "hdd", pool: str = None) -> List[Dict[str, Any]]:
-        """List datasets/filesystems. Instance: 'hdd' or 'media'."""
+    @mcp.tool(
+        name="truenas_list_instances",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_list_instances() -> str:
+        """List available TrueNAS instances with their hostnames and purposes."""
+        lines = ["# TrueNAS Instances", ""]
+        for name, config in INSTANCES.items():
+            lines.append(f"- **{name}**: {config['host']} - {config['description']}")
+        return "\n".join(lines)
+
+    @mcp.tool(
+        name="truenas_list_pools",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_list_pools(params: InstanceInput) -> str:
+        """List ZFS storage pools with health status and capacity."""
         try:
-            datasets = await truenas_api(instance, "/pool/dataset")
-            if pool:
-                datasets = [d for d in datasets if d.get("pool") == pool]
-            return datasets
-        except Exception as e: return [{"error": str(e)}]
+            pools = await _truenas_api(params.instance, "/pool")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"instance": params.instance, "pools": pools}, indent=2)
 
-    @mcp.tool()
-    async def get_system_info(instance: str = "hdd") -> Dict[str, Any]:
-        """Get system information. Instance: 'hdd' or 'media'."""
-        try: return await truenas_api(instance, "/system/info")
-        except Exception as e: return {"error": str(e)}
+            lines = [f"# Storage Pools ({params.instance})", ""]
+            for p in pools:
+                status = "🟢" if p.get("healthy") else "🔴"
+                size = _format_bytes(p.get("size"))
+                free = _format_bytes(p.get("free"))
+                lines.append(f"## {p.get('name')} {status}")
+                lines.append(f"- **Status**: {p.get('status')}")
+                lines.append(f"- **Size**: {size}")
+                lines.append(f"- **Free**: {free}")
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
 
-    @mcp.tool()
-    async def list_shares(instance: str = "hdd") -> Dict[str, Any]:
-        """List all shares (SMB, NFS). Instance: 'hdd' or 'media'."""
+    @mcp.tool(
+        name="truenas_list_datasets",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_list_datasets(params: DatasetInput) -> str:
+        """List ZFS datasets/filesystems with quotas and usage."""
         try:
-            smb = await truenas_api(instance, "/sharing/smb")
-            nfs = await truenas_api(instance, "/sharing/nfs")
-            return {"instance": instance, "smb": smb, "nfs": nfs}
-        except Exception as e: return {"error": str(e)}
+            datasets = await _truenas_api(params.instance, "/pool/dataset")
+            if params.pool:
+                datasets = [d for d in datasets if params.pool in d.get("id", "")]
 
-    @mcp.tool()
-    async def get_alerts(instance: str = "hdd") -> List[Dict[str, Any]]:
-        """Get active alerts. Instance: 'hdd' or 'media'."""
-        try: return await truenas_api(instance, "/alert/list")
-        except Exception as e: return [{"error": str(e)}]
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"datasets": datasets, "count": len(datasets)}, indent=2)
 
-    @mcp.tool()
-    async def get_all_alerts() -> Dict[str, List[Dict[str, Any]]]:
-        """Get alerts from all TrueNAS instances."""
-        results = {}
+            lines = [f"# Datasets ({params.instance})", "", f"Found {len(datasets)} dataset(s)", ""]
+            for d in datasets[:30]:
+                used = _format_bytes(d.get("used", {}).get("parsed", 0))
+                avail = _format_bytes(d.get("available", {}).get("parsed", 0))
+                lines.append(f"- **{d.get('id')}**: {used} used / {avail} available")
+            if len(datasets) > 30:
+                lines.append(f"\n... and {len(datasets) - 30} more")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="truenas_list_shares",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_list_shares(params: InstanceInput) -> str:
+        """List all SMB and NFS shares configured on the instance."""
+        try:
+            smb = await _truenas_api(params.instance, "/sharing/smb")
+            nfs = await _truenas_api(params.instance, "/sharing/nfs")
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"instance": params.instance, "smb": smb, "nfs": nfs}, indent=2)
+
+            lines = [f"# Shares ({params.instance})", ""]
+            if smb:
+                lines.append("## SMB Shares")
+                for s in smb:
+                    enabled = "✅" if s.get("enabled") else "⚫"
+                    lines.append(f"- {enabled} **{s.get('name')}**: {s.get('path')}")
+                lines.append("")
+            if nfs:
+                lines.append("## NFS Shares")
+                for n in nfs:
+                    enabled = "✅" if n.get("enabled") else "⚫"
+                    lines.append(f"- {enabled} {n.get('path')} → {', '.join(n.get('hosts', ['*']))}")
+            return "\n".join(lines) if (smb or nfs) else "No shares configured."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="truenas_get_alerts",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_get_alerts(params: InstanceInput) -> str:
+        """Get active alerts from a TrueNAS instance."""
+        try:
+            alerts = await _truenas_api(params.instance, "/alert/list")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"instance": params.instance, "alerts": alerts}, indent=2)
+
+            if not alerts:
+                return f"# Alerts ({params.instance})\n\n✅ No active alerts."
+
+            lines = [f"# Alerts ({params.instance})", "", f"Found {len(alerts)} alert(s)", ""]
+            for a in alerts:
+                level = {"WARNING": "⚠️", "CRITICAL": "🔴", "INFO": "ℹ️"}.get(a.get("level"), "❓")
+                lines.append(f"- {level} **{a.get('klass')}**: {a.get('formatted', a.get('text', 'No message'))}")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="truenas_get_all_alerts",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_get_all_alerts() -> str:
+        """Get alerts from ALL TrueNAS instances at once."""
+        lines = ["# All TrueNAS Alerts", ""]
+        total = 0
         for name in INSTANCES:
             try:
-                results[name] = await truenas_api(name, "/alert/list")
+                alerts = await _truenas_api(name, "/alert/list")
+                total += len(alerts)
+                lines.append(f"## {name} ({len(alerts)} alerts)")
+                if alerts:
+                    for a in alerts[:5]:
+                        level = {"WARNING": "⚠️", "CRITICAL": "🔴"}.get(a.get("level"), "ℹ️")
+                        lines.append(f"- {level} {a.get('klass')}: {a.get('formatted', '')[:80]}")
+                else:
+                    lines.append("✅ No alerts")
+                lines.append("")
             except Exception as e:
-                results[name] = [{"error": str(e)}]
-        return results
+                lines.append(f"## {name}\n🔴 Error: {str(e)}\n")
+        return "\n".join(lines) if total else "✅ No alerts on any TrueNAS instance."
 
-    @mcp.tool()
-    async def list_snapshots(instance: str = "hdd", dataset: str = None) -> List[Dict[str, Any]]:
-        """List ZFS snapshots. Instance: 'hdd' or 'media'."""
+    @mcp.tool(
+        name="truenas_list_snapshots",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_list_snapshots(params: SnapshotInput) -> str:
+        """List ZFS snapshots, optionally filtered by dataset."""
         try:
-            snapshots = await truenas_api(instance, "/zfs/snapshot")
-            if dataset:
-                snapshots = [s for s in snapshots if s.get("dataset") == dataset]
-            return snapshots
-        except Exception as e: return [{"error": str(e)}]
+            snapshots = await _truenas_api(params.instance, "/zfs/snapshot")
+            if params.dataset:
+                snapshots = [s for s in snapshots if params.dataset in s.get("id", "")]
 
-    @mcp.tool()
-    async def get_disk_usage(instance: str = "hdd") -> Dict[str, Any]:
-        """Get disk usage summary. Instance: 'hdd' or 'media'."""
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"snapshots": snapshots, "count": len(snapshots)}, indent=2)
+
+            lines = [f"# Snapshots ({params.instance})", "", f"Found {len(snapshots)} snapshot(s)", ""]
+            for s in snapshots[:30]:
+                lines.append(f"- `{s.get('id')}`")
+            if len(snapshots) > 30:
+                lines.append(f"\n... and {len(snapshots) - 30} more")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="truenas_get_disk_usage",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def truenas_get_disk_usage(params: InstanceInput) -> str:
+        """Get disk usage summary across all pools."""
         try:
-            pools = await truenas_api(instance, "/pool")
-            return {
-                "instance": instance,
-                "pools": [{
-                    "name": p.get("name"),
-                    "size": p.get("size"),
-                    "allocated": p.get("allocated"),
-                    "free": p.get("free"),
-                    "status": p.get("status")
-                } for p in pools]
-            }
-        except Exception as e: return {"error": str(e)}
+            pools = await _truenas_api(params.instance, "/pool")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"instance": params.instance, "pools": pools}, indent=2)
+
+            lines = [f"# Disk Usage ({params.instance})", ""]
+            for p in pools:
+                name = p.get("name")
+                size = _format_bytes(p.get("size"))
+                alloc = _format_bytes(p.get("allocated"))
+                free = _format_bytes(p.get("free"))
+                pct = (p.get("allocated", 0) / p.get("size", 1)) * 100 if p.get("size") else 0
+                bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+                lines.append(f"## {name}")
+                lines.append(f"```\n[{bar}] {pct:.1f}%\n```")
+                lines.append(f"- **Total**: {size}")
+                lines.append(f"- **Used**: {alloc}")
+                lines.append(f"- **Free**: {free}")
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
 
     if __name__ == "__main__":
         import uvicorn
