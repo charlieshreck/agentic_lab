@@ -43,12 +43,24 @@ data:
     # Key: "{chat_id}:{topic_id}" -> {session_id, messages: [], last_response, status}
     planning_sessions = {}
 
+    # Alert store for AI-raised alerts
+    # Key: alert_id -> {alert_id, name, severity, description, suggested_fix, topic_id, status, raised_at}
+    active_alerts = {}
+
     class ApprovalRequest(BaseModel):
         alert_id: str
         alert: dict
         solutions: list
         context: dict
         topic: str = "infrastructure"
+
+    class AIAlertRequest(BaseModel):
+        name: str
+        severity: str = "warning"  # warning, critical
+        description: str
+        suggested_fix: Optional[str] = None
+        source: str = "unknown"
+        context: Optional[str] = None
 
     class TelegramUpdate(BaseModel):
         update_id: int
@@ -75,14 +87,42 @@ data:
             data["reply_markup"] = reply_markup
         return await telegram_request("sendMessage", data)
 
-    async def create_forum_topic(name):
-        result = await telegram_request("createForumTopic", {"chat_id": FORUM_CHAT_ID, "name": name})
+    async def create_forum_topic(name, icon_color=None):
+        """Create a new forum topic. Returns topic_id or 0 on failure."""
+        data = {"chat_id": FORUM_CHAT_ID, "name": name[:128]}  # Telegram limit
+        if icon_color:
+            data["icon_color"] = icon_color
+        result = await telegram_request("createForumTopic", data)
         if result.get("ok"):
-            return result["result"]["message_thread_id"]
+            topic_id = result["result"]["message_thread_id"]
+            logger.info("Created topic '%s' with id %s", name[:30], topic_id)
+            return topic_id
+        logger.error("Failed to create topic: %s", result)
         return 0
 
     async def close_forum_topic(topic_id):
+        """Close a forum topic."""
         await telegram_request("closeForumTopic", {"chat_id": FORUM_CHAT_ID, "message_thread_id": topic_id})
+
+    async def reopen_forum_topic(topic_id):
+        """Reopen a closed forum topic."""
+        await telegram_request("reopenForumTopic", {"chat_id": FORUM_CHAT_ID, "message_thread_id": topic_id})
+
+    async def create_design_topic(query: str, username: str) -> int:
+        """Create a dedicated topic for a user design/planning session."""
+        # Truncate query for topic name
+        short_query = query[:60] + "..." if len(query) > 60 else query
+        topic_name = f"📝 {short_query}"
+        topic_id = await create_forum_topic(topic_name, icon_color=0x6FB9F0)  # Blue
+        return topic_id
+
+    async def create_alert_topic(alert_name: str, severity: str = "warning") -> int:
+        """Create a dedicated topic for an AI-raised alert."""
+        icon = "🚨" if severity == "critical" else "⚠️"
+        topic_name = f"{icon} {alert_name[:100]}"
+        color = 0xFF0000 if severity == "critical" else 0xFFD700  # Red or Yellow
+        topic_id = await create_forum_topic(topic_name, icon_color=color)
+        return topic_id
 
     async def initialize_standing_topics():
         global topics
@@ -99,6 +139,7 @@ data:
         logger.info("Initialized %d standing topics", len(topics))
 
     async def build_approval_keyboard(alert_id, solutions):
+        """Build keyboard for legacy alert approvals."""
         buttons = []
         row = []
         for i, sol in enumerate(solutions, 1):
@@ -112,6 +153,20 @@ data:
         buttons.append([
             {"text": "Ignore", "callback_data": "ignore:" + alert_id},
             {"text": "Details", "callback_data": "details:" + alert_id}
+        ])
+        return {"inline_keyboard": buttons}
+
+    def build_alert_keyboard(alert_id: str, has_fix: bool = True) -> dict:
+        """Build keyboard for AI-raised alerts."""
+        buttons = []
+        if has_fix:
+            buttons.append([
+                {"text": "🔧 Execute Fix", "callback_data": f"alert:fix:{alert_id}"},
+                {"text": "🔍 More Details", "callback_data": f"alert:details:{alert_id}"}
+            ])
+        buttons.append([
+            {"text": "⏸️ Ignore", "callback_data": f"alert:ignore:{alert_id}"},
+            {"text": "📢 Escalate", "callback_data": f"alert:escalate:{alert_id}"}
         ])
         return {"inline_keyboard": buttons}
 
@@ -196,6 +251,13 @@ data:
             plan_action = parts[1]  # continue, approve, decline
             session_id = parts[2]
             await handle_planning_callback(callback, plan_action, session_id)
+            return
+
+        # Handle AI-raised alert callbacks
+        if action == "alert" and len(parts) >= 3:
+            alert_action = parts[1]  # fix, ignore, details, escalate
+            alert_id = parts[2]
+            await handle_alert_callback(callback, alert_action, alert_id)
             return
 
         # Default: answer callback for other actions
@@ -319,7 +381,16 @@ data:
             # Start new planning session with Claude Agent
             logger.info("Starting new planning session...")
             try:
-                await process_agent_query(chat_id, topic_id, raw_text, username)
+                # Create a dedicated topic for this design if in the forum chat
+                design_topic_id = topic_id
+                if str(chat_id) == FORUM_CHAT_ID:
+                    # Create new topic for this design
+                    new_topic_id = await create_design_topic(raw_text, username)
+                    if new_topic_id:
+                        design_topic_id = new_topic_id
+                        await send_message(chat_id, f"_Starting design session in new topic..._", topic_id=topic_id)
+
+                await process_agent_query(chat_id, design_topic_id, raw_text, username, create_topic=False)
             except Exception as e:
                 logger.error("Failed to forward to agent: %s", e)
                 await send_message(chat_id, "*Error:* Failed to process query: " + str(e), topic_id=topic_id)
@@ -338,7 +409,7 @@ data:
             ]
         }
 
-    async def process_agent_query(chat_id, topic_id, query, username, session=None):
+    async def process_agent_query(chat_id, topic_id, query, username, session=None, create_topic=False):
         """Forward query to Claude Agent using async mode with polling."""
         logger.info("Agent query from @%s: %s", username, query[:100])
         session_key = f"{chat_id}:{topic_id}"
@@ -351,7 +422,10 @@ data:
                 "messages": [],
                 "last_response": None,
                 "status": "processing",
-                "username": username
+                "username": username,
+                "topic_id": topic_id,
+                "chat_id": chat_id,
+                "is_design_topic": create_topic or (str(chat_id) == FORUM_CHAT_ID and topic_id != 1)
             }
             planning_sessions[session_key] = session
         else:
@@ -511,6 +585,7 @@ data:
 
         elif action == "approve":
             session["status"] = "approved"
+            is_design_topic = session.get("is_design_topic", False)
             await telegram_request("answerCallbackQuery", {
                 "callback_query_id": callback["id"],
                 "text": "Approved! Starting deployment..."
@@ -525,9 +600,14 @@ data:
             # TODO: Trigger actual deployment via Claude Agent with "execute" flag
             # For now, send the plan back to Claude to execute
             await send_message(chat_id, "_Deployment feature coming soon. Plan saved for reference._", topic_id=topic_id)
+            # Close the design topic if it was created for this session
+            if is_design_topic and topic_id:
+                await send_message(chat_id, "_Closing topic - design approved._", topic_id=topic_id)
+                await close_forum_topic(topic_id)
             del planning_sessions[session_key]
 
         elif action == "decline":
+            is_design_topic = session.get("is_design_topic", False)
             await telegram_request("answerCallbackQuery", {
                 "callback_query_id": callback["id"],
                 "text": "Plan declined"
@@ -539,7 +619,118 @@ data:
                 "text": message.get("text", "").replace("\n\n---\n_What would you like to do?_", "") + f"\n\n---\n❌ *Declined by @{user}*",
                 "parse_mode": "Markdown"
             })
+            # Close the design topic if it was created for this session
+            if is_design_topic and topic_id:
+                await send_message(chat_id, "_Closing topic - design declined._", topic_id=topic_id)
+                await close_forum_topic(topic_id)
             del planning_sessions[session_key]
+
+    async def handle_alert_callback(callback, action, alert_id):
+        """Handle AI-raised alert callbacks (fix/ignore/details/escalate)."""
+        message = callback.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        topic_id = message.get("message_thread_id")
+        user = callback.get("from", {}).get("username", "unknown")
+
+        # Find alert
+        alert = active_alerts.get(alert_id)
+        if not alert:
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Alert not found or expired",
+                "show_alert": True
+            })
+            return
+
+        if action == "fix":
+            alert["status"] = "executing_fix"
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Executing suggested fix..."
+            })
+            # Update message
+            await telegram_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message.get("message_id"),
+                "text": message.get("text", "") + f"\n\n---\n🔧 *Fix approved by @{user}*\n_Executing..._",
+                "parse_mode": "Markdown"
+            })
+            # Execute fix via Claude Agent
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        CLAUDE_AGENT_URL + "/agent/run",
+                        json={
+                            "prompt": f"Execute the following fix for alert '{alert['name']}':\n\n{alert.get('suggested_fix', 'No fix specified')}\n\nBe careful and report the result.",
+                            "context": {"alert_id": alert_id, "approved_by": user, "source": "alert_fix"},
+                            "max_turns": 5,
+                            "working_directory": "/workspace",
+                            "async_mode": True,
+                            "timeout": 300
+                        }
+                    )
+                    result = response.json()
+                    if result.get("success"):
+                        await send_message(chat_id, f"_Fix execution started. Task: {result.get('task_id', 'unknown')[:8]}_", topic_id=topic_id)
+                    else:
+                        await send_message(chat_id, f"*Error starting fix:* {result.get('error', 'Unknown')}", topic_id=topic_id)
+            except Exception as e:
+                await send_message(chat_id, f"*Error:* {str(e)}", topic_id=topic_id)
+            # Close topic after fix initiated
+            alert["status"] = "fix_initiated"
+            await close_forum_topic(topic_id)
+            del active_alerts[alert_id]
+
+        elif action == "ignore":
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Alert ignored"
+            })
+            await telegram_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message.get("message_id"),
+                "text": message.get("text", "") + f"\n\n---\n⏸️ *Ignored by @{user}*",
+                "parse_mode": "Markdown"
+            })
+            alert["status"] = "ignored"
+            await close_forum_topic(topic_id)
+            del active_alerts[alert_id]
+
+        elif action == "details":
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"]
+            })
+            # Send detailed info
+            details = f"*Alert Details: {alert['name']}*\n\n"
+            details += f"*Severity:* {alert.get('severity', 'warning')}\n"
+            details += f"*Source:* {alert.get('source', 'unknown')}\n"
+            details += f"*Raised:* {alert.get('raised_at', 'unknown')}\n\n"
+            details += f"*Description:*\n{alert.get('description', 'No description')}\n\n"
+            if alert.get('suggested_fix'):
+                details += f"*Suggested Fix:*\n```\n{alert.get('suggested_fix')}\n```\n"
+            if alert.get('context'):
+                details += f"\n*Context:*\n{alert.get('context')}"
+            await send_message(chat_id, details, topic_id=topic_id)
+
+        elif action == "escalate":
+            await telegram_request("answerCallbackQuery", {
+                "callback_query_id": callback["id"],
+                "text": "Alert escalated to critical"
+            })
+            await telegram_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message.get("message_id"),
+                "text": message.get("text", "") + f"\n\n---\n📢 *Escalated by @{user}*",
+                "parse_mode": "Markdown"
+            })
+            # Notify in critical topic
+            critical_topic_id = topics.get("critical", {}).get("topic_id", 1)
+            await send_message(
+                FORUM_CHAT_ID,
+                f"🚨 *ESCALATED ALERT*\n\n*{alert['name']}*\n\nEscalated by @{user}\nOriginal topic: {topic_id}",
+                topic_id=critical_topic_id
+            )
+            alert["status"] = "escalated"
 
     @app.post("/approval")
     async def send_approval_request(request: ApprovalRequest):
@@ -568,6 +759,72 @@ data:
         topic_id = topics.get(topic, {}).get("topic_id", 1)
         result = await send_message(FORUM_CHAT_ID, message, topic_id=topic_id)
         return {"ok": result.get("ok", False)}
+
+    @app.post("/alert/raise")
+    async def raise_ai_alert(request: AIAlertRequest):
+        """
+        Raise an AI-detected alert with its own dedicated topic.
+        Used by MCP servers and the alerting pipeline to notify about issues.
+        """
+        alert_id = str(uuid.uuid4())
+
+        # Create dedicated topic for this alert
+        topic_id = await create_alert_topic(request.name, request.severity)
+        if not topic_id:
+            # Fallback to infrastructure topic
+            topic_id = topics.get("infrastructure", {}).get("topic_id", 1)
+
+        # Store alert
+        active_alerts[alert_id] = {
+            "alert_id": alert_id,
+            "name": request.name,
+            "severity": request.severity,
+            "description": request.description,
+            "suggested_fix": request.suggested_fix,
+            "source": request.source,
+            "context": request.context,
+            "topic_id": topic_id,
+            "status": "pending",
+            "raised_at": datetime.utcnow().isoformat()
+        }
+
+        # Build message
+        icon = "🚨" if request.severity == "critical" else "⚠️"
+        msg = f"{icon} *AI Alert: {request.name}*\n\n"
+        msg += f"*Severity:* {request.severity}\n"
+        msg += f"*Source:* {request.source}\n\n"
+        msg += f"*Description:*\n{request.description}\n"
+        if request.suggested_fix:
+            msg += f"\n*Suggested Fix:*\n```\n{request.suggested_fix}\n```"
+
+        # Build keyboard with appropriate options
+        has_fix = bool(request.suggested_fix)
+        keyboard = build_alert_keyboard(alert_id, has_fix)
+
+        # Send to topic
+        result = await send_message(FORUM_CHAT_ID, msg, topic_id=topic_id, reply_markup=keyboard)
+
+        return {
+            "alert_id": alert_id,
+            "topic_id": topic_id,
+            "message_id": result.get("result", {}).get("message_id")
+        }
+
+    @app.get("/alert/{alert_id}")
+    async def get_alert_status(alert_id: str):
+        """Get status of an AI-raised alert."""
+        alert = active_alerts.get(alert_id)
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        return alert
+
+    @app.get("/alerts")
+    async def list_alerts():
+        """List all active AI-raised alerts."""
+        return {
+            "alerts": list(active_alerts.values()),
+            "count": len(active_alerts)
+        }
 
     @app.get("/health")
     async def health():
@@ -693,6 +950,8 @@ spec:
               value: "http://langgraph:8000"
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
+            - name: CLAUDE_AGENT_URL
+              value: "http://claude-agent:8000"
           volumeMounts:
             - name: code
               mountPath: /code

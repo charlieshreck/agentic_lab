@@ -1,0 +1,495 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alerting-pipeline-code
+  namespace: ai-platform
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """
+    Alerting Pipeline - Polls MCP servers and raises AI alerts.
+
+    This service periodically checks infrastructure health via MCP servers
+    and raises alerts to the Telegram service when issues are detected.
+    """
+    import os
+    import logging
+    import asyncio
+    from datetime import datetime
+    from typing import Dict, List, Any, Optional
+
+    from fastapi import FastAPI
+    from pydantic import BaseModel
+    import httpx
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Service URLs
+    TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
+
+    # MCP Server endpoints
+    MCP_SERVERS = {
+        "unifi": os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000"),
+        "truenas": os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000"),
+        "proxmox": os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000"),
+        "opnsense": os.environ.get("OPNSENSE_MCP_URL", "http://opnsense-mcp:8000"),
+        "adguard": os.environ.get("ADGUARD_MCP_URL", "http://adguard-mcp:8000"),
+    }
+
+    # Poll intervals in seconds
+    POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "300"))  # 5 minutes default
+    CRITICAL_POLL_INTERVAL = int(os.environ.get("CRITICAL_POLL_INTERVAL", "60"))  # 1 minute for critical checks
+
+    # Track raised alerts to avoid duplicates
+    raised_alerts: Dict[str, datetime] = {}
+    ALERT_COOLDOWN_SECONDS = 3600  # 1 hour cooldown before re-alerting on same issue
+
+    app = FastAPI(title="Alerting Pipeline")
+
+    class AlertRule(BaseModel):
+        name: str
+        source: str
+        check_type: str  # threshold, presence, absence
+        threshold: Optional[float] = None
+        severity: str = "warning"
+        description_template: str
+        fix_template: Optional[str] = None
+
+    # Define alert rules
+    ALERT_RULES = [
+        # UniFi alerts
+        AlertRule(
+            name="UniFi Device Offline",
+            source="unifi",
+            check_type="device_offline",
+            severity="critical",
+            description_template="UniFi device '{device_name}' is offline. Last seen: {last_seen}",
+            fix_template="Check physical connectivity and power for device '{device_name}'"
+        ),
+        AlertRule(
+            name="UniFi High Client Count",
+            source="unifi",
+            check_type="threshold",
+            threshold=50,
+            severity="warning",
+            description_template="Access point '{ap_name}' has {client_count} clients connected (threshold: 50)",
+            fix_template=None
+        ),
+        # TrueNAS alerts
+        AlertRule(
+            name="TrueNAS Pool Degraded",
+            source="truenas",
+            check_type="pool_health",
+            severity="critical",
+            description_template="ZFS pool '{pool_name}' is in degraded state: {status}",
+            fix_template="Run 'zpool status {pool_name}' to check disk status. Consider replacing failed drives."
+        ),
+        AlertRule(
+            name="TrueNAS Low Disk Space",
+            source="truenas",
+            check_type="threshold",
+            threshold=85,
+            severity="warning",
+            description_template="Pool '{pool_name}' is at {usage_percent}% capacity",
+            fix_template="Review and clean up data or expand storage"
+        ),
+        # Proxmox alerts
+        AlertRule(
+            name="Proxmox VM Not Running",
+            source="proxmox",
+            check_type="vm_status",
+            severity="warning",
+            description_template="VM '{vm_name}' (ID: {vm_id}) is not running. Status: {status}",
+            fix_template="Start the VM using: qm start {vm_id}"
+        ),
+        AlertRule(
+            name="Proxmox High CPU",
+            source="proxmox",
+            check_type="threshold",
+            threshold=90,
+            severity="warning",
+            description_template="Node '{node_name}' CPU usage at {cpu_percent}%",
+            fix_template=None
+        ),
+        # OPNsense alerts
+        AlertRule(
+            name="OPNsense Service Down",
+            source="opnsense",
+            check_type="service_status",
+            severity="critical",
+            description_template="Service '{service_name}' is not running on OPNsense",
+            fix_template="SSH to OPNsense and run: service {service_name} restart"
+        ),
+        # AdGuard alerts
+        AlertRule(
+            name="AdGuard High Block Rate",
+            source="adguard",
+            check_type="threshold",
+            threshold=70,
+            severity="warning",
+            description_template="AdGuard blocking {block_percent}% of queries - may indicate malware activity",
+            fix_template="Review blocked domains in AdGuard admin panel"
+        ),
+    ]
+
+    async def call_mcp_tool(mcp_url: str, tool_name: str, params: dict = None) -> dict:
+        """Call an MCP tool and return the result."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    f"{mcp_url}/call-tool",
+                    json={"name": tool_name, "arguments": params or {}}
+                )
+                if response.status_code == 200:
+                    return response.json()
+                return {"error": f"HTTP {response.status_code}"}
+            except Exception as e:
+                return {"error": str(e)}
+
+    async def raise_alert(name: str, severity: str, description: str,
+                          source: str, suggested_fix: str = None, context: str = None):
+        """Raise an alert via the Telegram service."""
+        # Check cooldown
+        alert_key = f"{source}:{name}"
+        if alert_key in raised_alerts:
+            elapsed = (datetime.utcnow() - raised_alerts[alert_key]).total_seconds()
+            if elapsed < ALERT_COOLDOWN_SECONDS:
+                logger.debug(f"Alert '{name}' still in cooldown ({elapsed:.0f}s)")
+                return
+
+        logger.info(f"Raising alert: {name} ({severity})")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    f"{TELEGRAM_SERVICE_URL}/alert/raise",
+                    json={
+                        "name": name,
+                        "severity": severity,
+                        "description": description,
+                        "suggested_fix": suggested_fix,
+                        "source": source,
+                        "context": context
+                    }
+                )
+                if response.status_code == 200:
+                    raised_alerts[alert_key] = datetime.utcnow()
+                    logger.info(f"Alert raised: {response.json()}")
+                else:
+                    logger.error(f"Failed to raise alert: {response.text}")
+            except Exception as e:
+                logger.error(f"Error raising alert: {e}")
+
+    async def check_unifi_health():
+        """Check UniFi network health."""
+        mcp_url = MCP_SERVERS.get("unifi")
+        if not mcp_url:
+            return
+
+        # Check device status
+        result = await call_mcp_tool(mcp_url, "unifi_list_devices", {"response_format": "json"})
+        if "error" in result:
+            logger.warning(f"UniFi check failed: {result['error']}")
+            return
+
+        try:
+            # Parse device list - result may be string or dict
+            import json
+            content = result.get("content", [{}])
+            if isinstance(content, list) and content:
+                text = content[0].get("text", "{}")
+                data = json.loads(text) if isinstance(text, str) else text
+                devices = data.get("devices", [])
+
+                for device in devices:
+                    if device.get("state") != 1:  # Not online
+                        await raise_alert(
+                            name=f"UniFi Device Offline: {device.get('name', device.get('mac', 'Unknown'))}",
+                            severity="critical",
+                            description=f"UniFi device '{device.get('name', 'Unknown')}' is offline",
+                            source="unifi",
+                            suggested_fix=f"Check physical connectivity and power for device",
+                            context=f"MAC: {device.get('mac')}, Model: {device.get('model')}"
+                        )
+        except Exception as e:
+            logger.error(f"Error parsing UniFi response: {e}")
+
+    async def check_truenas_health():
+        """Check TrueNAS storage health."""
+        mcp_url = MCP_SERVERS.get("truenas")
+        if not mcp_url:
+            return
+
+        # Check pool status
+        result = await call_mcp_tool(mcp_url, "truenas_list_pools", {"response_format": "json"})
+        if "error" in result:
+            logger.warning(f"TrueNAS check failed: {result['error']}")
+            return
+
+        try:
+            import json
+            content = result.get("content", [{}])
+            if isinstance(content, list) and content:
+                text = content[0].get("text", "{}")
+                data = json.loads(text) if isinstance(text, str) else text
+                pools = data.get("pools", [])
+
+                for pool in pools:
+                    status = pool.get("status", "").upper()
+                    if status not in ["ONLINE", "HEALTHY"]:
+                        await raise_alert(
+                            name=f"TrueNAS Pool Degraded: {pool.get('name')}",
+                            severity="critical",
+                            description=f"ZFS pool '{pool.get('name')}' is {status}",
+                            source="truenas",
+                            suggested_fix="Check disk status with 'zpool status'",
+                            context=f"Pool: {pool.get('name')}, Status: {status}"
+                        )
+
+                    # Check capacity
+                    usage = pool.get("used_percent", 0)
+                    if usage > 85:
+                        await raise_alert(
+                            name=f"TrueNAS Low Space: {pool.get('name')}",
+                            severity="warning" if usage < 95 else "critical",
+                            description=f"Pool '{pool.get('name')}' is at {usage}% capacity",
+                            source="truenas",
+                            suggested_fix="Clean up data or expand storage"
+                        )
+        except Exception as e:
+            logger.error(f"Error parsing TrueNAS response: {e}")
+
+    async def check_proxmox_health():
+        """Check Proxmox cluster health."""
+        mcp_url = MCP_SERVERS.get("proxmox")
+        if not mcp_url:
+            return
+
+        # Check cluster status
+        result = await call_mcp_tool(mcp_url, "proxmox_cluster_status", {"response_format": "json"})
+        if "error" in result:
+            logger.warning(f"Proxmox check failed: {result['error']}")
+            return
+
+        try:
+            import json
+            content = result.get("content", [{}])
+            if isinstance(content, list) and content:
+                text = content[0].get("text", "{}")
+                data = json.loads(text) if isinstance(text, str) else text
+                nodes = data.get("nodes", [])
+
+                for node in nodes:
+                    if node.get("status") != "online":
+                        await raise_alert(
+                            name=f"Proxmox Node Offline: {node.get('node')}",
+                            severity="critical",
+                            description=f"Proxmox node '{node.get('node')}' is offline",
+                            source="proxmox",
+                            suggested_fix="Check physical server and network connectivity"
+                        )
+
+                    # Check CPU
+                    cpu = node.get("cpu", 0) * 100
+                    if cpu > 90:
+                        await raise_alert(
+                            name=f"Proxmox High CPU: {node.get('node')}",
+                            severity="warning",
+                            description=f"Node '{node.get('node')}' CPU at {cpu:.1f}%",
+                            source="proxmox"
+                        )
+        except Exception as e:
+            logger.error(f"Error parsing Proxmox response: {e}")
+
+    async def check_opnsense_health():
+        """Check OPNsense firewall health."""
+        mcp_url = MCP_SERVERS.get("opnsense")
+        if not mcp_url:
+            return
+
+        # Check services
+        result = await call_mcp_tool(mcp_url, "opnsense_list_services", {"response_format": "json"})
+        if "error" in result:
+            logger.warning(f"OPNsense check failed: {result['error']}")
+            return
+
+        try:
+            import json
+            content = result.get("content", [{}])
+            if isinstance(content, list) and content:
+                text = content[0].get("text", "{}")
+                data = json.loads(text) if isinstance(text, str) else text
+                services = data.get("services", [])
+
+                critical_services = ["unbound", "dhcpd", "configd"]
+                for svc in services:
+                    if svc.get("name") in critical_services and not svc.get("running"):
+                        await raise_alert(
+                            name=f"OPNsense Service Down: {svc.get('name')}",
+                            severity="critical",
+                            description=f"Critical service '{svc.get('name')}' is not running",
+                            source="opnsense",
+                            suggested_fix=f"Restart service via OPNsense UI or SSH"
+                        )
+        except Exception as e:
+            logger.error(f"Error parsing OPNsense response: {e}")
+
+    async def run_health_checks():
+        """Run all health checks."""
+        logger.info("Running health checks...")
+        await asyncio.gather(
+            check_unifi_health(),
+            check_truenas_health(),
+            check_proxmox_health(),
+            check_opnsense_health(),
+            return_exceptions=True
+        )
+        logger.info("Health checks complete")
+
+    async def polling_loop():
+        """Main polling loop."""
+        logger.info(f"Starting polling loop (interval: {POLL_INTERVAL}s)")
+        while True:
+            try:
+                await run_health_checks()
+            except Exception as e:
+                logger.error(f"Polling error: {e}")
+            await asyncio.sleep(POLL_INTERVAL)
+
+    @app.on_event("startup")
+    async def startup():
+        asyncio.create_task(polling_loop())
+        logger.info("Alerting pipeline started")
+
+    @app.get("/health")
+    async def health():
+        return {
+            "status": "healthy",
+            "active_alerts": len(raised_alerts),
+            "mcp_servers": list(MCP_SERVERS.keys())
+        }
+
+    @app.post("/check")
+    async def trigger_check():
+        """Manually trigger a health check."""
+        await run_health_checks()
+        return {"status": "checks_complete"}
+
+    @app.get("/raised")
+    async def list_raised():
+        """List recently raised alerts."""
+        return {
+            "alerts": [
+                {"key": k, "raised_at": v.isoformat()}
+                for k, v in raised_alerts.items()
+            ]
+        }
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    fastapi>=0.115.0
+    uvicorn>=0.34.0
+    httpx>=0.28.0
+    pydantic>=2.11.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alerting-pipeline
+  namespace: ai-platform
+  labels:
+    app: alerting-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alerting-pipeline
+  template:
+    metadata:
+      labels:
+        app: alerting-pipeline
+    spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+      containers:
+        - name: alerting-pipeline
+          image: python:3.11-slim
+          command: ['sh', '-c', 'PYTHONPATH=/app/deps python /code/main.py']
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: TELEGRAM_SERVICE_URL
+              value: "http://telegram-service:8000"
+            - name: UNIFI_MCP_URL
+              value: "http://unifi-mcp:8000"
+            - name: TRUENAS_MCP_URL
+              value: "http://truenas-mcp:8000"
+            - name: PROXMOX_MCP_URL
+              value: "http://proxmox-mcp:8000"
+            - name: OPNSENSE_MCP_URL
+              value: "http://opnsense-mcp:8000"
+            - name: ADGUARD_MCP_URL
+              value: "http://adguard-mcp:8000"
+            - name: POLL_INTERVAL
+              value: "300"  # 5 minutes
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 60
+      volumes:
+        - name: code
+          configMap:
+            name: alerting-pipeline-code
+        - name: deps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alerting-pipeline
+  namespace: ai-platform
+spec:
+  selector:
+    app: alerting-pipeline
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
