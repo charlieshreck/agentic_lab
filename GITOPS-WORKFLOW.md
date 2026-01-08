@@ -298,3 +298,31 @@ MCP servers provide read-only access by default. Write operations (kubectl, talo
 **Remember**: If it's not in git, it doesn't exist. If you didn't commit first, you did it wrong.
 
 **For the AI**: Even your most confident autonomous changes must go through git. Learn from outcomes, but always commit.
+
+---
+
+## Claude Code Session Requirements
+
+When working with Claude Code (or any AI assistant):
+
+1. **ALWAYS commit changes to git BEFORE applying to cluster**
+   - Edit manifest files in the repository
+   - `git add` and `git commit` with descriptive message
+   - `git push` to remote
+
+2. **NEVER use direct kubectl apply without git commit first**
+   - Even for "quick fixes", commit first
+   - Manual kubectl changes will be reverted by ArgoCD
+
+3. **Wait for ArgoCD sync (or manually sync if needed)**
+   - ArgoCD syncs every 3 minutes automatically
+   - Use `argocd app sync <app>` for immediate sync
+
+4. **If ArgoCD is not yet deployed:**
+   - Still commit to git first
+   - Then use `kubectl apply -f <file>` as temporary measure
+   - Note: This is only acceptable during bootstrap phase
+
+**The workflow is: Edit → Commit → Push → Sync → Verify**
+
+Never skip the commit step, even if you're debugging or iterating quickly.
