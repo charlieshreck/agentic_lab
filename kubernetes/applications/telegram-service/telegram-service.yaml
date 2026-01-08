@@ -368,7 +368,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mcp-telegram
-                  key: FORUM_CHAT_ID
+                  key: CHAT_ID
             - name: WEBHOOK_URL
               value: "https://telegram-webhook.kernow.io/webhook/telegram"
             - name: LANGGRAPH_URL
