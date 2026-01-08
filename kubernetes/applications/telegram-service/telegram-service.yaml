@@ -28,6 +28,7 @@ data:
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
     USE_POLLING = os.environ.get("USE_POLLING", "true").lower() == "true"
     LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
+    CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
 
     TELEGRAM_API = "https://api.telegram.org/bot" + BOT_TOKEN
@@ -272,8 +273,55 @@ data:
             status_text += "*Learning Queue:* " + str(status.get("learning_queue", 0)) + "\n"
             await send_message(chat_id, status_text, topic_id=topic_id)
         elif text == "help":
-            help_text = "*Available Commands*\n\n- `status` - Show system status\n- `help` - Show this help\n- Reply to approval messages with button clicks\n"
+            help_text = "*Available Commands*\n\n- `status` - Show system status\n- `help` - Show this help\n- Or just ask any question to query the AI agent\n"
             await send_message(chat_id, help_text, topic_id=topic_id)
+        elif text:
+            # Forward any other message to Claude Agent
+            await process_agent_query(chat_id, topic_id, raw_text, message.get("from", {}).get("username", "unknown"))
+
+    async def process_agent_query(chat_id, topic_id, query, username):
+        """Forward query to Claude Agent and return response."""
+        logger.info("Agent query from @%s: %s", username, query[:100])
+
+        # Send "thinking" indicator
+        thinking_msg = await send_message(chat_id, "_Processing your request..._", topic_id=topic_id)
+        thinking_msg_id = thinking_msg.get("result", {}).get("message_id")
+
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                response = await client.post(
+                    CLAUDE_AGENT_URL + "/agent/run",
+                    json={
+                        "prompt": query,
+                        "context": {"username": username, "source": "telegram"},
+                        "max_turns": 10,
+                        "working_directory": "/workspace"
+                    }
+                )
+                result = response.json()
+
+                if result.get("success"):
+                    answer = result.get("result", "No response generated")
+                    # Truncate if too long for Telegram (4096 char limit)
+                    if len(answer) > 4000:
+                        answer = answer[:4000] + "\n\n_...truncated_"
+                else:
+                    answer = "*Error:* " + result.get("error", "Unknown error")
+
+                # Delete thinking message and send response
+                if thinking_msg_id:
+                    await telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": thinking_msg_id})
+                await send_message(chat_id, answer, topic_id=topic_id)
+
+        except httpx.TimeoutException:
+            if thinking_msg_id:
+                await telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": thinking_msg_id})
+            await send_message(chat_id, "*Timeout:* Agent took too long to respond (5 min limit)", topic_id=topic_id)
+        except Exception as e:
+            logger.error("Agent query failed: %s", e)
+            if thinking_msg_id:
+                await telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": thinking_msg_id})
+            await send_message(chat_id, "*Error:* " + str(e), topic_id=topic_id)
 
     @app.post("/approval")
     async def send_approval_request(request: ApprovalRequest):

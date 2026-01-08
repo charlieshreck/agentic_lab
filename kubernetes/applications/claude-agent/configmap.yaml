@@ -52,6 +52,7 @@ data:
         allowed_tools: Optional[List[str]] = None
         max_turns: int = 10
         working_directory: str = "/workspace"
+        model: str = "opus"  # Default to Opus for complex tasks
 
     class AgentResponse(BaseModel):
         success: bool
@@ -138,6 +139,7 @@ data:
                 "claude",
                 "--print",  # Print output to stdout
                 "--dangerously-skip-permissions",  # Non-interactive mode
+                "--model", request.model,  # Use specified model (opus, sonnet, haiku)
             ]
 
             # Add allowed tools if specified
