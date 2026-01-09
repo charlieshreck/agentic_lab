@@ -1653,17 +1653,16 @@ data:
             "room": room,
             "alert": alert,
             "solutions": solutions,
-            "message": f"""**Alert: {alert.get('alertname', 'Unknown')}**
-Severity: {severity}
-Namespace: {alert.get('namespace', 'default')}
-
-{alert.get('description', 'No description')}
-
-**Recommended Solutions:**
-{solutions_text}
-
-React ✅ to approve solution 1, or reply with solution number.
-React ❌ to reject/ignore.""",
+            "message": (
+                f"**Alert: {alert.get('alertname', 'Unknown')}**\n"
+                f"Severity: {severity}\n"
+                f"Namespace: {alert.get('namespace', 'default')}\n\n"
+                f"{alert.get('description', 'No description')}\n\n"
+                f"**Recommended Solutions:**\n"
+                f"{solutions_text}\n\n"
+                f"React ✅ to approve solution 1, or reply with solution number.\n"
+                f"React ❌ to reject/ignore."
+            ),
             "context": {
                 "similar_runbook": assessment.get("similar_runbook"),
                 "similarity": assessment.get("similarity_score", 0),
