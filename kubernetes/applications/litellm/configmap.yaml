@@ -17,7 +17,7 @@ data:
       # Primary workhorse - Gemini Pro (1M token context)
       - model_name: gemini/gemini-2.0-pro
         litellm_params:
-          model: gemini/gemini-3-pro
+          model: gemini/gemini-2.5-pro
           api_key: os.environ/GEMINI_API_KEY
 
       # Gemini Flash for faster, simpler tasks
@@ -35,7 +35,7 @@ data:
       # Alias for backward compatibility
       - model_name: gemini-pro
         litellm_params:
-          model: gemini/gemini-3-pro
+          model: gemini/gemini-2.5-pro
           api_key: os.environ/GEMINI_API_KEY
 
     # Router settings
