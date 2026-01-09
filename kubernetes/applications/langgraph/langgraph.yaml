@@ -1919,13 +1919,20 @@ data:
                     errors.append(f"UniFi connection failed: {str(e)}")
 
             # Infrastructure context for cluster queries
-            if any(kw in prompt_lower for kw in ["pod", "kubernetes", "k8s", "deployment", "cluster", "container"]):
+            if any(kw in prompt_lower for kw in ["pod", "kubernetes", "k8s", "deployment", "cluster", "container", "issue", "problem"]):
                 try:
-                    resp = await client.get(INFRASTRUCTURE_MCP_URL + "/cluster/status")
+                    resp = await client.get(INFRASTRUCTURE_MCP_URL + "/api/cluster")
                     if resp.status_code == 200:
-                        context["cluster_state"] = resp.json()
+                        data = resp.json()
+                        if data.get("status") == "ok":
+                            context["cluster_state"] = data.get("data", {})
+                        else:
+                            errors.append(f"Infrastructure API error: {data.get('error', 'unknown')}")
+                    else:
+                        errors.append(f"Infrastructure MCP returned {resp.status_code} - cluster data not available")
                 except Exception as e:
                     logger.warning(f"Failed to get cluster context: {e}")
+                    errors.append(f"Failed to connect to infrastructure monitoring: {str(e)}")
 
             # Service discovery context (NetBox MCP may need REST API update too)
             if any(kw in prompt_lower for kw in ["service", "server", "ip", "host"]):
@@ -1966,22 +1973,37 @@ data:
             # Build context-enriched prompt for Gemini
             context_str = ""
             errors_str = ""
+            has_real_data = False
+
             if full_context:
                 # Extract errors if any
                 fetch_errors = full_context.pop("_data_fetch_errors", [])
                 if fetch_errors:
-                    errors_str = f"\n\nDATA FETCH ERRORS (be honest about these):\n" + "\n".join(f"- {e}" for e in fetch_errors) + "\n"
+                    errors_str = "\n\n## DATA FETCH ERRORS - TELL USER ABOUT THESE:\n" + "\n".join(f"- {e}" for e in fetch_errors) + "\n"
                 if full_context:
-                    context_str = f"\n\nRELEVANT CONTEXT FROM HOMELAB:\n{json.dumps(full_context, indent=2, default=str)}\n\n"
+                    has_real_data = True
+                    context_str = f"\n\n## ACTUAL DATA FROM HOMELAB:\n{json.dumps(full_context, indent=2, default=str)}\n\n"
 
-            enriched_prompt = (
-                f"You are an AI assistant for a homelab. Answer based ONLY on the real data provided.\n"
-                f"IMPORTANT: If data fetch failed or no data is available, say so honestly. DO NOT make up or guess device names, versions, or statuses.\n"
-                f"{errors_str}"
-                f"{context_str}"
-                f"USER QUERY: {request.prompt}\n\n"
-                f"Provide a helpful response. If you don't have the data needed, explain what went wrong and suggest how to fix it."
-            )
+            # Be VERY explicit about hallucination prevention
+            if has_real_data:
+                enriched_prompt = (
+                    f"You are an AI assistant for a homelab. Answer based ONLY on the data provided below.\n"
+                    f"{errors_str}"
+                    f"{context_str}"
+                    f"USER QUERY: {request.prompt}\n\n"
+                    f"Use ONLY the actual data above. Do not invent any device names, versions, or statuses."
+                )
+            else:
+                # NO DATA AVAILABLE - be very explicit
+                enriched_prompt = (
+                    f"You are an AI assistant for a homelab.\n\n"
+                    f"CRITICAL: I could not retrieve any data from the homelab systems.\n"
+                    f"{errors_str}\n"
+                    f"USER QUERY: {request.prompt}\n\n"
+                    f"INSTRUCTION: You MUST tell the user that the data could not be retrieved. "
+                    f"DO NOT make up, guess, or hallucinate any device names, IP addresses, versions, statuses, or issues. "
+                    f"Instead, explain what systems failed to respond and suggest troubleshooting steps."
+                )
 
             result = await call_litellm([{"role": "user", "content": enriched_prompt}])
 
