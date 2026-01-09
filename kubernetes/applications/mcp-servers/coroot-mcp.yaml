@@ -16,6 +16,11 @@ data:
     import httpx
     from fastmcp import FastMCP
     from pydantic import BaseModel
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    from starlette.responses import JSONResponse
+    from starlette.requests import Request
+    import uvicorn
 
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
@@ -25,7 +30,7 @@ data:
 
     mcp = FastMCP(
         name="coroot-mcp",
-        instructions="MCP server for Coroot observability. Query metrics, anomalies, and service dependencies."
+        instructions="MCP server for Coroot observability. Query metrics, anomalies, service dependencies, and alerts."
     )
 
     class ServiceMetrics(BaseModel):
@@ -44,7 +49,11 @@ data:
         message: str
         timestamp: str
 
-    async def coroot_request(method: str, endpoint: str, **kwargs) -> dict:
+    # ============================================================================
+    # INTERNAL HELPERS (shared by MCP tools and REST API)
+    # ============================================================================
+
+    async def _coroot_request(method: str, endpoint: str, **kwargs) -> dict:
         async with httpx.AsyncClient(timeout=30.0) as client:
             url = f"{COROOT_URL}/api/project/{COROOT_PROJECT}/{endpoint}"
             try:
@@ -55,13 +64,60 @@ data:
                 logger.error(f"Coroot request failed: {e}")
                 return {"error": str(e)}
 
+    async def _get_overview_internal() -> dict:
+        """Get infrastructure overview."""
+        data = await _coroot_request("GET", "overview")
+        if "error" in data:
+            return {"error": data["error"]}
+        overview = {"total_services": 0, "healthy": 0, "warning": 0, "critical": 0, "services": {}}
+        for name, svc in data.get("services", {}).items():
+            health = svc.get("health", "unknown")
+            overview["total_services"] += 1
+            if health == "healthy": overview["healthy"] += 1
+            elif health == "warning": overview["warning"] += 1
+            elif health == "critical": overview["critical"] += 1
+            overview["services"][name] = {"health": health, "anomalies": svc.get("anomaly_count", 0)}
+        return overview
+
+    async def _get_anomalies_internal(hours: int = 24, severity: Optional[str] = None) -> List[dict]:
+        """Get recent anomalies."""
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(hours=hours)
+        params = {"from": int(start_time.timestamp()), "to": int(end_time.timestamp())}
+        data = await _coroot_request("GET", "incidents", params=params)
+        if "error" in data:
+            return []
+        anomalies = []
+        for inc in data.get("incidents", []):
+            if severity and inc.get("severity") != severity:
+                continue
+            anomalies.append({
+                "service": inc.get("service", "unknown"),
+                "type": inc.get("type", "unknown"),
+                "severity": inc.get("severity", "info"),
+                "message": inc.get("message", ""),
+                "timestamp": inc.get("timestamp", "")
+            })
+        return anomalies
+
+    async def _get_alerts_internal(status: str = "firing") -> List[dict]:
+        """Get current alerts."""
+        data = await _coroot_request("GET", "alerts")
+        if "error" in data:
+            return []
+        return [a for a in data.get("alerts", []) if status == "all" or a.get("status") == status]
+
+    # ============================================================================
+    # MCP TOOLS
+    # ============================================================================
+
     @mcp.tool()
     async def get_service_metrics(service: str, namespace: str = "ai-platform", timerange_hours: int = 1) -> ServiceMetrics:
         """Get metrics for a specific service (CPU, memory, latency, error rate)."""
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=timerange_hours)
         params = {"from": int(start_time.timestamp()), "to": int(end_time.timestamp()), "service": f"{namespace}/{service}"}
-        data = await coroot_request("GET", "overview", params=params)
+        data = await _coroot_request("GET", "overview", params=params)
         if "error" in data:
             return ServiceMetrics(service=service, namespace=namespace)
         try:
@@ -79,65 +135,81 @@ data:
     @mcp.tool()
     async def get_recent_anomalies(hours: int = 24, severity: Optional[str] = None) -> List[Anomaly]:
         """Get recent anomalies detected by Coroot (critical, warning, info)."""
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(hours=hours)
-        params = {"from": int(start_time.timestamp()), "to": int(end_time.timestamp())}
-        data = await coroot_request("GET", "incidents", params=params)
-        if "error" in data:
-            return []
-        anomalies = []
-        for inc in data.get("incidents", []):
-            if severity and inc.get("severity") != severity:
-                continue
-            anomalies.append(Anomaly(
-                service=inc.get("service", "unknown"), type=inc.get("type", "unknown"),
-                severity=inc.get("severity", "info"), message=inc.get("message", ""),
-                timestamp=inc.get("timestamp", "")
-            ))
-        return anomalies
+        anomalies = await _get_anomalies_internal(hours, severity)
+        return [Anomaly(**a) for a in anomalies]
 
     @mcp.tool()
     async def get_service_dependencies(service: str, namespace: str = "ai-platform") -> List[dict]:
         """Get upstream and downstream service dependencies."""
-        data = await coroot_request("GET", "service/dependencies", params={"service": f"{namespace}/{service}"})
+        data = await _coroot_request("GET", "service/dependencies", params={"service": f"{namespace}/{service}"})
         return data.get("dependencies", []) if "error" not in data else []
 
     @mcp.tool()
     async def get_alerts(status: str = "firing") -> List[dict]:
         """Get current alerts from Coroot (firing, resolved, all)."""
-        data = await coroot_request("GET", "alerts")
-        if "error" in data:
-            return []
-        return [a for a in data.get("alerts", []) if status == "all" or a.get("status") == status]
+        return await _get_alerts_internal(status)
 
     @mcp.tool()
     async def get_infrastructure_overview() -> dict:
         """Get overview of all services and their health status."""
-        data = await coroot_request("GET", "overview")
-        if "error" in data:
-            return {"error": data["error"]}
-        overview = {"total_services": 0, "healthy": 0, "warning": 0, "critical": 0, "services": {}}
-        for name, svc in data.get("services", {}).items():
-            health = svc.get("health", "unknown")
-            overview["total_services"] += 1
-            if health == "healthy": overview["healthy"] += 1
-            elif health == "warning": overview["warning"] += 1
-            elif health == "critical": overview["critical"] += 1
-            overview["services"][name] = {"health": health, "anomalies": svc.get("anomaly_count", 0)}
-        return overview
+        return await _get_overview_internal()
 
-    from fastapi import FastAPI
-    http_app = FastAPI()
+    # ============================================================================
+    # REST API (for langgraph context building)
+    # ============================================================================
 
-    @http_app.get("/health")
-    async def health():
-        return {"status": "healthy"}
+    async def rest_health(request: Request):
+        """Health check endpoint."""
+        return JSONResponse({"status": "healthy"})
+
+    async def rest_api_overview(request: Request):
+        """Get infrastructure overview for langgraph context."""
+        try:
+            overview = await _get_overview_internal()
+            return JSONResponse({"status": "ok", "data": overview})
+        except Exception as e:
+            logger.error(f"REST api_overview error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_anomalies(request: Request):
+        """Get anomalies for langgraph context."""
+        try:
+            hours = int(request.query_params.get("hours", "24"))
+            severity = request.query_params.get("severity")
+            anomalies = await _get_anomalies_internal(hours, severity)
+            return JSONResponse({"status": "ok", "data": anomalies, "count": len(anomalies)})
+        except Exception as e:
+            logger.error(f"REST api_anomalies error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_alerts(request: Request):
+        """Get alerts for langgraph context."""
+        try:
+            status = request.query_params.get("status", "firing")
+            alerts = await _get_alerts_internal(status)
+            return JSONResponse({"status": "ok", "data": alerts, "count": len(alerts)})
+        except Exception as e:
+            logger.error(f"REST api_alerts error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    # ============================================================================
+    # MAIN
+    # ============================================================================
 
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting Coroot MCP on port {port}")
-        import uvicorn
-        uvicorn.run(http_app, host="0.0.0.0", port=port)
+
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/overview", rest_api_overview, methods=["GET"]),
+            Route("/api/anomalies", rest_api_anomalies, methods=["GET"]),
+            Route("/api/alerts", rest_api_alerts, methods=["GET"]),
+        ]
+
+        mcp_app = mcp.http_app()
+        app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+        uvicorn.run(app, host="0.0.0.0", port=port)
 
     if __name__ == "__main__":
         main()
@@ -146,8 +218,8 @@ data:
     fastmcp>=2.7.0
     pydantic>=2.11.0
     uvicorn>=0.34.0
-    fastapi>=0.115.0
-    httpx>=0.27.0
+    starlette>=0.40.0
+    httpx>=0.28.0
 ---
 apiVersion: apps/v1
 kind: Deployment

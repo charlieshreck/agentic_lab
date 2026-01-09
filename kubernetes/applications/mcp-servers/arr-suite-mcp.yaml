@@ -15,6 +15,11 @@ data:
     from typing import List, Optional
     from fastmcp import FastMCP
     from pydantic import BaseModel
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    from starlette.responses import JSONResponse
+    from starlette.requests import Request
+    import uvicorn
 
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
@@ -24,7 +29,10 @@ data:
     RADARR_URL = os.environ.get("RADARR_URL", "http://radarr:7878")
     RADARR_API_KEY = os.environ.get("RADARR_API_KEY", "")
 
-    mcp = FastMCP(name="arr-suite-mcp", instructions="MCP server for media management.")
+    mcp = FastMCP(
+        name="arr-suite-mcp",
+        instructions="MCP server for media management. Query Sonarr for TV shows, Radarr for movies, and manage download queues."
+    )
 
     class MediaItem(BaseModel):
         id: int
@@ -32,37 +40,95 @@ data:
         status: str
         monitored: bool
 
-    async def arr_request(base_url: str, api_key: str, endpoint: str, method: str = "GET", data: dict = None) -> dict:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+    # ============================================================================
+    # INTERNAL HELPERS (shared by MCP tools and REST API)
+    # ============================================================================
+
+    async def _arr_request(base_url: str, api_key: str, endpoint: str, method: str = "GET", data: dict = None) -> dict:
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             response = await client.request(method, f"{base_url}/api/v3/{endpoint}", headers={"X-Api-Key": api_key}, json=data)
             response.raise_for_status()
             return response.json() if response.content else {}
 
+    async def _get_shows_internal(monitored_only: bool = True) -> List[dict]:
+        """Get TV shows from Sonarr."""
+        try:
+            shows = await _arr_request(SONARR_URL, SONARR_API_KEY, "series")
+            return [{"id": s["id"], "title": s["title"], "status": s["status"], "monitored": s["monitored"]} for s in shows if not monitored_only or s["monitored"]]
+        except Exception as e:
+            logger.error(f"Failed to get shows: {e}")
+            return []
+
+    async def _get_movies_internal(monitored_only: bool = True) -> List[dict]:
+        """Get movies from Radarr."""
+        try:
+            movies = await _arr_request(RADARR_URL, RADARR_API_KEY, "movie")
+            return [{"id": m["id"], "title": m["title"], "status": "downloaded" if m.get("hasFile") else "missing", "monitored": m["monitored"]} for m in movies if not monitored_only or m["monitored"]]
+        except Exception as e:
+            logger.error(f"Failed to get movies: {e}")
+            return []
+
+    async def _get_queue_internal() -> List[dict]:
+        """Get download queue from both services."""
+        combined = []
+        try:
+            sonarr_queue = await _arr_request(SONARR_URL, SONARR_API_KEY, "queue")
+            for item in sonarr_queue.get("records", []):
+                combined.append({
+                    "type": "tv",
+                    "title": item.get("title"),
+                    "status": item.get("status"),
+                    "sizeleft": item.get("sizeleft", 0),
+                    "timeleft": item.get("timeleft", "unknown")
+                })
+        except Exception as e:
+            logger.warning(f"Failed to get Sonarr queue: {e}")
+        try:
+            radarr_queue = await _arr_request(RADARR_URL, RADARR_API_KEY, "queue")
+            for item in radarr_queue.get("records", []):
+                combined.append({
+                    "type": "movie",
+                    "title": item.get("title"),
+                    "status": item.get("status"),
+                    "sizeleft": item.get("sizeleft", 0),
+                    "timeleft": item.get("timeleft", "unknown")
+                })
+        except Exception as e:
+            logger.warning(f"Failed to get Radarr queue: {e}")
+        return combined
+
+    async def _get_status_internal() -> dict:
+        """Get system status from arr services."""
+        status = {}
+        for name, url, key in [("sonarr", SONARR_URL, SONARR_API_KEY), ("radarr", RADARR_URL, RADARR_API_KEY)]:
+            try:
+                info = await _arr_request(url, key, "system/status")
+                status[name] = {"version": info.get("version"), "status": "online"}
+            except Exception as e:
+                status[name] = {"status": "offline", "error": str(e)}
+        return status
+
+    # ============================================================================
+    # MCP TOOLS
+    # ============================================================================
+
     @mcp.tool()
     async def list_tv_shows(monitored_only: bool = True) -> List[MediaItem]:
         """List all TV shows in Sonarr."""
-        try:
-            shows = await arr_request(SONARR_URL, SONARR_API_KEY, "series")
-            return [MediaItem(id=s["id"], title=s["title"], status=s["status"], monitored=s["monitored"]) for s in shows if not monitored_only or s["monitored"]]
-        except Exception as e:
-            logger.error(f"Failed: {e}")
-            return []
+        shows = await _get_shows_internal(monitored_only)
+        return [MediaItem(**s) for s in shows]
 
     @mcp.tool()
     async def list_movies(monitored_only: bool = True) -> List[MediaItem]:
         """List all movies in Radarr."""
-        try:
-            movies = await arr_request(RADARR_URL, RADARR_API_KEY, "movie")
-            return [MediaItem(id=m["id"], title=m["title"], status="downloaded" if m.get("hasFile") else "missing", monitored=m["monitored"]) for m in movies if not monitored_only or m["monitored"]]
-        except Exception as e:
-            logger.error(f"Failed: {e}")
-            return []
+        movies = await _get_movies_internal(monitored_only)
+        return [MediaItem(**m) for m in movies]
 
     @mcp.tool()
     async def search_tv_show(query: str) -> List[dict]:
         """Search for a TV show to add to Sonarr."""
         try:
-            results = await arr_request(SONARR_URL, SONARR_API_KEY, f"series/lookup?term={query}")
+            results = await _arr_request(SONARR_URL, SONARR_API_KEY, f"series/lookup?term={query}")
             return [{"tvdbId": r.get("tvdbId"), "title": r["title"], "year": r.get("year")} for r in results[:5]]
         except Exception as e:
             return [{"error": str(e)}]
@@ -71,7 +137,7 @@ data:
     async def search_movie(query: str) -> List[dict]:
         """Search for a movie to add to Radarr."""
         try:
-            results = await arr_request(RADARR_URL, RADARR_API_KEY, f"movie/lookup?term={query}")
+            results = await _arr_request(RADARR_URL, RADARR_API_KEY, f"movie/lookup?term={query}")
             return [{"tmdbId": r.get("tmdbId"), "title": r["title"], "year": r.get("year")} for r in results[:5]]
         except Exception as e:
             return [{"error": str(e)}]
@@ -79,37 +145,80 @@ data:
     @mcp.tool()
     async def get_download_queue() -> List[dict]:
         """Get current download queue from Sonarr and Radarr."""
-        combined = []
-        try:
-            sonarr_queue = await arr_request(SONARR_URL, SONARR_API_KEY, "queue")
-            for item in sonarr_queue.get("records", []):
-                combined.append({"type": "tv", "title": item.get("title"), "status": item.get("status")})
-        except:
-            pass
-        try:
-            radarr_queue = await arr_request(RADARR_URL, RADARR_API_KEY, "queue")
-            for item in radarr_queue.get("records", []):
-                combined.append({"type": "movie", "title": item.get("title"), "status": item.get("status")})
-        except:
-            pass
-        return combined
+        return await _get_queue_internal()
 
     @mcp.tool()
     async def get_system_status() -> dict:
         """Get system status from arr services."""
-        status = {}
-        for name, url, key in [("sonarr", SONARR_URL, SONARR_API_KEY), ("radarr", RADARR_URL, RADARR_API_KEY)]:
-            try:
-                info = await arr_request(url, key, "system/status")
-                status[name] = {"version": info.get("version"), "status": "online"}
-            except Exception as e:
-                status[name] = {"status": "offline", "error": str(e)}
-        return status
+        return await _get_status_internal()
+
+    # ============================================================================
+    # REST API (for langgraph context building)
+    # ============================================================================
+
+    async def rest_health(request: Request):
+        """Health check endpoint."""
+        status = await _get_status_internal()
+        healthy = all(s.get("status") == "online" for s in status.values())
+        return JSONResponse({"status": "healthy" if healthy else "degraded", "services": status})
+
+    async def rest_api_shows(request: Request):
+        """Get TV shows for langgraph context."""
+        try:
+            monitored_only = request.query_params.get("monitored", "true").lower() == "true"
+            shows = await _get_shows_internal(monitored_only)
+            return JSONResponse({"status": "ok", "data": shows, "count": len(shows)})
+        except Exception as e:
+            logger.error(f"REST api_shows error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_movies(request: Request):
+        """Get movies for langgraph context."""
+        try:
+            monitored_only = request.query_params.get("monitored", "true").lower() == "true"
+            movies = await _get_movies_internal(monitored_only)
+            return JSONResponse({"status": "ok", "data": movies, "count": len(movies)})
+        except Exception as e:
+            logger.error(f"REST api_movies error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_queue(request: Request):
+        """Get download queue for langgraph context."""
+        try:
+            queue = await _get_queue_internal()
+            return JSONResponse({"status": "ok", "data": queue, "count": len(queue)})
+        except Exception as e:
+            logger.error(f"REST api_queue error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_status(request: Request):
+        """Get system status for langgraph context."""
+        try:
+            status = await _get_status_internal()
+            return JSONResponse({"status": "ok", "data": status})
+        except Exception as e:
+            logger.error(f"REST api_status error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    # ============================================================================
+    # MAIN
+    # ============================================================================
 
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting arr-suite MCP on port {port}")
-        mcp.run(transport="sse", host="0.0.0.0", port=port)
+
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/shows", rest_api_shows, methods=["GET"]),
+            Route("/api/movies", rest_api_movies, methods=["GET"]),
+            Route("/api/queue", rest_api_queue, methods=["GET"]),
+            Route("/api/status", rest_api_status, methods=["GET"]),
+        ]
+
+        mcp_app = mcp.http_app()
+        app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+        uvicorn.run(app, host="0.0.0.0", port=port)
 
     if __name__ == "__main__":
         main()
@@ -119,6 +228,7 @@ data:
     pydantic>=2.11.0
     httpx>=0.28.0
     uvicorn>=0.34.0
+    starlette>=0.40.0
 ---
 apiVersion: apps/v1
 kind: Deployment

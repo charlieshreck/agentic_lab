@@ -57,16 +57,22 @@ data:
     import subprocess
     import json
     import logging
+    import shlex
     from typing import List, Optional
     from fastmcp import FastMCP
     from pydantic import BaseModel
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    from starlette.responses import JSONResponse
+    from starlette.requests import Request
+    import uvicorn
 
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
     mcp = FastMCP(
         name="infrastructure-mcp",
-        instructions="MCP server for Kubernetes cluster operations."
+        instructions="MCP server for Kubernetes cluster operations. Provides tools to get pods, logs, events, and restart deployments."
     )
 
     class PodInfo(BaseModel):
@@ -76,6 +82,10 @@ data:
         ready: bool
         restarts: int
 
+    # ============================================================================
+    # INTERNAL HELPERS (shared by MCP tools and REST API)
+    # ============================================================================
+
     def run_kubectl(args: List[str], timeout: int = 30) -> tuple[str, str, int]:
         try:
             result = subprocess.run(["kubectl"] + args, capture_output=True, text=True, timeout=timeout)
@@ -83,9 +93,8 @@ data:
         except Exception as e:
             return "", str(e), 1
 
-    @mcp.tool()
-    async def kubectl_get_pods(namespace: str = "default", label_selector: Optional[str] = None) -> List[PodInfo]:
-        """Get pods in a Kubernetes namespace."""
+    async def _get_pods_internal(namespace: str = "default", label_selector: Optional[str] = None) -> List[dict]:
+        """Internal function to get pods - used by both MCP and REST."""
         args = ["get", "pods", "-n", namespace, "-o", "json"]
         if label_selector:
             args.extend(["-l", label_selector])
@@ -94,15 +103,71 @@ data:
             return []
         try:
             data = json.loads(stdout)
-            return [PodInfo(
-                name=pod["metadata"]["name"],
-                namespace=pod["metadata"]["namespace"],
-                status=pod["status"]["phase"],
-                ready=all(c.get("ready", False) for c in pod["status"].get("containerStatuses", [])),
-                restarts=sum(c.get("restartCount", 0) for c in pod["status"].get("containerStatuses", []))
-            ) for pod in data.get("items", [])]
+            return [{
+                "name": pod["metadata"]["name"],
+                "namespace": pod["metadata"]["namespace"],
+                "status": pod["status"]["phase"],
+                "ready": all(c.get("ready", False) for c in pod["status"].get("containerStatuses", [])),
+                "restarts": sum(c.get("restartCount", 0) for c in pod["status"].get("containerStatuses", []))
+            } for pod in data.get("items", [])]
         except:
             return []
+
+    async def _get_events_internal(namespace: str = "default", limit: int = 20) -> List[dict]:
+        """Internal function to get events - used by both MCP and REST."""
+        stdout, stderr, rc = run_kubectl(["get", "events", "-n", namespace, "-o", "json", "--sort-by=.lastTimestamp"])
+        if rc != 0:
+            return []
+        try:
+            data = json.loads(stdout)
+            return [{"type": e.get("type"), "reason": e.get("reason"), "message": e.get("message", "")[:100], "object": e.get("involvedObject", {}).get("name")} for e in data.get("items", [])[-limit:]]
+        except:
+            return []
+
+    async def _get_deployments_internal(namespace: str = "default") -> List[dict]:
+        """Get deployments in a namespace."""
+        stdout, stderr, rc = run_kubectl(["get", "deployments", "-n", namespace, "-o", "json"])
+        if rc != 0:
+            return []
+        try:
+            data = json.loads(stdout)
+            return [{
+                "name": d["metadata"]["name"],
+                "replicas": d["spec"].get("replicas", 0),
+                "ready": d["status"].get("readyReplicas", 0),
+                "available": d["status"].get("availableReplicas", 0)
+            } for d in data.get("items", [])]
+        except:
+            return []
+
+    async def _get_nodes_internal() -> List[dict]:
+        """Get cluster nodes."""
+        stdout, stderr, rc = run_kubectl(["get", "nodes", "-o", "json"])
+        if rc != 0:
+            return []
+        try:
+            data = json.loads(stdout)
+            nodes = []
+            for n in data.get("items", []):
+                conditions = {c["type"]: c["status"] for c in n["status"].get("conditions", [])}
+                nodes.append({
+                    "name": n["metadata"]["name"],
+                    "ready": conditions.get("Ready") == "True",
+                    "version": n["status"].get("nodeInfo", {}).get("kubeletVersion", "unknown")
+                })
+            return nodes
+        except:
+            return []
+
+    # ============================================================================
+    # MCP TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_pods(namespace: str = "default", label_selector: Optional[str] = None) -> List[PodInfo]:
+        """Get pods in a Kubernetes namespace."""
+        pods = await _get_pods_internal(namespace, label_selector)
+        return [PodInfo(**p) for p in pods]
 
     @mcp.tool()
     async def kubectl_logs(pod_name: str, namespace: str = "default", tail_lines: int = 50) -> str:
@@ -119,54 +184,100 @@ data:
     @mcp.tool()
     async def kubectl_get_events(namespace: str = "default", limit: int = 20) -> List[dict]:
         """Get Kubernetes events in a namespace."""
-        stdout, stderr, rc = run_kubectl(["get", "events", "-n", namespace, "-o", "json", "--sort-by=.lastTimestamp"])
-        if rc != 0:
-            return []
+        return await _get_events_internal(namespace, limit)
+
+    @mcp.tool()
+    async def kubectl_get_deployments(namespace: str = "default") -> List[dict]:
+        """Get deployments in a Kubernetes namespace."""
+        return await _get_deployments_internal(namespace)
+
+    @mcp.tool()
+    async def kubectl_get_nodes() -> List[dict]:
+        """Get all cluster nodes with status."""
+        return await _get_nodes_internal()
+
+    # ============================================================================
+    # REST API (for langgraph context building and runbook executor)
+    # ============================================================================
+
+    async def rest_health(request: Request):
+        """Health check endpoint."""
+        return JSONResponse({"status": "healthy"})
+
+    async def rest_api_cluster(request: Request):
+        """Get cluster status for langgraph context."""
         try:
-            data = json.loads(stdout)
-            return [{"type": e.get("type"), "reason": e.get("reason"), "message": e.get("message", "")[:100], "object": e.get("involvedObject", {}).get("name")} for e in data.get("items", [])[-limit:]]
-        except:
-            return []
+            namespace = request.query_params.get("namespace", "ai-platform")
+            pods = await _get_pods_internal(namespace)
+            events = await _get_events_internal(namespace, limit=10)
+            deployments = await _get_deployments_internal(namespace)
+            nodes = await _get_nodes_internal()
 
-    # HTTP API for runbook executor
-    from fastapi import FastAPI, HTTPException
-    from pydantic import BaseModel as PydanticBaseModel
-    import shlex
+            unhealthy_pods = [p for p in pods if not p["ready"] or p["status"] != "Running"]
+            warning_events = [e for e in events if e["type"] == "Warning"]
 
-    class ExecuteRequest(PydanticBaseModel):
-        command: str
-        timeout: int = 30
+            return JSONResponse({
+                "status": "ok",
+                "data": {
+                    "namespace": namespace,
+                    "pods": pods,
+                    "deployments": deployments,
+                    "nodes": nodes,
+                    "events": events,
+                    "summary": {
+                        "total_pods": len(pods),
+                        "healthy_pods": len(pods) - len(unhealthy_pods),
+                        "unhealthy_pods": len(unhealthy_pods),
+                        "warning_events": len(warning_events),
+                        "nodes_ready": sum(1 for n in nodes if n["ready"])
+                    },
+                    "healthy": len(unhealthy_pods) == 0 and all(n["ready"] for n in nodes)
+                }
+            })
+        except Exception as e:
+            logger.error(f"REST api_cluster error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-    class ExecuteResponse(PydanticBaseModel):
-        success: bool
-        output: str
-        error: Optional[str] = None
-
-    http_app = FastAPI()
-
-    @http_app.get("/health")
-    async def http_health():
-        return {"status": "healthy"}
-
-    @http_app.post("/execute", response_model=ExecuteResponse)
-    async def execute_command(request: ExecuteRequest):
+    async def rest_execute(request: Request):
         """Execute a kubectl command for runbook automation."""
-        command = request.command.strip()
-        if not command.startswith("kubectl "):
-            raise HTTPException(status_code=400, detail="Only kubectl commands are allowed")
         try:
+            body = await request.json()
+            command = body.get("command", "").strip()
+            timeout = body.get("timeout", 30)
+
+            if not command.startswith("kubectl "):
+                return JSONResponse({"success": False, "error": "Only kubectl commands are allowed"}, status_code=400)
+
             parts = shlex.split(command)
             kubectl_args = parts[1:]
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"Invalid command: {e}")
-        stdout, stderr, rc = run_kubectl(kubectl_args, timeout=request.timeout)
-        return ExecuteResponse(success=(rc == 0), output=stdout, error=stderr if rc != 0 else None)
+            stdout, stderr, rc = run_kubectl(kubectl_args, timeout=timeout)
+
+            return JSONResponse({
+                "success": rc == 0,
+                "output": stdout,
+                "error": stderr if rc != 0 else None
+            })
+        except Exception as e:
+            logger.error(f"REST execute error: {e}")
+            return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+    # ============================================================================
+    # MAIN
+    # ============================================================================
 
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting infrastructure MCP on port {port}")
-        import uvicorn
-        uvicorn.run(http_app, host="0.0.0.0", port=port)
+
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/cluster", rest_api_cluster, methods=["GET"]),
+            Route("/execute", rest_execute, methods=["POST"]),
+        ]
+
+        mcp_app = mcp.http_app()
+        app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+        uvicorn.run(app, host="0.0.0.0", port=port)
 
     if __name__ == "__main__":
         main()
@@ -175,7 +286,7 @@ data:
     fastmcp>=2.7.0
     pydantic>=2.11.0
     uvicorn>=0.34.0
-    fastapi>=0.115.0
+    starlette>=0.40.0
 ---
 apiVersion: apps/v1
 kind: Deployment
