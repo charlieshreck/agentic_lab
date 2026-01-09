@@ -1951,11 +1951,12 @@ data:
             if full_context:
                 context_str = f"\n\nRELEVANT CONTEXT FROM HOMELAB:\n{json.dumps(full_context, indent=2, default=str)}\n\n"
 
-            enriched_prompt = f"""You are an AI assistant for a homelab. Answer based on the real data provided.
-{context_str}
-USER QUERY: {request.prompt}
-
-Provide a helpful response using the actual data from the context above."""
+            enriched_prompt = (
+                f"You are an AI assistant for a homelab. Answer based on the real data provided.\n"
+                f"{context_str}"
+                f"USER QUERY: {request.prompt}\n\n"
+                f"Provide a helpful response using the actual data from the context above."
+            )
 
             result = await call_litellm([{"role": "user", "content": enriched_prompt}])
 
