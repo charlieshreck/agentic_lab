@@ -32,6 +32,10 @@ data:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
+    # Reduce noise from matrix-nio validation warnings
+    logging.getLogger("nio.responses").setLevel(logging.ERROR)
+    logging.getLogger("nio.client.async_client").setLevel(logging.ERROR)
+
     # Configuration from environment
     MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "http://conduit:6167")
     MATRIX_USER_ID = os.environ.get("MATRIX_USER_ID", "@agentic-bot:agentic.local")
@@ -323,16 +327,27 @@ data:
             await self.setup_callbacks()
             logger.info("Bot started, syncing...")
 
-            # Initial sync
-            await self.client.sync(timeout=30000)
+            # Initial sync with shorter timeout for Conduit compatibility
+            try:
+                await self.client.sync(timeout=10000, full_state=True)
+                logger.info("Initial sync complete")
+            except Exception as e:
+                logger.warning(f"Initial sync issue (continuing): {e}")
 
-            # Continuous sync
+            # Continuous sync with shorter intervals
+            sync_errors = 0
             while True:
                 try:
-                    await self.client.sync(timeout=30000)
+                    # Use shorter timeout for better Conduit compatibility
+                    response = await self.client.sync(timeout=5000)
+                    sync_errors = 0  # Reset on success
                 except Exception as e:
-                    logger.error(f"Sync error: {e}")
-                    await asyncio.sleep(5)
+                    sync_errors += 1
+                    if sync_errors <= 3:
+                        logger.warning(f"Sync warning ({sync_errors}/3): {e}")
+                    elif sync_errors % 10 == 0:
+                        logger.error(f"Sync errors: {sync_errors}")
+                    await asyncio.sleep(min(sync_errors, 10))  # Back off up to 10s
 
     async def main():
         bot = AgenticMatrixBot()
