@@ -83,34 +83,53 @@ data:
 
         async def on_message(self, room, event):
             """Handle incoming messages."""
-            # Ignore our own messages
-            if event.sender == self.client.user_id:
-                return
+            try:
+                logger.info(f"=== MESSAGE RECEIVED from {event.sender} ===")
+                logger.info(f"Body: {event.body}")
 
-            # Check if this is in a thread
-            relates_to = event.source.get("content", {}).get("m.relates_to", {})
-            thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+                # Ignore our own messages
+                if event.sender == self.client.user_id:
+                    logger.info("Ignoring own message")
+                    return
 
-            if thread_id:
-                await self.handle_thread_conversation(room, event, thread_id)
-            else:
-                await self.handle_command(room, event)
+                # Check if this is in a thread
+                relates_to = event.source.get("content", {}).get("m.relates_to", {})
+                thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+
+                if thread_id:
+                    await self.handle_thread_conversation(room, event, thread_id)
+                else:
+                    await self.handle_command(room, event)
+            except Exception as e:
+                logger.error(f"Error in on_message: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
 
         async def handle_command(self, room, event):
             """Handle direct commands in room (not in thread)."""
             message = event.body.lower().strip()
+            logger.info(f"Handling command: {message[:50]}")
 
             if message in ["status", "what's happening", "what's happening?"]:
+                logger.info("Status command detected")
                 response = await self.get_platform_status()
             elif message in ["what needs attention", "what needs attention?", "pending"]:
+                logger.info("Pending command detected")
                 response = await self.get_pending_items()
-            elif message.startswith("@agentic"):
+            elif "@agentic" in message or "agentic-bot" in message:
                 # Direct mention - treat as general query
-                query = event.body.replace("@agentic", "").strip()
+                # Handle both @agentic and @agentic-bot:agentic.local
+                logger.info("Mention detected - querying Gemini")
+                import re
+                query = re.sub(r'@agentic[-\w]*:?[\w.]*', '', event.body, flags=re.IGNORECASE).strip()
+                if not query:
+                    query = "hello"
                 response = await self.query_gemini(query, {})
             else:
+                logger.info("No matching command, ignoring")
                 return  # Ignore non-command messages in room
 
+            logger.info(f"Sending response: {response[:100] if response else 'None'}...")
             await self.send_message(room.room_id, response)
 
         async def handle_thread_conversation(self, room, event, thread_id):
@@ -332,29 +351,14 @@ data:
                 return
 
             await self.setup_callbacks()
-            logger.info("Bot started, syncing...")
+            logger.info("Bot started, syncing with sync_forever...")
 
-            # Initial sync with shorter timeout for Conduit compatibility
-            try:
-                await self.client.sync(timeout=10000, full_state=True)
-                logger.info("Initial sync complete")
-            except Exception as e:
-                logger.warning(f"Initial sync issue (continuing): {e}")
-
-            # Continuous sync with shorter intervals
-            sync_errors = 0
-            while True:
-                try:
-                    # Use shorter timeout for better Conduit compatibility
-                    response = await self.client.sync(timeout=5000)
-                    sync_errors = 0  # Reset on success
-                except Exception as e:
-                    sync_errors += 1
-                    if sync_errors <= 3:
-                        logger.warning(f"Sync warning ({sync_errors}/3): {e}")
-                    elif sync_errors % 10 == 0:
-                        logger.error(f"Sync errors: {sync_errors}")
-                    await asyncio.sleep(min(sync_errors, 10))  # Back off up to 10s
+            # Use sync_forever which properly triggers callbacks
+            await self.client.sync_forever(
+                timeout=30000,
+                full_state=True,
+                loop_sleep_time=1000
+            )
 
     async def main():
         bot = AgenticMatrixBot()
