@@ -38,11 +38,6 @@ spec:
           value: "http://matrix-bot:8000"
         - name: LOOKBACK_HOURS
           value: "24"
-        - name: ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: claude-validator-credentials
-              key: ANTHROPIC_API_KEY
         volumeMounts:
         - name: code
           mountPath: /app
