@@ -33,6 +33,9 @@ spec:
         env:
         - name: CONDUIT_CONFIG
           value: /etc/conduit/conduit.toml
+        # Override Kubernetes service discovery env var
+        - name: CONDUIT_PORT
+          value: "6167"
         resources:
           requests:
             memory: "128Mi"
