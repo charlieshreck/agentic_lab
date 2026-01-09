@@ -28,8 +28,9 @@ data:
     max_request_size = 104857600
 
     # Registration settings
-    # Only allow registration via admin API, not open registration
-    allow_registration = false
+    # TEMPORARY: Enable registration for initial user setup
+    # TODO: Set back to false after creating users
+    allow_registration = true
     allow_guest_registration = false
     allow_encryption = true
     allow_federation = false  # Internal only, no federation
