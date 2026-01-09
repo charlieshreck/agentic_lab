@@ -1888,22 +1888,77 @@ data:
         use_claude: bool = False
         context: Optional[dict] = None
 
+    async def build_query_context(prompt: str) -> dict:
+        """Build context from MCPs based on query keywords."""
+        context = {}
+        prompt_lower = prompt.lower()
+
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            # UniFi context for network queries
+            if any(kw in prompt_lower for kw in ["unifi", "network", "device", "update", "firmware", "ap", "switch", "gateway", "wifi"]):
+                try:
+                    resp = await client.post("http://unifi-mcp:8000/call-tool", json={"name": "list_devices", "arguments": {}})
+                    if resp.status_code == 200:
+                        context["unifi_devices"] = resp.json().get("content", [])
+                    resp = await client.post("http://unifi-mcp:8000/call-tool", json={"name": "get_health", "arguments": {}})
+                    if resp.status_code == 200:
+                        context["unifi_health"] = resp.json().get("content", {})
+                except Exception as e:
+                    logger.warning(f"Failed to get UniFi context: {e}")
+
+            # Infrastructure context for cluster queries
+            if any(kw in prompt_lower for kw in ["pod", "kubernetes", "k8s", "deployment", "cluster", "container"]):
+                try:
+                    resp = await client.get(INFRASTRUCTURE_MCP_URL + "/cluster/status")
+                    if resp.status_code == 200:
+                        context["cluster_state"] = resp.json()
+                except Exception as e:
+                    logger.warning(f"Failed to get cluster context: {e}")
+
+            # Service discovery context
+            if any(kw in prompt_lower for kw in ["service", "server", "ip", "host"]):
+                try:
+                    resp = await client.get("http://netbox-mcp:8000/call-tool", json={"name": "discover_endpoints", "arguments": {}})
+                    if resp.status_code == 200:
+                        context["services"] = resp.json().get("content", [])
+                except:
+                    pass
+
+        return context
+
     @app.post("/query")
     async def query_llm(request: QueryRequest):
         """
         Direct query endpoint for LLM access.
-        Routes to Claude Agent or local LLM based on use_claude flag.
-        User requests get highest priority in queue.
+        Builds context from MCPs before querying Gemini.
         """
+        # Build context from MCPs based on query
+        mcp_context = await build_query_context(request.prompt)
+
+        # Merge with any provided context
+        full_context = {**(request.context or {}), **mcp_context}
+
         if request.use_claude:
             result = await call_claude_agent(
                 request.prompt,
-                context=request.context,
+                context=full_context,
                 allowed_tools=["Read", "Glob", "Grep", "WebSearch", "WebFetch"],
-                priority=PRIORITY_USER  # User requests get highest priority
+                priority=PRIORITY_USER
             )
         else:
-            result = await call_litellm([{"role": "user", "content": request.prompt}])
+            # Build context-enriched prompt for Gemini
+            context_str = ""
+            if full_context:
+                context_str = f"\n\nRELEVANT CONTEXT FROM HOMELAB:\n{json.dumps(full_context, indent=2, default=str)}\n\n"
+
+            enriched_prompt = f"""You are an AI assistant for a homelab. Answer based on the real data provided.
+{context_str}
+USER QUERY: {request.prompt}
+
+Provide a helpful response using the actual data from the context above."""
+
+            result = await call_litellm([{"role": "user", "content": enriched_prompt}])
+
         return {"response": result}
 
     @app.post("/claude/run")
