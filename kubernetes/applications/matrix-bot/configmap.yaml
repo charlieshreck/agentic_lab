@@ -164,7 +164,7 @@ data:
             """Query Gemini via LangGraph /query endpoint."""
             try:
                 payload = {
-                    "query": message,
+                    "prompt": message,
                     "context": context or {},
                     "source": "matrix_bot"
                 }
