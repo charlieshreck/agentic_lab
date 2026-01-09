@@ -28,9 +28,8 @@ data:
     max_request_size = 104857600
 
     # Registration settings
-    # TEMPORARY: Enable registration for initial user setup
-    # TODO: Set back to false after creating users
-    allow_registration = true
+    # Users created: chaz, agentic-bot
+    allow_registration = false
     allow_guest_registration = false
     allow_encryption = true
     allow_federation = false  # Internal only, no federation
