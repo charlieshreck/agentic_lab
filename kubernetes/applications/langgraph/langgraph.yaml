@@ -1897,12 +1897,16 @@ data:
             # UniFi context for network queries
             if any(kw in prompt_lower for kw in ["unifi", "network", "device", "update", "firmware", "ap", "switch", "gateway", "wifi"]):
                 try:
-                    resp = await client.post("http://unifi-mcp:8000/call-tool", json={"name": "list_devices", "arguments": {}})
+                    # Use REST API endpoints (not MCP protocol)
+                    resp = await client.get("http://unifi-mcp:8000/api/devices")
                     if resp.status_code == 200:
-                        context["unifi_devices"] = resp.json().get("content", [])
-                    resp = await client.post("http://unifi-mcp:8000/call-tool", json={"name": "get_health", "arguments": {}})
+                        data = resp.json()
+                        context["unifi_devices"] = data.get("data", [])
+                        logger.info(f"Got {len(context.get('unifi_devices', []))} UniFi devices")
+                    resp = await client.get("http://unifi-mcp:8000/api/health")
                     if resp.status_code == 200:
-                        context["unifi_health"] = resp.json().get("content", {})
+                        data = resp.json()
+                        context["unifi_health"] = data.get("data", {})
                 except Exception as e:
                     logger.warning(f"Failed to get UniFi context: {e}")
 
@@ -1915,12 +1919,13 @@ data:
                 except Exception as e:
                     logger.warning(f"Failed to get cluster context: {e}")
 
-            # Service discovery context
+            # Service discovery context (NetBox MCP may need REST API update too)
             if any(kw in prompt_lower for kw in ["service", "server", "ip", "host"]):
                 try:
-                    resp = await client.get("http://netbox-mcp:8000/call-tool", json={"name": "discover_endpoints", "arguments": {}})
+                    resp = await client.get("http://netbox-mcp:8000/api/services")
                     if resp.status_code == 200:
-                        context["services"] = resp.json().get("content", [])
+                        data = resp.json()
+                        context["services"] = data.get("data", [])
                 except:
                     pass
 

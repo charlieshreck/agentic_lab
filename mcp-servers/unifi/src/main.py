@@ -4,6 +4,9 @@ import os
 import logging
 from typing import List, Dict, Any
 from fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route, Mount
 import httpx
 
 logging.basicConfig(level=logging.INFO)
@@ -96,10 +99,78 @@ async def get_alarms() -> List[Dict[str, Any]]:
         return []
 
 
+# REST API endpoints for direct HTTP access (used by LangGraph)
+async def api_devices(request):
+    """REST endpoint for listing devices."""
+    try:
+        data = await list_devices()
+        return JSONResponse({"status": "ok", "data": data})
+    except Exception as e:
+        logger.error(f"REST api_devices error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_clients(request):
+    """REST endpoint for listing clients."""
+    try:
+        data = await list_clients()
+        return JSONResponse({"status": "ok", "data": data})
+    except Exception as e:
+        logger.error(f"REST api_clients error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_health(request):
+    """REST endpoint for network health."""
+    try:
+        data = await get_health()
+        return JSONResponse({"status": "ok", "data": data})
+    except Exception as e:
+        logger.error(f"REST api_health error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_alarms(request):
+    """REST endpoint for alarms."""
+    try:
+        data = await get_alarms()
+        return JSONResponse({"status": "ok", "data": data})
+    except Exception as e:
+        logger.error(f"REST api_alarms error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_index(request):
+    """REST endpoint listing available APIs."""
+    return JSONResponse({
+        "status": "ok",
+        "endpoints": [
+            "/api/devices - List all UniFi devices",
+            "/api/clients - List connected clients",
+            "/api/health - Network health status",
+            "/api/alarms - Active alarms",
+        ]
+    })
+
+
 def main():
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(mcp.get_app(), host="0.0.0.0", port=port)
+
+    # REST routes for direct HTTP access
+    rest_routes = [
+        Route("/api", api_index),
+        Route("/api/devices", api_devices),
+        Route("/api/clients", api_clients),
+        Route("/api/health", api_health),
+        Route("/api/alarms", api_alarms),
+    ]
+
+    # Combine REST routes with MCP app
+    mcp_app = mcp.http_app()
+    app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
