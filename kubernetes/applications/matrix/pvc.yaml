@@ -7,9 +7,9 @@ metadata:
     app: conduit
     component: matrix-server
 spec:
+  storageClassName: local-path
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
       storage: 5Gi
-  # Uses default storage class (local-path on Talos)
