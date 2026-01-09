@@ -1891,6 +1891,7 @@ data:
     async def build_query_context(prompt: str) -> dict:
         """Build context from MCPs based on query keywords."""
         context = {}
+        errors = []
         prompt_lower = prompt.lower()
 
         async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
@@ -1901,14 +1902,21 @@ data:
                     resp = await client.get("http://unifi-mcp:8000/api/devices")
                     if resp.status_code == 200:
                         data = resp.json()
-                        context["unifi_devices"] = data.get("data", [])
-                        logger.info(f"Got {len(context.get('unifi_devices', []))} UniFi devices")
+                        if data.get("status") == "ok":
+                            context["unifi_devices"] = data.get("data", [])
+                            logger.info(f"Got {len(context.get('unifi_devices', []))} UniFi devices")
+                        else:
+                            errors.append(f"UniFi API error: {data.get('error', 'unknown')}")
                     resp = await client.get("http://unifi-mcp:8000/api/health")
                     if resp.status_code == 200:
                         data = resp.json()
-                        context["unifi_health"] = data.get("data", {})
+                        if data.get("status") == "ok":
+                            context["unifi_health"] = data.get("data", {})
+                        else:
+                            errors.append(f"UniFi health error: {data.get('error', 'unknown')}")
                 except Exception as e:
                     logger.warning(f"Failed to get UniFi context: {e}")
+                    errors.append(f"UniFi connection failed: {str(e)}")
 
             # Infrastructure context for cluster queries
             if any(kw in prompt_lower for kw in ["pod", "kubernetes", "k8s", "deployment", "cluster", "container"]):
@@ -1928,6 +1936,10 @@ data:
                         context["services"] = data.get("data", [])
                 except:
                     pass
+
+        # Include errors so Gemini knows when data wasn't available
+        if errors:
+            context["_data_fetch_errors"] = errors
 
         return context
 
@@ -1953,14 +1965,22 @@ data:
         else:
             # Build context-enriched prompt for Gemini
             context_str = ""
+            errors_str = ""
             if full_context:
-                context_str = f"\n\nRELEVANT CONTEXT FROM HOMELAB:\n{json.dumps(full_context, indent=2, default=str)}\n\n"
+                # Extract errors if any
+                fetch_errors = full_context.pop("_data_fetch_errors", [])
+                if fetch_errors:
+                    errors_str = f"\n\nDATA FETCH ERRORS (be honest about these):\n" + "\n".join(f"- {e}" for e in fetch_errors) + "\n"
+                if full_context:
+                    context_str = f"\n\nRELEVANT CONTEXT FROM HOMELAB:\n{json.dumps(full_context, indent=2, default=str)}\n\n"
 
             enriched_prompt = (
-                f"You are an AI assistant for a homelab. Answer based on the real data provided.\n"
+                f"You are an AI assistant for a homelab. Answer based ONLY on the real data provided.\n"
+                f"IMPORTANT: If data fetch failed or no data is available, say so honestly. DO NOT make up or guess device names, versions, or statuses.\n"
+                f"{errors_str}"
                 f"{context_str}"
                 f"USER QUERY: {request.prompt}\n\n"
-                f"Provide a helpful response using the actual data from the context above."
+                f"Provide a helpful response. If you don't have the data needed, explain what went wrong and suggest how to fix it."
             )
 
             result = await call_litellm([{"role": "user", "content": enriched_prompt}])
