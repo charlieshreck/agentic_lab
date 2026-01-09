@@ -113,13 +113,20 @@ CMD ["uv", "run", "python", "src/main.py"]
 ```
 
 ### Base Server Template (src/main.py)
+
+**IMPORTANT**: All MCP servers MUST follow this standardized pattern that combines:
+1. **REST endpoints** - For health checks and context building (langgraph)
+2. **MCP protocol** - Mounted at `/mcp` for tool execution
+
 ```python
 #!/usr/bin/env python3
 """Base MCP server template for homelab applications."""
 import os
 import logging
 from fastmcp import FastMCP
-from starlette.middleware.cors import CORSMiddleware
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
+from starlette.responses import JSONResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -133,35 +140,85 @@ mcp = FastMCP(
     """
 )
 
-# Health check resource
-@mcp.resource("health://status")
-def health_check() -> str:
-    """Health check endpoint."""
-    return "healthy"
+# Define your MCP tools here using @mcp.tool() decorator
+# Example:
+# @mcp.tool()
+# async def my_tool(param: str) -> str:
+#     """Tool description."""
+#     return "result"
+
+# ============================================================================
+# REST API (REQUIRED)
+# ============================================================================
+
+async def rest_health(request):
+    """Health check endpoint - REQUIRED for K8s probes."""
+    return JSONResponse({"status": "healthy"})
+
+# Optional: Add REST endpoints for langgraph context building
+# These provide quick access to data without MCP protocol overhead
+async def rest_api_example(request):
+    """REST endpoint for langgraph context."""
+    try:
+        # Your logic here
+        return JSONResponse({"status": "ok", "data": {}})
+    except Exception as e:
+        logger.error(f"REST api error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+# ============================================================================
+# MAIN - Starlette App Combining REST + MCP
+# ============================================================================
 
 def main():
     port = int(os.environ.get("PORT", 8000))
-    transport = os.environ.get("MCP_TRANSPORT", "sse")
-    
-    logger.info(f"Starting MCP server on port {port} with {transport} transport")
-    
-    if transport == "http":
-        app = mcp.streamable_http_app()
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["*"],
-        )
-        import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=port)
-    else:
-        mcp.run(transport="sse", host="0.0.0.0", port=port)
+    logger.info(f"Starting MCP server on port {port}")
+
+    # Define REST routes (MUST include /health)
+    rest_routes = [
+        Route("/health", rest_health, methods=["GET"]),
+        # Add optional REST endpoints for langgraph context:
+        # Route("/api/example", rest_api_example, methods=["GET"]),
+    ]
+
+    # Mount MCP protocol at /mcp
+    mcp_app = mcp.http_app()
+
+    # Combine REST routes + MCP into single Starlette app
+    app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
 ```
+
+### Why This Pattern?
+
+The standardized pattern solves several problems:
+
+1. **Health checks**: Kubernetes needs `/health` for liveness/readiness probes
+2. **LangGraph context**: The orchestrator can quickly fetch data via REST `/api/*` endpoints without MCP overhead
+3. **MCP tools**: Full MCP protocol available at `/mcp` for tool execution
+4. **Single port**: Everything runs on port 8000, simplifying networking
+
+### Endpoint Summary
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/health` | K8s probes, returns `{"status": "healthy"}` |
+| `/api/*` | REST endpoints for context building (optional) |
+| `/mcp` | MCP protocol (SSE transport) |
+
+### Dependencies
+
+All MCP servers require these packages in their pip install:
+```
+fastmcp httpx uvicorn starlette
+```
+
+For servers using Pydantic models, add `pydantic` as well.
 
 ---
 

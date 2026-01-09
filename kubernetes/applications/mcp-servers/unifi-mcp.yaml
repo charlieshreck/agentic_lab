@@ -9,6 +9,7 @@ data:
     #!/usr/bin/env python3
     """UniFi MCP server for network management."""
     import os
+    import ssl
     import json
     import logging
     from typing import Optional, List, Dict, Any
@@ -26,6 +27,17 @@ data:
     UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.1:443")
     UNIFI_API_KEY = os.environ.get("UNIFI_API_KEY", "")
     UNIFI_SITE = os.environ.get("UNIFI_SITE", "default")
+
+    # Create permissive SSL context for UniFi controller (uses self-signed cert + legacy TLS)
+    def _get_ssl_context():
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        # Allow legacy ciphers for older UniFi controllers
+        ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
+        return ctx
+
+    SSL_CONTEXT = _get_ssl_context()
 
     mcp = FastMCP(
         name="unifi_mcp",
@@ -47,8 +59,8 @@ data:
 
     async def _unifi_api(endpoint: str) -> Any:
         headers = {"X-API-KEY": UNIFI_API_KEY}
-        # Use verify=False for self-signed certs on local UniFi controller
-        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+        # Use custom SSL context for self-signed certs + legacy TLS on UniFi controller
+        async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
             response = await client.get(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers)
             response.raise_for_status()
             return response.json().get("data", [])

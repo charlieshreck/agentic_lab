@@ -129,9 +129,24 @@ data:
         except Exception as e:
             return {"error": str(e)}
 
+    # ============================================================================
+    # REST API
+    # ============================================================================
+
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    from starlette.responses import JSONResponse
+
+    async def rest_health(request):
+        """Health check endpoint."""
+        return JSONResponse({"status": "healthy"})
+
     if __name__ == "__main__":
         import uvicorn
-        uvicorn.run(mcp.http_app(), host="0.0.0.0", port=8000)
+        rest_routes = [Route("/health", rest_health, methods=["GET"])]
+        mcp_app = mcp.http_app()
+        app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+        uvicorn.run(app, host="0.0.0.0", port=8000)
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -153,7 +168,7 @@ spec:
           image: python:3.11-slim
           command: ["sh", "-c"]
           args:
-            - pip install --no-cache-dir fastmcp httpx uvicorn && python /app/main.py
+            - pip install --no-cache-dir fastmcp httpx uvicorn starlette && python /app/main.py
           ports:
             - containerPort: 8000
           env:
