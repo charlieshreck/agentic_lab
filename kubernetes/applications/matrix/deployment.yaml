@@ -51,7 +51,7 @@ spec:
           mountPath: /var/lib/matrix-conduit
         livenessProbe:
           httpGet:
-            path: /_matrix/federation/v1/version
+            path: /_matrix/client/versions
             port: 6167
           initialDelaySeconds: 30
           periodSeconds: 30
@@ -59,7 +59,7 @@ spec:
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /_matrix/federation/v1/version
+            path: /_matrix/client/versions
             port: 6167
           initialDelaySeconds: 10
           periodSeconds: 10
