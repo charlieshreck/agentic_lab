@@ -9,35 +9,41 @@ data:
   config.yaml: |
     # LiteLLM Proxy Configuration
     # See: https://docs.litellm.ai/docs/proxy/configs
+    #
+    # Gemini-Only Configuration
+    # Ollama removed - can revisit when runbook library matures
 
     model_list:
-      # Local Ollama models
-      - model_name: local/qwen2.5:7b
+      # Primary workhorse - Gemini Pro (1M token context)
+      - model_name: gemini/gemini-2.0-pro
         litellm_params:
-          model: ollama/qwen2.5:7b
-          api_base: http://ollama:11434
+          model: gemini/gemini-2.0-pro-exp-02-05
+          api_key: os.environ/GEMINI_API_KEY
 
-      - model_name: local/qwen2.5:14b
+      # Gemini Flash for faster, simpler tasks
+      - model_name: gemini/gemini-2.0-flash
         litellm_params:
-          model: ollama/qwen2.5:14b
-          api_base: http://ollama:11434
+          model: gemini/gemini-2.0-flash
+          api_key: os.environ/GEMINI_API_KEY
 
-      - model_name: local/nomic-embed-text
-        litellm_params:
-          model: ollama/nomic-embed-text
-          api_base: http://ollama:11434
-
-      # Embedding model alias
+      # Embedding model for Qdrant
       - model_name: embeddings
         litellm_params:
-          model: ollama/nomic-embed-text
-          api_base: http://ollama:11434
+          model: gemini/text-embedding-004
+          api_key: os.environ/GEMINI_API_KEY
+
+      # Alias for backward compatibility
+      - model_name: gemini-pro
+        litellm_params:
+          model: gemini/gemini-2.0-pro-exp-02-05
+          api_key: os.environ/GEMINI_API_KEY
 
     # Router settings
     router_settings:
       routing_strategy: simple-shuffle
-      num_retries: 2
+      num_retries: 3
       timeout: 120
+      fallbacks: []  # No fallbacks - Gemini only
 
     # General settings
     general_settings:

@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: conduit
+  namespace: ai-platform
+  labels:
+    app: conduit
+    component: matrix-server
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6167
+    targetPort: 6167
+    protocol: TCP
+    name: http
+  selector:
+    app: conduit
+---
+# Matrix well-known endpoint service (for client discovery)
+# Clients use this to find the Matrix server
+apiVersion: v1
+kind: Service
+metadata:
+  name: matrix
+  namespace: ai-platform
+  labels:
+    app: conduit
+    component: matrix-server
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8448
+    targetPort: 6167
+    protocol: TCP
+    name: federation
+  - port: 443
+    targetPort: 6167
+    protocol: TCP
+    name: client
+  selector:
+    app: conduit

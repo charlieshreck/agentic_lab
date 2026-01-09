@@ -1,16 +1,16 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: telegram-service
+  name: matrix-bot
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "6"
+    argocd.argoproj.io/sync-wave: "5"
 spec:
   project: default
   source:
     repoURL: https://github.com/charlieshreck/agentic_lab.git
     targetRevision: main
-    path: kubernetes/applications/telegram-service
+    path: kubernetes/applications/matrix-bot
   destination:
     server: https://10.20.0.40:6443
     namespace: ai-platform

@@ -68,9 +68,17 @@ data:
     class DiscoveryAgent:
         def __init__(self):
             self.hosts: Dict[str, DiscoveredHost] = {}
-            self.ssl_ctx = ssl.create_default_context()
+            # Create SSL context for OPNsense - use TLS 1.2 with permissive settings
+            self.ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            self.ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            self.ssl_ctx.maximum_version = ssl.TLSVersion.TLSv1_2
             self.ssl_ctx.check_hostname = False
             self.ssl_ctx.verify_mode = ssl.CERT_NONE
+            # Allow older ciphers for OPNsense compatibility
+            try:
+                self.ssl_ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
+            except ssl.SSLError:
+                self.ssl_ctx.set_ciphers('ALL')
 
         # ==========================================
         # NMAP SCANNING
@@ -219,6 +227,20 @@ data:
         # ==========================================
         # OPNSENSE - DHCP & ARP
         # ==========================================
+        def _opnsense_api_call(self, endpoint: str) -> Optional[dict]:
+            """Make OPNsense API call using curl (handles TLS better)."""
+            url = f"{OPNSENSE_URL}{endpoint}"
+            try:
+                result = subprocess.run(
+                    ["curl", "-s", "-k", "-u", f"{OPNSENSE_KEY}:{OPNSENSE_SECRET}", url],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0 and result.stdout:
+                    return json.loads(result.stdout)
+            except Exception as e:
+                logger.warning(f"OPNsense curl error: {e}")
+            return None
+
         def get_opnsense_dhcp_leases(self) -> List[DiscoveredHost]:
             """Get DHCP leases from OPNsense."""
             logger.info("Fetching DHCP leases from OPNsense...")
@@ -229,18 +251,10 @@ data:
                 return hosts
 
             try:
-                # OPNsense API for DHCP leases
-                url = f"{OPNSENSE_URL}/api/dhcpv4/leases/searchLease"
-
-                # Create auth header
-                import base64
-                auth = base64.b64encode(f"{OPNSENSE_KEY}:{OPNSENSE_SECRET}".encode()).decode()
-
-                req = urllib.request.Request(url, method="GET")
-                req.add_header("Authorization", f"Basic {auth}")
-
-                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=30) as resp:
-                    data = json.loads(resp.read())
+                data = self._opnsense_api_call("/api/dhcpv4/leases/searchLease")
+                if not data:
+                    logger.warning("OPNsense DHCP returned no data")
+                    return hosts
 
                 for lease in data.get("rows", []):
                     host = DiscoveredHost(
@@ -275,16 +289,10 @@ data:
                 return hosts
 
             try:
-                url = f"{OPNSENSE_URL}/api/diagnostics/interface/getArp"
-
-                import base64
-                auth = base64.b64encode(f"{OPNSENSE_KEY}:{OPNSENSE_SECRET}".encode()).decode()
-
-                req = urllib.request.Request(url, method="GET")
-                req.add_header("Authorization", f"Basic {auth}")
-
-                with urllib.request.urlopen(req, context=self.ssl_ctx, timeout=30) as resp:
-                    data = json.loads(resp.read())
+                data = self._opnsense_api_call("/api/diagnostics/interface/getArp")
+                if not data:
+                    logger.warning("OPNsense ARP returned no data")
+                    return hosts
 
                 for entry in data.get("rows", data if isinstance(data, list) else []):
                     if isinstance(entry, dict):
@@ -329,17 +337,29 @@ data:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     data = json.loads(resp.read())
 
+                if not isinstance(data, dict):
+                    logger.warning(f"AdGuard returned unexpected format: {type(data)}")
+                    return clients
+
                 # Get configured clients
-                for client in data.get("clients", []):
+                configured = data.get("clients") or []
+                for client in configured:
+                    if not isinstance(client, dict):
+                        continue
                     name = client.get("name", "")
-                    for ip in client.get("ids", []):
-                        if re.match(r'\d+\.\d+\.\d+\.\d+', ip):
+                    ids = client.get("ids") or []
+                    for ip in ids:
+                        if isinstance(ip, str) and re.match(r'\d+\.\d+\.\d+\.\d+', ip):
                             clients[ip] = name
 
                 # Get auto-discovered clients
-                for client in data.get("auto_clients", []):
+                auto = data.get("auto_clients") or []
+                for client in auto:
+                    if not isinstance(client, dict):
+                        continue
                     ip = client.get("ip", "")
-                    name = client.get("name", "") or client.get("whois_info", {}).get("orgname", "")
+                    whois = client.get("whois_info") or {}
+                    name = client.get("name", "") or whois.get("orgname", "")
                     if ip and name:
                         clients[ip] = name
 
@@ -349,6 +369,127 @@ data:
                 logger.error(f"AdGuard error: {e}")
 
             return clients
+
+        # ==========================================
+        # KUBERNETES SERVICE DISCOVERY
+        # ==========================================
+        def get_k8s_services(self) -> List[DiscoveredHost]:
+            """Discover services from local Kubernetes cluster."""
+            logger.info("Discovering Kubernetes services...")
+            hosts = []
+
+            # Check if running in-cluster
+            token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+            if not os.path.exists(token_path):
+                logger.warning("Not running in Kubernetes - skipping K8s discovery")
+                return hosts
+
+            try:
+                with open(token_path) as f:
+                    token = f.read().strip()
+
+                # Create SSL context for K8s API
+                k8s_ctx = ssl.create_default_context()
+                k8s_ctx.load_verify_locations(ca_path)
+
+                k8s_host = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
+                k8s_port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+                base_url = f"https://{k8s_host}:{k8s_port}"
+
+                # Get services from ai-platform namespace
+                for namespace in ["ai-platform", "default", "kube-system"]:
+                    url = f"{base_url}/api/v1/namespaces/{namespace}/services"
+                    req = urllib.request.Request(url)
+                    req.add_header("Authorization", f"Bearer {token}")
+
+                    try:
+                        with urllib.request.urlopen(req, context=k8s_ctx, timeout=10) as resp:
+                            data = json.loads(resp.read())
+
+                        for svc in data.get("items", []):
+                            spec = svc.get("spec", {})
+                            cluster_ip = spec.get("clusterIP")
+                            name = svc.get("metadata", {}).get("name", "")
+
+                            # Skip headless services and kubernetes service
+                            if not cluster_ip or cluster_ip == "None" or name == "kubernetes":
+                                continue
+
+                            # Get ports
+                            services = []
+                            for port in spec.get("ports", []):
+                                services.append({
+                                    "protocol": port.get("protocol", "tcp").lower(),
+                                    "port": port.get("port"),
+                                    "service": port.get("name", ""),
+                                    "product": f"k8s-{namespace}",
+                                    "version": ""
+                                })
+
+                            host = DiscoveredHost(
+                                ip=cluster_ip,
+                                hostname=f"{name}.{namespace}.svc.cluster.local",
+                                source="k8s",
+                                network="agentic",  # Local cluster
+                                device_type="server",
+                                services=services
+                            )
+                            hosts.append(host)
+
+                    except Exception as e:
+                        logger.warning(f"Failed to get services from {namespace}: {e}")
+
+                # Get pods with IPs
+                url = f"{base_url}/api/v1/namespaces/ai-platform/pods"
+                req = urllib.request.Request(url)
+                req.add_header("Authorization", f"Bearer {token}")
+
+                try:
+                    with urllib.request.urlopen(req, context=k8s_ctx, timeout=10) as resp:
+                        data = json.loads(resp.read())
+
+                    for pod in data.get("items", []):
+                        status = pod.get("status", {})
+                        pod_ip = status.get("podIP")
+                        name = pod.get("metadata", {}).get("name", "")
+                        phase = status.get("phase", "")
+
+                        if not pod_ip or phase != "Running":
+                            continue
+
+                        # Get container ports
+                        services = []
+                        for container in pod.get("spec", {}).get("containers", []):
+                            for port in container.get("ports", []):
+                                services.append({
+                                    "protocol": port.get("protocol", "tcp").lower(),
+                                    "port": port.get("containerPort"),
+                                    "service": container.get("name", ""),
+                                    "product": "k8s-pod",
+                                    "version": ""
+                                })
+
+                        host = DiscoveredHost(
+                            ip=pod_ip,
+                            hostname=name,
+                            source="k8s-pod",
+                            network="agentic",
+                            device_type="server",
+                            services=services
+                        )
+                        hosts.append(host)
+
+                except Exception as e:
+                    logger.warning(f"Failed to get pods: {e}")
+
+                logger.info(f"Found {len(hosts)} Kubernetes services/pods")
+
+            except Exception as e:
+                logger.error(f"Kubernetes discovery error: {e}")
+
+            return hosts
 
         # ==========================================
         # MERGE & CORRELATE
@@ -521,7 +662,12 @@ data:
             dns_clients = self.get_adguard_clients()
             self.enrich_with_dns(dns_clients)
 
-            # 5. Sync to NetBox
+            # 5. Kubernetes services
+            k8s_hosts = self.get_k8s_services()
+            for host in k8s_hosts:
+                self.merge_host(host)
+
+            # 6. Sync to NetBox
             self.sync_to_netbox()
 
             # Summary
@@ -537,6 +683,38 @@ data:
         agent = DiscoveryAgent()
         agent.run_discovery()
 ---
+# ServiceAccount for K8s API access
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: network-discovery
+  namespace: ai-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: network-discovery
+rules:
+- apiGroups: [""]
+  resources: ["services", "pods", "endpoints"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: network-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: network-discovery
+subjects:
+- kind: ServiceAccount
+  name: network-discovery
+  namespace: ai-platform
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -551,6 +729,7 @@ spec:
     spec:
       template:
         spec:
+          serviceAccountName: network-discovery
           restartPolicy: OnFailure
           containers:
           - name: discovery
@@ -558,7 +737,7 @@ spec:
             command: ["sh", "-c"]
             args:
               - |
-                apt-get update && apt-get install -y nmap > /dev/null 2>&1
+                apt-get update && apt-get install -y nmap curl > /dev/null 2>&1
                 python /app/discovery.py
             env:
             - name: NETBOX_URL
@@ -617,6 +796,7 @@ spec:
   ttlSecondsAfterFinished: 3600
   template:
     spec:
+      serviceAccountName: network-discovery
       restartPolicy: Never
       containers:
       - name: discovery
@@ -624,7 +804,7 @@ spec:
         command: ["sh", "-c"]
         args:
           - |
-            apt-get update && apt-get install -y nmap > /dev/null 2>&1
+            apt-get update && apt-get install -y nmap curl > /dev/null 2>&1
             python /app/discovery.py
         env:
         - name: NETBOX_URL

@@ -24,33 +24,46 @@ This repository contains the infrastructure and application code for a **self-im
 
 ### Key Components
 
-#### 1. Hybrid Inference Layer
-- **Local**: Ollama (qwen2.5:7b for tool calling, nomic-embed-text for embeddings)
-- **Cloud**: Google Gemini (primary), Anthropic Claude (premium tasks)
-- **Routing**: LiteLLM with complexity-based model selection
-- **Privacy**: Presidio + GLiNER for PII detection before cloud escalation
+#### 1. Split-Role AI Architecture
+| Role | Model | Responsibility |
+|------|-------|----------------|
+| **Workhorse** | Gemini 2.0 Pro (via LiteLLM) | Alert response, runbook execution, code fixes, maintenance |
+| **Validator** | Claude (via claude-agent) | Reviews Gemini outputs, auto-corrects minor issues, flags major issues |
+| **Architect** | Claude Code (with Charlie) | Architecture decisions, planning, context-aware review sessions |
+
+- **Inference**: LiteLLM proxy routing to Gemini Pro (1M token context)
+- **Embeddings**: Gemini text-embedding-004 (768 dimensions)
+- **Local Inference**: Removed (Ollama) - can revisit when runbook library matures
 
 #### 2. Vector Knowledge Base
 - **Engine**: Qdrant vector database
-- **Collections**: runbooks, decisions, documentation, research, agent_events
+- **Collections**: runbooks, decisions, validations, documentation, capability_gaps, skill_gaps, user_feedback
 - **Purpose**: RAG for context-aware decisions, learning from outcomes
-- **Embeddings**: nomic-embed-text-v1.5 (768 dimensions, 8K context)
+- **Embeddings**: Gemini text-embedding-004 (768 dimensions)
 
 #### 3. Orchestration
 - **LangGraph**: Graph-based agent routing and state management
 - **State**: PostgreSQL checkpointer for conversation history
 - **Cache**: Redis for semantic caching and job queues
-- **MCP Servers**: Custom servers for Home Assistant, arr suite, infrastructure tools
+- **MCP Servers**: Custom servers for Coroot, NetBox, infrastructure tools
+- **Context Sources**: Full context injection via Gemini's 1M token window
 
 #### 4. Human-in-the-Loop
-- **Interface**: Telegram Bot with Forum Topics
-- **Workflow**: Inline keyboard approvals for proposed actions
+- **Interface**: Matrix/Element (self-hosted Conduit server)
+- **Workflow**: Threaded conversations, reaction-based approvals
 - **Learning**: Every approval/rejection updates the knowledge base
 - **Progressive Autonomy**: Runbooks graduate from manual → prompted → standard
+- **Arr Suite**: Separate notifications via Discord + Notifiarr
 
-#### 5. Observability
-- **Monitoring**: Prometheus + Grafana (potentially in separate cluster)
-- **Anomaly Detection**: Coroot integration
+#### 5. Self-Evolution
+- **Runbooks**: Auto-generated from patterns, Claude Validator reviews
+- **MCPs**: Auto-generated when capability gaps detected
+- **Skills**: Auto-generated slash commands from usage patterns
+- **All changes require human approval before deployment**
+
+#### 6. Observability
+- **Monitoring**: Prometheus + Grafana (monit_homelab cluster)
+- **Anomaly Detection**: Coroot integration (via coroot-mcp)
 - **Metrics**: Inference latency, decision outcomes, runbook success rates
 - **Logs**: Structured logging with correlation IDs
 
@@ -113,15 +126,19 @@ agentic_lab/
 ├── kubernetes/             # K8s manifests (GitOps)
 │   ├── bootstrap/          # ArgoCD installation
 │   ├── platform/           # Core services (cert-manager, infisical, storage)
-│   └── applications/       # AI workloads (ollama, qdrant, langgraph, etc.)
+│   └── applications/       # AI workloads (matrix, qdrant, langgraph, etc.)
+├── mcp-servers/            # Custom MCP server implementations
 ├── docs/                   # Architecture documentation
 │   ├── unified-architecture-updated.md
-│   ├── telegram-architecture.md
 │   ├── mcp-development-guide.md
 │   └── ... (14 design docs total)
 ├── scripts/                # Operational scripts
 ├── .claude/                # Claude Code integration
+│   ├── commands/           # Slash commands (bootstrap + auto-generated)
+│   ├── context/            # Ambient context files (latest.md)
 │   └── skills/agentic-ops/ # Context for Claude operations
+├── .gemini/                # Gemini agent configuration
+│   └── SYSTEM.md           # Gemini system prompt and guidelines
 ├── GITOPS-WORKFLOW.md      # Mandatory GitOps rules
 ├── PHASES.md               # Implementation timeline
 └── README.md               # Quick start guide
@@ -202,23 +219,36 @@ Comprehensive architecture documentation is available in the `docs/` directory:
 - GitOps-native configuration
 - Perfect for infrastructure as code
 
-### Why Hybrid Local/Cloud Inference?
-- **Local**: Fast (50ms), private, no API costs, offline capable
-- **Cloud**: Superior reasoning for complex tasks, latest models
-- **PII Detection**: Automatic filtering before cloud escalation
-- **Cost Optimization**: 80% of queries handled locally
+### Why Gemini as Workhorse?
+- **1M token context window**: Comprehensive context injection, no need for complex RAG chunking
+- **Cost effective**: Lower cost than Claude for high-volume operational tasks
+- **Fast**: Good latency for real-time alert response
+- **Embeddings**: Built-in text-embedding-004 model
 
-### Why Telegram?
-- Native Bot API with inline keyboards (better UX than Signal CLI)
-- Forum Topics for scalable organization (critical/arr/infrastructure/etc.)
-- Webhook-based (no polling overhead)
-- Declarative deployment (token-based, no phone registration)
+### Why Claude as Validator?
+- **Superior reasoning**: Better at catching edge cases and subtle issues
+- **Security focus**: Excellent at identifying security vulnerabilities
+- **Architectural thinking**: Good at suggesting improvements
+- **Batch processing**: Cost-effective for daily validation runs
+
+### Why Matrix/Element (not Telegram)?
+- **Self-hosted**: Full control with Conduit server (~128MB RAM)
+- **Conversational threads**: Full back-and-forth in incident threads
+- **Reaction-based approvals**: Quick approve/reject with emojis
+- **Cross-platform**: Element app on Android, Web, Desktop
+- **No rate limits**: Internal server, no API restrictions
 
 ### Why Qdrant for Knowledge?
 - True vector database (not just indexed Postgres)
 - Fast semantic search (<10ms for 100K vectors)
 - Payload filtering (combine vector + metadata queries)
 - Snapshots for backup/restore
+
+### Why Auto-Evolution?
+- **MCP auto-generation**: When Gemini needs a capability, Claude builds it
+- **Skill auto-generation**: Repeated queries become slash commands
+- **Runbook learning**: Patterns become formal procedures
+- **Human approval**: All auto-generated code requires approval before deployment
 
 ---
 
@@ -266,10 +296,15 @@ Machine Identity credentials are stored securely for programmatic access to Infi
 ```
 /agentic-platform/
 ├── Gemini/
-│   └── GEMINI_API_KEY
-└── telegram/
-    ├── BOT_TOKEN
-    └── CHAT_ID
+│   └── GEMINI_API_KEY        # LiteLLM uses for Gemini Pro/Flash/Embeddings
+├── claude/
+│   └── (OAuth tokens)        # Claude Agent service credentials
+├── matrix/
+│   └── MATRIX_PASSWORD       # Matrix bot user password
+├── netbox/
+│   └── NETBOX_API_TOKEN      # NetBox MCP access
+└── infisical/
+    └── (internal)            # Operator credentials
 ```
 
 ### Machine Identity Details

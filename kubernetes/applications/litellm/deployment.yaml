@@ -32,6 +32,11 @@ spec:
         env:
         - name: LITELLM_LOG
           value: "INFO"
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gemini-credentials
+              key: GEMINI_API_KEY
         resources:
           requests:
             memory: "256Mi"

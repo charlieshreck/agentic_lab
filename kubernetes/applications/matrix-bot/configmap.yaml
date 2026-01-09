@@ -1,0 +1,347 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: matrix-bot-code
+  namespace: ai-platform
+  labels:
+    app: matrix-bot
+    component: interaction-layer
+data:
+  bot.py: |
+    """
+    Agentic Platform Matrix Bot
+
+    Provides conversational interface to the agentic platform via Matrix.
+    Uses matrix-nio for Matrix protocol, integrates with LangGraph for Gemini.
+    """
+    import asyncio
+    import json
+    import os
+    import logging
+    from typing import Optional
+    import httpx
+    from nio import (
+        AsyncClient,
+        LoginResponse,
+        RoomMessageText,
+        ReactionEvent,
+        InviteMemberEvent,
+        JoinError,
+    )
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Configuration from environment
+    MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "http://conduit:6167")
+    MATRIX_USER_ID = os.environ.get("MATRIX_USER_ID", "@agentic-bot:agentic.local")
+    MATRIX_PASSWORD = os.environ.get("MATRIX_PASSWORD", "")
+    LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+
+    class AgenticMatrixBot:
+        def __init__(self):
+            self.client = AsyncClient(MATRIX_HOMESERVER, MATRIX_USER_ID)
+            self.gemini_conversations = {}  # thread_id -> conversation history
+            self.http_client = httpx.AsyncClient(timeout=120.0)
+
+        async def login(self):
+            """Login to Matrix homeserver."""
+            response = await self.client.login(MATRIX_PASSWORD)
+            if isinstance(response, LoginResponse):
+                logger.info(f"Logged in as {MATRIX_USER_ID}")
+                return True
+            else:
+                logger.error(f"Login failed: {response}")
+                return False
+
+        async def setup_callbacks(self):
+            """Register event callbacks."""
+            self.client.add_event_callback(self.on_message, RoomMessageText)
+            self.client.add_event_callback(self.on_reaction, ReactionEvent)
+            self.client.add_event_callback(self.on_invite, InviteMemberEvent)
+
+        async def on_invite(self, room, event):
+            """Auto-join rooms when invited."""
+            if event.membership == "invite":
+                result = await self.client.join(room.room_id)
+                if isinstance(result, JoinError):
+                    logger.error(f"Failed to join {room.room_id}: {result}")
+                else:
+                    logger.info(f"Joined room {room.room_id}")
+
+        async def on_message(self, room, event):
+            """Handle incoming messages."""
+            # Ignore our own messages
+            if event.sender == self.client.user_id:
+                return
+
+            # Check if this is in a thread
+            relates_to = event.source.get("content", {}).get("m.relates_to", {})
+            thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+
+            if thread_id:
+                await self.handle_thread_conversation(room, event, thread_id)
+            else:
+                await self.handle_command(room, event)
+
+        async def handle_command(self, room, event):
+            """Handle direct commands in room (not in thread)."""
+            message = event.body.lower().strip()
+
+            if message in ["status", "what's happening", "what's happening?"]:
+                response = await self.get_platform_status()
+            elif message in ["what needs attention", "what needs attention?", "pending"]:
+                response = await self.get_pending_items()
+            elif message.startswith("@agentic"):
+                # Direct mention - treat as general query
+                query = event.body.replace("@agentic", "").strip()
+                response = await self.query_gemini(query, {})
+            else:
+                return  # Ignore non-command messages in room
+
+            await self.send_message(room.room_id, response)
+
+        async def handle_thread_conversation(self, room, event, thread_id):
+            """Full conversational interaction in thread."""
+            # Get or create conversation history
+            history = self.gemini_conversations.get(thread_id, [])
+            history.append({"role": "user", "content": event.body})
+
+            # Get thread context
+            context = await self.get_thread_context(thread_id)
+
+            # Query Gemini via LangGraph
+            response = await self.query_gemini(event.body, context, history)
+
+            # Update history
+            history.append({"role": "assistant", "content": response})
+            self.gemini_conversations[thread_id] = history
+
+            # Reply in thread
+            await self.send_thread_reply(room.room_id, thread_id, response)
+
+        async def on_reaction(self, room, event):
+            """Handle reaction-based approvals."""
+            if event.key == "\u2705":  # Checkmark
+                thread_id = event.reacts_to
+                await self.process_approval(room.room_id, thread_id, approved=True)
+            elif event.key == "\u274c":  # X mark
+                thread_id = event.reacts_to
+                await self.process_approval(room.room_id, thread_id, approved=False)
+
+        async def query_gemini(self, message: str, context: dict, history: list = None) -> str:
+            """Query Gemini via LangGraph."""
+            try:
+                payload = {
+                    "message": message,
+                    "context": context,
+                    "history": history or [],
+                    "source": "matrix_bot"
+                }
+                response = await self.http_client.post(
+                    f"{LANGGRAPH_URL}/chat",
+                    json=payload
+                )
+                if response.status_code == 200:
+                    return response.json().get("response", "No response from Gemini")
+                else:
+                    return f"Error querying Gemini: {response.status_code}"
+            except Exception as e:
+                logger.error(f"Error querying Gemini: {e}")
+                return f"Error: {str(e)}"
+
+        async def get_platform_status(self) -> str:
+            """Get current platform status."""
+            try:
+                # Query LangGraph for status
+                response = await self.http_client.get(f"{LANGGRAPH_URL}/health")
+                langgraph_healthy = response.status_code == 200
+
+                # Query Qdrant for pending items
+                pending = await self.get_pending_count()
+
+                status = "**Platform Status**\n\n"
+                status += f"- LangGraph: {'Healthy' if langgraph_healthy else 'Unhealthy'}\n"
+                status += f"- Pending approvals: {pending}\n"
+
+                return status
+            except Exception as e:
+                return f"Error getting status: {e}"
+
+        async def get_pending_items(self) -> str:
+            """Get items pending approval."""
+            try:
+                response = await self.http_client.post(
+                    f"{QDRANT_URL}/collections/validations/points/scroll",
+                    json={
+                        "filter": {
+                            "must": [{"key": "status", "match": {"value": "pending"}}]
+                        },
+                        "limit": 10
+                    }
+                )
+                if response.status_code == 200:
+                    points = response.json().get("result", {}).get("points", [])
+                    if not points:
+                        return "No pending items."
+
+                    items = []
+                    for p in points:
+                        payload = p.get("payload", {})
+                        items.append(f"- [{payload.get('target_type')}] {payload.get('target_id')}")
+                    return "**Pending Approvals**\n\n" + "\n".join(items)
+                return "Could not fetch pending items."
+            except Exception as e:
+                return f"Error: {e}"
+
+        async def get_pending_count(self) -> int:
+            """Get count of pending items."""
+            try:
+                response = await self.http_client.post(
+                    f"{QDRANT_URL}/collections/validations/points/count",
+                    json={
+                        "filter": {
+                            "must": [{"key": "status", "match": {"value": "pending"}}]
+                        }
+                    }
+                )
+                if response.status_code == 200:
+                    return response.json().get("result", {}).get("count", 0)
+                return 0
+            except:
+                return 0
+
+        async def get_thread_context(self, thread_id: str) -> dict:
+            """Get context for a thread (incident details, etc)."""
+            # TODO: Look up thread_id in Qdrant to get incident context
+            return {"thread_id": thread_id}
+
+        async def process_approval(self, room_id: str, thread_id: str, approved: bool):
+            """Process an approval reaction."""
+            action = "Approved" if approved else "Rejected"
+
+            try:
+                # Notify LangGraph of approval
+                response = await self.http_client.post(
+                    f"{LANGGRAPH_URL}/approval",
+                    json={
+                        "thread_id": thread_id,
+                        "approved": approved,
+                        "source": "matrix_reaction"
+                    }
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    await self.send_thread_reply(
+                        room_id,
+                        thread_id,
+                        f"\u2705 {action}. {result.get('message', '')}"
+                    )
+                else:
+                    await self.send_thread_reply(
+                        room_id,
+                        thread_id,
+                        f"Failed to process {action.lower()}: {response.status_code}"
+                    )
+            except Exception as e:
+                logger.error(f"Error processing approval: {e}")
+
+        async def send_message(self, room_id: str, message: str):
+            """Send a message to a room."""
+            await self.client.room_send(
+                room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": message,
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": self.markdown_to_html(message),
+                }
+            )
+
+        async def send_thread_reply(self, room_id: str, thread_id: str, message: str):
+            """Send a reply in a thread."""
+            await self.client.room_send(
+                room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": message,
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": self.markdown_to_html(message),
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": thread_id,
+                    }
+                }
+            )
+
+        async def create_incident_thread(self, room_id: str, incident: dict) -> str:
+            """Create a new thread for an incident."""
+            severity_emoji = {"critical": "\U0001F534", "warning": "\U0001F7E1", "info": "\U0001F535"}
+            emoji = severity_emoji.get(incident.get("severity", "info"), "\U0001F535")
+
+            response = await self.client.room_send(
+                room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": f"{emoji} [{incident['id']}] {incident['title']}",
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": f"""
+                        <h3>{emoji} [{incident['id']}] {incident['title']}</h3>
+                        <p><strong>Severity:</strong> {incident.get('severity', 'unknown')}</p>
+                        <p><strong>Service:</strong> {incident.get('service', 'unknown')}</p>
+                        <hr/>
+                        <p>{incident.get('description', '')}</p>
+                        <p><em>Reply in thread to discuss. React \u2705 to approve, \u274c to reject.</em></p>
+                    """,
+                }
+            )
+            return response.event_id
+
+        def markdown_to_html(self, text: str) -> str:
+            """Simple markdown to HTML conversion."""
+            import re
+            # Bold
+            text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+            # Italic
+            text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+            # Code
+            text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+            # Newlines
+            text = text.replace('\n', '<br/>')
+            return text
+
+        async def run(self):
+            """Main run loop."""
+            if not await self.login():
+                return
+
+            await self.setup_callbacks()
+            logger.info("Bot started, syncing...")
+
+            # Initial sync
+            await self.client.sync(timeout=30000)
+
+            # Continuous sync
+            while True:
+                try:
+                    await self.client.sync(timeout=30000)
+                except Exception as e:
+                    logger.error(f"Sync error: {e}")
+                    await asyncio.sleep(5)
+
+    async def main():
+        bot = AgenticMatrixBot()
+        await bot.run()
+
+    if __name__ == "__main__":
+        asyncio.run(main())
+
+  requirements.txt: |
+    matrix-nio[e2e]>=0.24.0
+    httpx>=0.27.0
+    aiohttp>=3.9.0

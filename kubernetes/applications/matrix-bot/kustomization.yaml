@@ -5,4 +5,5 @@ namespace: ai-platform
 
 resources:
   - infisical-secrets.yaml
-  - telegram-service.yaml
+  - configmap.yaml
+  - deployment.yaml

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conduit-config
+  namespace: ai-platform
+  labels:
+    app: conduit
+    component: matrix-server
+data:
+  conduit.toml: |
+    # Conduit Configuration for Agentic Platform
+    # See: https://docs.conduit.rs/configuration
+
+    [global]
+    # Server name - used in Matrix user IDs (@user:server_name)
+    # For internal use, we use a local domain
+    server_name = "agentic.local"
+
+    # Database path (inside the container)
+    database_path = "/var/lib/matrix-conduit"
+    database_backend = "rocksdb"
+
+    # Listen address - bind to all interfaces in container
+    address = "0.0.0.0"
+    port = 6167
+
+    # Maximum request size (100MB for media uploads)
+    max_request_size = 104857600
+
+    # Registration settings
+    # Only allow registration via admin API, not open registration
+    allow_registration = false
+    allow_guest_registration = false
+    allow_encryption = true
+    allow_federation = false  # Internal only, no federation
+
+    # Trust proxy headers for real IP detection
+    trusted_servers = []
+
+    # Enable presence (online/offline status)
+    allow_presence = true
+
+    # Rate limiting (relaxed for internal use)
+    max_concurrent_requests = 100
+
+    # Logging
+    log = "info"

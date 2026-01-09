@@ -1,0 +1,110 @@
+# NodePort services for external access via Caddy
+# Configure AdGuard DNS rewrites + Caddy routes for each service
+#
+# Example Caddy config (add to OPNsense):
+#   matrix.kernow.io {
+#     reverse_proxy 10.20.0.40:30167
+#   }
+#
+# Example AdGuard rewrite:
+#   matrix.kernow.io → <caddy-ip> (or 10.20.0.40 if Caddy is on same box)
+---
+# Matrix/Conduit NodePort Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: conduit-nodeport
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: conduit
+  ports:
+    - name: http
+      port: 6167
+      targetPort: 6167
+      nodePort: 30167
+---
+# Matrix Bot NodePort Service (internal API)
+apiVersion: v1
+kind: Service
+metadata:
+  name: matrix-bot-nodeport
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: matrix-bot
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30168
+---
+# NetBox NodePort Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: netbox-nodeport
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: netbox
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+---
+# LangGraph NodePort Service (API access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: langgraph-nodeport
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: langgraph
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30800
+---
+# Qdrant NodePort Service (for debugging)
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant-nodeport
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: 6333
+      nodePort: 30633
+    - name: grpc
+      port: 6334
+      targetPort: 6334
+      nodePort: 30634
+---
+# LiteLLM NodePort Service (for debugging)
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-nodeport
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: litellm
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      nodePort: 30400

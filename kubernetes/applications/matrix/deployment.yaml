@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conduit
+  namespace: ai-platform
+  labels:
+    app: conduit
+    component: matrix-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: conduit
+  strategy:
+    type: Recreate  # Single instance with persistent storage
+  template:
+    metadata:
+      labels:
+        app: conduit
+        component: matrix-server
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: conduit
+        image: matrixconduit/matrix-conduit:v0.10.2
+        ports:
+        - containerPort: 6167
+          name: http
+          protocol: TCP
+        env:
+        - name: CONDUIT_CONFIG
+          value: /etc/conduit/conduit.toml
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/conduit
+          readOnly: true
+        - name: data
+          mountPath: /var/lib/matrix-conduit
+        livenessProbe:
+          httpGet:
+            path: /_matrix/federation/v1/version
+            port: 6167
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /_matrix/federation/v1/version
+            port: 6167
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: config
+        configMap:
+          name: conduit-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: conduit-data

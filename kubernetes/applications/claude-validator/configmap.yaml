@@ -1,0 +1,360 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-validator-code
+  namespace: ai-platform
+  labels:
+    app: claude-validator
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """
+    Claude Validator Service
+
+    Reviews Gemini's outputs, validates runbooks/decisions,
+    auto-generates MCPs and skills, updates context files.
+    """
+    import os
+    import json
+    import logging
+    from datetime import datetime, timedelta
+    from typing import List, Optional
+    from uuid import uuid4
+    import httpx
+    from fastapi import FastAPI, HTTPException, BackgroundTasks
+    from pydantic import BaseModel
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
+    LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "24"))
+
+    app = FastAPI(title="Claude Validator", version="1.0.0")
+
+    class ValidationRequest(BaseModel):
+        target_type: str  # runbook, decision, code
+        target_id: str
+        priority: str = "normal"  # normal, high
+
+    class ValidationResult(BaseModel):
+        id: str
+        target_type: str
+        target_id: str
+        approved: bool
+        confidence: float
+        issues: List[str]
+        suggestions: List[str]
+        corrections_applied: bool
+        validated_at: str
+
+    class SkillGap(BaseModel):
+        description: str
+        triggering_patterns: List[str]
+        type: str  # repeated_query, multi_step_operation, new_service, gemini_request
+
+    class CapabilityGap(BaseModel):
+        description: str
+        tools_needed: List[str]
+        triggering_alerts: List[str]
+
+    async def call_claude(prompt: str) -> str:
+        """Call Claude Agent for validation."""
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(
+                    f"{CLAUDE_AGENT_URL}/chat",
+                    json={"message": prompt, "system": "You are a code and infrastructure reviewer."}
+                )
+                response.raise_for_status()
+                return response.json().get("response", "")
+            except Exception as e:
+                logger.error(f"Claude call failed: {e}")
+                return ""
+
+    async def query_qdrant(collection: str, filter_dict: dict = None, limit: int = 100) -> List[dict]:
+        """Query Qdrant collection."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                body = {"limit": limit}
+                if filter_dict:
+                    body["filter"] = filter_dict
+                response = await client.post(
+                    f"{QDRANT_URL}/collections/{collection}/points/scroll",
+                    json=body
+                )
+                response.raise_for_status()
+                return response.json().get("result", {}).get("points", [])
+            except Exception as e:
+                logger.error(f"Qdrant query failed: {e}")
+                return []
+
+    async def store_to_qdrant(collection: str, point: dict):
+        """Store point to Qdrant."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.put(
+                    f"{QDRANT_URL}/collections/{collection}/points",
+                    json={"points": [point]}
+                )
+                response.raise_for_status()
+            except Exception as e:
+                logger.error(f"Qdrant store failed: {e}")
+
+    async def notify_matrix(message: str, room: str = "#improvements"):
+        """Send notification to Matrix room."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                await client.post(
+                    f"{MATRIX_BOT_URL}/notify",
+                    json={"message": message, "room": room}
+                )
+            except Exception as e:
+                logger.error(f"Matrix notification failed: {e}")
+
+    @app.get("/health")
+    async def health():
+        return {"status": "healthy", "service": "claude-validator"}
+
+    @app.post("/validate", response_model=ValidationResult)
+    async def validate_item(request: ValidationRequest, background_tasks: BackgroundTasks):
+        """Validate a runbook, decision, or code change."""
+        logger.info(f"Validating {request.target_type}: {request.target_id}")
+
+        # Fetch the item from Qdrant
+        items = await query_qdrant(
+            f"{request.target_type}s",
+            {"must": [{"key": "id", "match": {"value": request.target_id}}]},
+            limit=1
+        )
+
+        if not items:
+            raise HTTPException(status_code=404, detail=f"{request.target_type} not found")
+
+        item = items[0].get("payload", {})
+
+        # Build validation prompt based on type
+        if request.target_type == "runbook":
+            prompt = f"""Review this runbook for:
+    1. Logic correctness - will the diagnosis catch the right cases?
+    2. Edge cases - what could go wrong?
+    3. Rollback safety - is the rollback procedure complete?
+    4. Security - any dangerous commands?
+
+    Runbook:
+    {json.dumps(item, indent=2)}
+
+    Return JSON: {{"approved": bool, "confidence": float, "issues": [], "suggestions": []}}"""
+
+        elif request.target_type == "decision":
+            prompt = f"""Audit this decision:
+    {json.dumps(item, indent=2)}
+
+    Was this the right call? Any concerns?
+    Return JSON: {{"approved": bool, "confidence": float, "issues": [], "suggestions": []}}"""
+
+        else:
+            prompt = f"""Review this for security and correctness:
+    {json.dumps(item, indent=2)}
+
+    Return JSON: {{"approved": bool, "confidence": float, "issues": [], "suggestions": []}}"""
+
+        # Call Claude for validation
+        response = await call_claude(prompt)
+
+        try:
+            result_data = json.loads(response)
+        except:
+            result_data = {"approved": False, "confidence": 0.5, "issues": ["Failed to parse response"], "suggestions": []}
+
+        result = ValidationResult(
+            id=f"val-{uuid4().hex[:8]}",
+            target_type=request.target_type,
+            target_id=request.target_id,
+            approved=result_data.get("approved", False),
+            confidence=result_data.get("confidence", 0.5),
+            issues=result_data.get("issues", []),
+            suggestions=result_data.get("suggestions", []),
+            corrections_applied=False,
+            validated_at=datetime.utcnow().isoformat()
+        )
+
+        # Store validation result
+        background_tasks.add_task(
+            store_to_qdrant,
+            "validations",
+            {"id": result.id, "payload": result.dict(), "vector": [0.0] * 768}
+        )
+
+        # Notify if issues found
+        if result.issues:
+            background_tasks.add_task(
+                notify_matrix,
+                f"Validation issues for {request.target_type} {request.target_id}: {', '.join(result.issues)}"
+            )
+
+        return result
+
+    @app.post("/daily-validation")
+    async def run_daily_validation(background_tasks: BackgroundTasks):
+        """Run daily batch validation of recent items."""
+        logger.info("Starting daily validation run")
+
+        cutoff = datetime.utcnow() - timedelta(hours=LOOKBACK_HOURS)
+        cutoff_ts = cutoff.isoformat()
+
+        validated_count = 0
+
+        # Validate recent runbooks
+        runbooks = await query_qdrant("runbooks", limit=50)
+        for rb in runbooks:
+            payload = rb.get("payload", {})
+            if payload.get("created_at", "") >= cutoff_ts:
+                background_tasks.add_task(
+                    validate_item,
+                    ValidationRequest(target_type="runbook", target_id=payload.get("id", "")),
+                    background_tasks
+                )
+                validated_count += 1
+
+        # Validate recent decisions
+        decisions = await query_qdrant("decisions", limit=50)
+        for dec in decisions:
+            payload = dec.get("payload", {})
+            if payload.get("timestamp", "") >= cutoff_ts:
+                background_tasks.add_task(
+                    validate_item,
+                    ValidationRequest(target_type="decision", target_id=payload.get("id", "")),
+                    background_tasks
+                )
+                validated_count += 1
+
+        return {"status": "started", "items_queued": validated_count}
+
+    @app.post("/generate-skill")
+    async def generate_skill(gap: SkillGap):
+        """Generate a new Claude Code skill from a gap."""
+        logger.info(f"Generating skill for: {gap.description}")
+
+        prompt = f"""Generate a Claude Code slash command for:
+    {gap.description}
+
+    Triggering patterns: {gap.triggering_patterns}
+
+    Available data sources:
+    - Qdrant collections: runbooks, decisions, validations
+    - MCPs: infrastructure-mcp, netbox-mcp, coroot-mcp, knowledge-mcp
+
+    Generate markdown for .claude/commands/[name].md
+    Include clear instructions for querying data and formatting output.
+    """
+
+        skill_content = await call_claude(prompt)
+
+        if skill_content:
+            # Store skill gap with generated content
+            await store_to_qdrant(
+                "skill_gaps",
+                {
+                    "id": f"skill-gap-{uuid4().hex[:8]}",
+                    "payload": {
+                        "description": gap.description,
+                        "type": gap.type,
+                        "triggering_patterns": gap.triggering_patterns,
+                        "generated_content": skill_content,
+                        "status": "awaiting_approval",
+                        "created_at": datetime.utcnow().isoformat()
+                    },
+                    "vector": [0.0] * 768
+                }
+            )
+
+            await notify_matrix(f"New skill generated: {gap.description}\nReview and approve in Claude Code session.")
+            return {"status": "generated", "content_preview": skill_content[:500]}
+
+        return {"status": "failed", "error": "Could not generate skill"}
+
+    @app.post("/generate-mcp")
+    async def generate_mcp(gap: CapabilityGap):
+        """Generate a new MCP server from a capability gap."""
+        logger.info(f"Generating MCP for: {gap.description}")
+
+        prompt = f"""Generate a FastMCP server for:
+    {gap.description}
+
+    Required tools: {gap.tools_needed}
+
+    Follow the pattern in existing MCP servers:
+    - Use FastMCP framework
+    - Include health endpoint
+    - Return pydantic models
+
+    Generate Python code for src/main.py
+    """
+
+        mcp_content = await call_claude(prompt)
+
+        if mcp_content:
+            await store_to_qdrant(
+                "capability_gaps",
+                {
+                    "id": f"cap-gap-{uuid4().hex[:8]}",
+                    "payload": {
+                        "description": gap.description,
+                        "tools_needed": gap.tools_needed,
+                        "triggering_alerts": gap.triggering_alerts,
+                        "generated_content": mcp_content,
+                        "status": "awaiting_approval",
+                        "created_at": datetime.utcnow().isoformat()
+                    },
+                    "vector": [0.0] * 768
+                }
+            )
+
+            await notify_matrix(f"New MCP generated: {gap.description}\nReview and approve in Claude Code session.")
+            return {"status": "generated", "content_preview": mcp_content[:500]}
+
+        return {"status": "failed", "error": "Could not generate MCP"}
+
+    @app.post("/update-context")
+    async def update_context_file():
+        """Update the ambient context file for Claude Code sessions."""
+        logger.info("Updating context file")
+
+        # Get recent activity stats
+        decisions = await query_qdrant("decisions", limit=100)
+        validations = await query_qdrant("validations", limit=50)
+        pending = [v for v in validations if v.get("payload", {}).get("status") == "pending"]
+
+        context = f"""# Agentic Platform Context - Updated {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC
+
+    ## Session Checkpoint
+    Last reviewed: {datetime.utcnow().isoformat()}
+    Changes since: {len(decisions)} decisions, {len(pending)} pending items
+
+    ## Attention Required
+    {chr(10).join(f'- {v.get("payload", {}).get("target_type")}: {v.get("payload", {}).get("target_id")}' for v in pending[:5]) or '- No pending items'}
+
+    ## Recent Activity Summary
+    - Decisions processed: {len(decisions)}
+    - Pending validations: {len(pending)}
+
+    ## Quick Links
+    - Recent decisions: query "decisions" collection
+    - Pending items: query "validations" where status=pending
+    """
+
+        return {"status": "updated", "preview": context[:500]}
+
+    if __name__ == "__main__":
+        import uvicorn
+        port = int(os.environ.get("PORT", "8000"))
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+  requirements.txt: |
+    fastapi>=0.115.0
+    uvicorn>=0.34.0
+    httpx>=0.27.0
+    pydantic>=2.11.0

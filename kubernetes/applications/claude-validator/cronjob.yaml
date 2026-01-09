@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-validator-daily
+  namespace: ai-platform
+  labels:
+    app: claude-validator
+    component: cronjob
+spec:
+  schedule: "0 6 * * *"  # 06:00 UTC daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400  # Clean up after 24 hours
+      template:
+        metadata:
+          labels:
+            app: claude-validator
+            component: daily-validation
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: trigger
+            image: curlimages/curl:8.5.0
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Triggering daily validation run..."
+
+              # Trigger daily validation
+              curl -s -X POST "http://claude-validator:8000/daily-validation" \
+                -H "Content-Type: application/json" \
+                -o /tmp/response.json
+
+              echo "Response:"
+              cat /tmp/response.json
+              echo ""
+
+              # Also trigger context update
+              echo "Updating context file..."
+              curl -s -X POST "http://claude-validator:8000/update-context" \
+                -H "Content-Type: application/json"
+
+              echo ""
+              echo "Daily validation triggered successfully"
+            resources:
+              requests:
+                memory: "32Mi"
+                cpu: "10m"
+              limits:
+                memory: "64Mi"
+                cpu: "100m"

@@ -20,3 +20,4 @@ resources:
   - homepage-mcp.yaml
   - infisical-mcp.yaml
   - netbox-mcp.yaml
+  - coroot-mcp.yaml

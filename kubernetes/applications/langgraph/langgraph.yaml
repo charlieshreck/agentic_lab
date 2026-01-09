@@ -30,21 +30,39 @@ data:
     logger = logging.getLogger(__name__)
 
     # Environment configuration
+    # Core service URLs
     POSTGRES_URL = os.environ.get("POSTGRES_URL", "postgresql://postgres:postgres@postgres:5432/langgraph")
     REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+
+    # Claude services - validator for batch review, agent for escalation
     CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
+    CLAUDE_VALIDATOR_URL = os.environ.get("CLAUDE_VALIDATOR_URL", "http://claude-validator:8000")
+
+    # MCP servers
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
-    TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
-    OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
     NETBOX_MCP_URL = os.environ.get("NETBOX_MCP_URL", "http://netbox-mcp:8000")
-    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
-    CLAUDE_COMPLEXITY_THRESHOLD = os.environ.get("CLAUDE_COMPLEXITY_THRESHOLD", "high")
+    COROOT_MCP_URL = os.environ.get("COROOT_MCP_URL", "http://coroot-mcp:8000")
+
+    # Matrix bot for notifications (replaces Telegram)
+    MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
+
+    # Model configuration - Gemini only (via LiteLLM)
+    GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini/gemini-2.0-pro")
+    GEMINI_FLASH_MODEL = os.environ.get("GEMINI_FLASH_MODEL", "gemini/gemini-2.0-flash")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
+
+    # Thresholds and configuration
     RUNBOOK_MATCH_THRESHOLD = float(os.environ.get("RUNBOOK_MATCH_THRESHOLD", "0.75"))
     MIN_CONFIDENCE_FOR_LOCAL_FIX = float(os.environ.get("MIN_CONFIDENCE_FOR_LOCAL_FIX", "0.7"))
     AUTO_APPROVE_MIN_SUCCESSES = int(os.environ.get("AUTO_APPROVE_MIN_SUCCESSES", "5"))
+    CONTEXT_CACHE_TTL = int(os.environ.get("CONTEXT_CACHE_TTL", "3600"))
+
+    # Static context cache (refreshed hourly for cost savings)
+    _static_context_cache = {}
+    _static_context_timestamp = None
 
     # ============================================================================
     # RUNBOOK SCHEMA - Pydantic Models for Diagnostic Workflows
@@ -666,8 +684,38 @@ data:
         alert_id: str
         ignored_by: str
 
-    async def call_litellm(messages, model="local/qwen2.5:7b"):
-        async with httpx.AsyncClient(timeout=60.0) as client:
+    async def call_gemini(prompt: str, context: dict = None, model: str = None) -> str:
+        """
+        Call Gemini via LiteLLM for operational tasks.
+        Uses Gemini Pro by default (1M token context window).
+        """
+        model = model or GEMINI_MODEL
+        messages = []
+
+        # Build comprehensive context if provided
+        if context:
+            system_content = "You are Gemini, the primary operational agent for the Agentic Homelab Platform.\n\n"
+            system_content += "CONTEXT:\n" + json.dumps(context, indent=2, default=str)
+            messages.append({"role": "system", "content": system_content})
+
+        messages.append({"role": "user", "content": prompt})
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(
+                    LITELLM_URL + "/v1/chat/completions",
+                    json={"model": model, "messages": messages}
+                )
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                logger.error("Gemini call failed: %s", e)
+                return "Error: " + str(e)
+
+    # Alias for backward compatibility
+    async def call_litellm(messages, model=None):
+        model = model or GEMINI_MODEL
+        async with httpx.AsyncClient(timeout=120.0) as client:
             try:
                 response = await client.post(
                     LITELLM_URL + "/v1/chat/completions",
@@ -693,14 +741,52 @@ data:
                 logger.error("Knowledge MCP call failed: %s", e)
                 return {"error": str(e)}
 
-    async def call_telegram(endpoint, data):
+    async def call_matrix(endpoint: str, data: dict) -> dict:
+        """Send notifications and requests to Matrix bot."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
-                response = await client.post(TELEGRAM_SERVICE_URL + "/" + endpoint, json=data)
+                response = await client.post(MATRIX_BOT_URL + "/" + endpoint, json=data)
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
-                logger.error("Telegram service call failed: %s", e)
+                logger.error("Matrix bot call failed: %s", e)
+                return {"error": str(e)}
+
+    async def call_coroot_mcp(tool_name: str, **kwargs) -> dict:
+        """Call Coroot MCP for metrics and anomaly data."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    COROOT_MCP_URL + "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": tool_name, "arguments": kwargs}
+                    }
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("result", {}).get("content", [])
+                    if content:
+                        return json.loads(content[0].get("text", "{}"))
+                return {}
+            except Exception as e:
+                logger.warning(f"Coroot MCP call failed: {e}")
+                return {}
+
+    async def call_claude_validator(endpoint: str, data: dict) -> dict:
+        """Trigger Claude Validator for review tasks."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.post(
+                    CLAUDE_VALIDATOR_URL + "/" + endpoint,
+                    json=data
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"Claude Validator call failed: {e}")
                 return {"error": str(e)}
 
     async def discover_service(service_name: str) -> dict:
@@ -762,22 +848,201 @@ data:
                 logger.warning(f"Credentials path lookup failed for {service_name}: {e}")
                 return ""
 
-    async def get_embedding(text: str):
-        """Get embedding from Ollama directly (bypasses LiteLLM bug)."""
+    async def get_embedding(text: str) -> list:
+        """Get embedding from Gemini via LiteLLM."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
-                # Call Ollama embeddings API directly
                 response = await client.post(
-                    OLLAMA_URL + "/api/embeddings",
-                    json={"model": EMBEDDING_MODEL, "prompt": text}
+                    LITELLM_URL + "/v1/embeddings",
+                    json={"model": EMBEDDING_MODEL, "input": text}
                 )
                 if response.status_code == 200:
-                    return response.json().get("embedding", [])
-                logger.warning("Ollama embedding returned %d", response.status_code)
+                    data = response.json()
+                    if data.get("data") and len(data["data"]) > 0:
+                        return data["data"][0].get("embedding", [])
+                logger.warning("Embedding API returned %d", response.status_code)
                 return []
             except Exception as e:
                 logger.error("Embedding error: %s", e)
                 return []
+
+    async def build_comprehensive_context(alert: dict) -> dict:
+        """
+        Build comprehensive context for Gemini using its 1M token window.
+        Combines static cached context with dynamic per-request context.
+        """
+        global _static_context_cache, _static_context_timestamp
+
+        alert_text = f"{alert.get('alertname', '')} {alert.get('description', '')}"
+        alert_embedding = await get_embedding(alert_text)
+
+        # Check if static context needs refresh (hourly)
+        now = datetime.utcnow()
+        if (_static_context_timestamp is None or
+            (now - _static_context_timestamp).total_seconds() > CONTEXT_CACHE_TTL):
+            logger.info("Refreshing static context cache...")
+            _static_context_cache = await _fetch_static_context()
+            _static_context_timestamp = now
+
+        # Fetch dynamic context (always fresh)
+        dynamic_context = await _fetch_dynamic_context(alert, alert_embedding)
+
+        return {
+            **_static_context_cache,
+            **dynamic_context,
+            "alert": alert
+        }
+
+    async def _fetch_static_context() -> dict:
+        """Fetch context that changes infrequently (cached hourly)."""
+        context = {}
+
+        # Get all runbooks from Qdrant
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    QDRANT_URL + "/collections/runbooks/points/scroll",
+                    json={"limit": 100, "with_payload": True}
+                )
+                if response.status_code == 200:
+                    points = response.json().get("result", {}).get("points", [])
+                    context["runbook_library"] = [p.get("payload", {}) for p in points]
+            except Exception as e:
+                logger.warning(f"Failed to fetch runbooks: {e}")
+                context["runbook_library"] = []
+
+        # Get documentation from knowledge MCP
+        try:
+            docs = await call_knowledge_mcp("documentation", "GET")
+            context["documentation"] = docs if not docs.get("error") else []
+        except:
+            context["documentation"] = []
+
+        # Get service inventory from NetBox
+        try:
+            inventory = await discover_service("all")
+            context["service_inventory"] = inventory
+        except:
+            context["service_inventory"] = {}
+
+        return context
+
+    async def _fetch_dynamic_context(alert: dict, alert_embedding: list) -> dict:
+        """Fetch fresh context for each request."""
+        context = {}
+
+        # Get cluster state from infrastructure MCP
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                response = await client.get(INFRASTRUCTURE_MCP_URL + "/cluster/status")
+                if response.status_code == 200:
+                    context["cluster_state"] = response.json()
+            except:
+                context["cluster_state"] = {}
+
+        # Get Coroot metrics and anomalies for affected service
+        service = alert.get("labels", {}).get("service") or alert.get("namespace", "")
+        if service:
+            context["coroot_metrics"] = await call_coroot_mcp("get_service_metrics", service=service)
+            context["coroot_anomalies"] = await call_coroot_mcp("get_recent_anomalies", hours=24)
+            context["service_dependencies"] = await call_coroot_mcp("get_service_dependencies", service=service)
+
+        # Get similar past decisions from Qdrant
+        if alert_embedding:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                try:
+                    response = await client.post(
+                        QDRANT_URL + "/collections/decisions/points/search",
+                        json={"vector": alert_embedding, "limit": 5, "with_payload": True}
+                    )
+                    if response.status_code == 200:
+                        hits = response.json().get("result", [])
+                        context["similar_past_decisions"] = [h.get("payload", {}) for h in hits]
+                except:
+                    context["similar_past_decisions"] = []
+
+        # Get recent decisions (last 24h)
+        context["recent_decisions_24h"] = await _get_recent_decisions(hours=24)
+
+        return context
+
+    async def _get_recent_decisions(hours: int = 24) -> list:
+        """Get recent decisions from Qdrant."""
+        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(
+                    QDRANT_URL + "/collections/decisions/points/scroll",
+                    json={
+                        "limit": 50,
+                        "with_payload": True,
+                        "filter": {
+                            "must": [
+                                {"key": "timestamp", "range": {"gte": cutoff}}
+                            ]
+                        }
+                    }
+                )
+                if response.status_code == 200:
+                    points = response.json().get("result", {}).get("points", [])
+                    return [p.get("payload", {}) for p in points]
+            except:
+                pass
+        return []
+
+    async def detect_capability_gap(gemini_response: str, alert: dict) -> Optional[dict]:
+        """Detect if Gemini indicates a missing capability."""
+        gap_signals = [
+            "I don't have access to",
+            "I cannot query",
+            "No MCP available for",
+            "I need a tool to",
+            "Missing capability:",
+            "Unable to retrieve",
+        ]
+
+        for signal in gap_signals:
+            if signal.lower() in gemini_response.lower():
+                # Extract description of what's needed
+                gap = {
+                    "description": f"Capability gap detected while processing alert: {alert.get('alertname')}",
+                    "tools_needed": [],
+                    "triggering_alerts": [alert.get("id", "")],
+                    "gemini_response_excerpt": gemini_response[:500]
+                }
+
+                # Store to Qdrant for Claude Validator to process
+                await store_capability_gap(gap)
+                return gap
+
+        return None
+
+    async def store_capability_gap(gap: dict):
+        """Store capability gap to Qdrant for later processing."""
+        embedding = await get_embedding(gap.get("description", ""))
+        if not embedding:
+            return
+
+        gap_id = f"cap-gap-{uuid_mod.uuid4().hex[:8]}"
+        gap["id"] = gap_id
+        gap["created_at"] = datetime.utcnow().isoformat()
+        gap["status"] = "pending"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                await client.put(
+                    QDRANT_URL + "/collections/capability_gaps/points",
+                    json={
+                        "points": [{
+                            "id": str(uuid_mod.uuid5(uuid_mod.NAMESPACE_DNS, gap_id)),
+                            "vector": embedding,
+                            "payload": gap
+                        }]
+                    }
+                )
+                logger.info(f"Stored capability gap: {gap_id}")
+            except Exception as e:
+                logger.error(f"Failed to store capability gap: {e}")
 
     async def search_runbooks_qdrant(query: str, limit: int = 3):
         """Search Qdrant for relevant diagnostic runbooks."""
@@ -1360,26 +1625,61 @@ data:
         }]
 
     async def request_approval(state):
+        """Request approval via Matrix bot."""
         alert = state["alert"]
         solutions = state["solutions"]
         assessment = state["assessment"]
+
         pending_approvals[alert["id"]] = {
             "alert": alert,
             "solutions": solutions,
             "assessment": assessment,
             "created_at": datetime.utcnow().isoformat()
         }
-        result = await call_telegram("approval", {
+
+        # Determine room based on severity
+        severity = alert.get("severity", "warning")
+        room = "#critical" if severity == "critical" else "#infrastructure"
+
+        # Format solutions for Matrix message
+        solutions_text = ""
+        for i, sol in enumerate(solutions, 1):
+            solutions_text += f"\n{i}. **{sol.get('name', 'Solution')}**\n"
+            solutions_text += f"   {sol.get('description', '')}\n"
+            solutions_text += f"   Risk: {sol.get('risk', 'unknown')}\n"
+
+        result = await call_matrix("approval", {
             "alert_id": alert["id"],
+            "room": room,
             "alert": alert,
             "solutions": solutions,
+            "message": f"""**Alert: {alert.get('alertname', 'Unknown')}**
+Severity: {severity}
+Namespace: {alert.get('namespace', 'default')}
+
+{alert.get('description', 'No description')}
+
+**Recommended Solutions:**
+{solutions_text}
+
+React ✅ to approve solution 1, or reply with solution number.
+React ❌ to reject/ignore.""",
             "context": {
                 "similar_runbook": assessment.get("similar_runbook"),
-                "similarity": assessment.get("similarity_score", 0)
-            },
-            "topic": assessment.get("recommended_topic", "infrastructure")
+                "similarity": assessment.get("similarity_score", 0),
+                "confidence": assessment.get("confidence", 0)
+            }
         })
-        return {"approval_status": "pending", "topic_id": result.get("topic_id", 0)}
+
+        # Trigger Claude Validator for critical items
+        if severity == "critical":
+            await call_claude_validator("validate", {
+                "target_type": "decision",
+                "target_id": alert["id"],
+                "priority": "high"
+            })
+
+        return {"approval_status": "pending", "thread_id": result.get("thread_id", "")}
 
     async def execute_solution(state):
         """Execute the selected solution - uses runbook executor for diagnostic runbooks."""
@@ -1751,6 +2051,7 @@ spec:
           env:
             - name: PORT
               value: "8000"
+            # Core services
             - name: POSTGRES_URL
               value: "postgresql://postgres:postgres@postgres:5432/langgraph"
             - name: REDIS_URL
@@ -1759,22 +2060,35 @@ spec:
               value: "http://litellm:4000"
             - name: QDRANT_URL
               value: "http://qdrant:6333"
+            # Claude services
             - name: CLAUDE_AGENT_URL
               value: "http://claude-agent:8000"
+            - name: CLAUDE_VALIDATOR_URL
+              value: "http://claude-validator:8000"
+            # MCP servers
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
             - name: INFRASTRUCTURE_MCP_URL
               value: "http://infrastructure-mcp:8000"
-            - name: TELEGRAM_SERVICE_URL
-              value: "http://telegram-service:8000"
-            - name: OLLAMA_URL
-              value: "http://ollama:11434"
             - name: NETBOX_MCP_URL
               value: "http://netbox-mcp:8000"
+            - name: COROOT_MCP_URL
+              value: "http://coroot-mcp:8000"
+            # Matrix bot (replaces Telegram)
+            - name: MATRIX_BOT_URL
+              value: "http://matrix-bot:8000"
+            # Model configuration - Gemini only
+            - name: GEMINI_MODEL
+              value: "gemini/gemini-2.0-pro"
+            - name: GEMINI_FLASH_MODEL
+              value: "gemini/gemini-2.0-flash"
             - name: EMBEDDING_MODEL
-              value: "nomic-embed-text"
+              value: "embeddings"
+            # Thresholds
             - name: RUNBOOK_MATCH_THRESHOLD
               value: "0.75"
+            - name: CONTEXT_CACHE_TTL
+              value: "3600"
           volumeMounts:
             - name: code
               mountPath: /code

@@ -4,5 +4,7 @@ kind: Kustomization
 namespace: ai-platform
 
 resources:
-  - statefulset.yaml
+  - pvc.yaml
+  - configmap.yaml
+  - deployment.yaml
   - service.yaml

@@ -4,6 +4,7 @@ kind: Kustomization
 namespace: ai-platform
 
 resources:
+  - infisical-secrets.yaml
   - configmap.yaml
   - deployment.yaml
   - service.yaml
