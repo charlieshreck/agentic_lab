@@ -673,7 +673,15 @@ data:
             # Summary
             logger.info("=" * 60)
             logger.info(f"Discovery complete. Found {len(self.hosts)} hosts:")
-            for ip in sorted(self.hosts.keys(), key=lambda x: [int(p) for p in x.split('.')]):
+            def sort_ip(ip):
+                """Sort key for IPs - handles both IPv4 and IPv6."""
+                try:
+                    if ':' in ip:  # IPv6
+                        return (1, ip)  # Sort IPv6 after IPv4
+                    return (0, [int(p) for p in ip.split('.')])
+                except ValueError:
+                    return (2, ip)  # Unknown format last
+            for ip in sorted(self.hosts.keys(), key=sort_ip):
                 host = self.hosts[ip]
                 services = ", ".join([f"{s['port']}/{s['service']}" for s in host.services[:3]])
                 logger.info(f"  {ip:15} {host.hostname:25} {host.device_type:12} {services}")
