@@ -5,4 +5,7 @@ resources:
   - infisical-secrets.yaml
   - netbox-postgresql.yaml
   - netbox-deployment.yaml
+  - netbox-bootstrap.yaml
+  - netbox-seed-devices.yaml
   - network-discovery.yaml
+  - unifi-discovery.yaml

@@ -1,0 +1,472 @@
+---
+# NetBox Seed Devices Job
+# Creates known infrastructure devices with proper Device Types, Roles, and Interfaces
+# Run after netbox-bootstrap to populate the device inventory
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netbox-seed-devices-code
+  namespace: ai-platform
+data:
+  seed_devices.py: |
+    #!/usr/bin/env python3
+    """
+    NetBox Device Seeding Script
+
+    Creates known infrastructure devices in NetBox with:
+    - Proper Device Types and Roles
+    - Primary interfaces with IP assignments
+    - Custom fields (credentials_path, api_endpoint, k8s_cluster)
+
+    All operations are idempotent - safe to run multiple times.
+    """
+    import os
+    import json
+    import logging
+    import urllib.request
+    import urllib.error
+    import time
+    from datetime import datetime
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
+    NETBOX_URL = os.environ.get("NETBOX_URL", "http://netbox:8080")
+    NETBOX_TOKEN = os.environ.get("NETBOX_TOKEN", "")
+
+    # ===========================================
+    # DEVICE DEFINITIONS
+    # ===========================================
+
+    DEVICES = [
+        # Production Cluster (10.10.0.0/24)
+        {
+            "name": "ruapehu",
+            "site": "prod-cluster",
+            "device_type": "proxmox-ve-host",
+            "role": "hypervisor",
+            "status": "active",
+            "interfaces": [
+                {"name": "vmbr0", "type": "bridge", "ip": "10.10.0.10/24"}
+            ],
+            "custom_fields": {
+                "api_endpoint": "https://10.10.0.10:8006",
+                "credentials_path": "/infrastructure/proxmox",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "opnsense",
+            "site": "prod-cluster",
+            "device_type": "opnsense-firewall",
+            "role": "router-firewall",
+            "status": "active",
+            "interfaces": [
+                {"name": "lan", "type": "1000base-t", "ip": "10.10.0.1/24"}
+            ],
+            "custom_fields": {
+                "api_endpoint": "https://10.10.0.1",
+                "credentials_path": "/infrastructure/opnsense",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "truenas",
+            "site": "prod-cluster",
+            "device_type": "truenas-scale",
+            "role": "storage",
+            "status": "active",
+            "interfaces": [
+                {"name": "eth0", "type": "1000base-t", "ip": "10.10.0.100/24"},
+                {"name": "eth1", "type": "10gbase-t", "ip": "10.40.0.10/24"}
+            ],
+            "custom_fields": {
+                "api_endpoint": "https://truenas.kernow.io",
+                "credentials_path": "/apps/truenas-media",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "talos-cp-01",
+            "site": "prod-cluster",
+            "device_type": "talos-control-plane",
+            "role": "k8s-control-plane",
+            "status": "active",
+            "interfaces": [
+                {"name": "eth0", "type": "virtual", "ip": "10.10.0.40/24"}
+            ],
+            "custom_fields": {
+                "k8s_cluster": "prod",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "talos-worker-01",
+            "site": "prod-cluster",
+            "device_type": "talos-worker",
+            "role": "k8s-worker",
+            "status": "active",
+            "interfaces": [
+                {"name": "eth0", "type": "virtual", "ip": "10.10.0.41/24"},
+                {"name": "eth1", "type": "virtual", "ip": "10.40.0.41/24"},
+                {"name": "eth2", "type": "virtual", "ip": "10.50.0.41/24"}
+            ],
+            "custom_fields": {
+                "k8s_cluster": "prod",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "talos-worker-02",
+            "site": "prod-cluster",
+            "device_type": "talos-worker",
+            "role": "k8s-worker",
+            "status": "active",
+            "interfaces": [
+                {"name": "eth0", "type": "virtual", "ip": "10.10.0.42/24"},
+                {"name": "eth1", "type": "virtual", "ip": "10.40.0.42/24"},
+                {"name": "eth2", "type": "virtual", "ip": "10.50.0.42/24"}
+            ],
+            "custom_fields": {
+                "k8s_cluster": "prod",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "talos-worker-03",
+            "site": "prod-cluster",
+            "device_type": "talos-worker",
+            "role": "k8s-worker",
+            "status": "active",
+            "interfaces": [
+                {"name": "eth0", "type": "virtual", "ip": "10.10.0.43/24"},
+                {"name": "eth1", "type": "virtual", "ip": "10.40.0.43/24"},
+                {"name": "eth2", "type": "virtual", "ip": "10.50.0.43/24"}
+            ],
+            "custom_fields": {
+                "k8s_cluster": "prod",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "plex-vm",
+            "site": "prod-cluster",
+            "device_type": "virtual-machine",
+            "role": "infrastructure",
+            "status": "active",
+            "interfaces": [
+                {"name": "eth0", "type": "virtual", "ip": "10.10.0.50/24"},
+                {"name": "eth1", "type": "virtual", "ip": "10.40.0.50/24"}
+            ],
+            "custom_fields": {
+                "discovery_source": "seed"
+            }
+        },
+
+        # Monitoring Cluster (10.30.0.0/24)
+        {
+            "name": "carrick",
+            "site": "monit-cluster",
+            "device_type": "proxmox-ve-host",
+            "role": "hypervisor",
+            "status": "active",
+            "interfaces": [
+                {"name": "vmbr0", "type": "bridge", "ip": "10.30.0.10/24"}
+            ],
+            "custom_fields": {
+                "api_endpoint": "https://10.30.0.10:8006",
+                "credentials_path": "/infrastructure/proxmox",
+                "discovery_source": "seed"
+            }
+        },
+        {
+            "name": "talos-monitor",
+            "site": "monit-cluster",
+            "device_type": "talos-control-plane",
+            "role": "k8s-control-plane",
+            "status": "active",
+            "interfaces": [
+                {"name": "eth0", "type": "virtual", "ip": "10.30.0.20/24"}
+            ],
+            "custom_fields": {
+                "k8s_cluster": "monit",
+                "discovery_source": "seed"
+            }
+        },
+
+        # Agentic Cluster (10.20.0.0/24)
+        {
+            "name": "um690l",
+            "site": "agentic-cluster",
+            "device_type": "um690l",
+            "role": "k8s-control-plane",
+            "status": "active",
+            "interfaces": [
+                {"name": "enp2s0", "type": "1000base-t", "ip": "10.20.0.40/24"}
+            ],
+            "custom_fields": {
+                "k8s_cluster": "agentic",
+                "discovery_source": "seed"
+            }
+        }
+    ]
+
+    # Interface type mapping
+    INTERFACE_TYPES = {
+        "1000base-t": "1000base-t",
+        "10gbase-t": "10gbase-t",
+        "virtual": "virtual",
+        "bridge": "bridge"
+    }
+
+    # ===========================================
+    # API HELPERS
+    # ===========================================
+
+    def netbox_api(endpoint: str, method: str = "GET", data: dict = None) -> dict:
+        """Make NetBox API call with error handling."""
+        url = f"{NETBOX_URL}/api{endpoint}"
+        headers = {
+            "Authorization": f"Token {NETBOX_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+
+        req = urllib.request.Request(url, headers=headers, method=method)
+        if data:
+            req.data = json.dumps(data).encode()
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()[:500]
+            logger.warning(f"NetBox API error: {e.code} - {body}")
+            return None
+        except Exception as e:
+            logger.error(f"NetBox API error: {e}")
+            return None
+
+    def get_id_by_slug(endpoint: str, slug: str) -> int:
+        """Get object ID by slug."""
+        result = netbox_api(f"{endpoint}?slug={slug}")
+        if result and result.get("results"):
+            return result["results"][0]["id"]
+        return None
+
+    def get_device_by_name(name: str) -> dict:
+        """Get device by name."""
+        result = netbox_api(f"/dcim/devices/?name={name}")
+        if result and result.get("results"):
+            return result["results"][0]
+        return None
+
+    # ===========================================
+    # DEVICE CREATION
+    # ===========================================
+
+    def create_device(device_def: dict) -> dict:
+        """Create or update a device with its interfaces and IPs."""
+        name = device_def["name"]
+
+        # Check if device exists
+        existing = get_device_by_name(name)
+        if existing:
+            logger.info(f"  Device exists: {name} (ID: {existing['id']})")
+            # Update custom fields
+            update_data = {"custom_fields": device_def.get("custom_fields", {})}
+            update_data["custom_fields"]["last_discovered"] = datetime.utcnow().isoformat()
+            netbox_api(f"/dcim/devices/{existing['id']}/", "PATCH", update_data)
+            return existing
+
+        # Get required IDs
+        site_id = get_id_by_slug("/dcim/sites/", device_def["site"])
+        device_type_id = get_id_by_slug("/dcim/device-types/", device_def["device_type"])
+        role_id = get_id_by_slug("/dcim/device-roles/", device_def["role"])
+
+        if not all([site_id, device_type_id, role_id]):
+            logger.error(f"  Missing required references for {name}")
+            logger.error(f"    site: {device_def['site']} -> {site_id}")
+            logger.error(f"    device_type: {device_def['device_type']} -> {device_type_id}")
+            logger.error(f"    role: {device_def['role']} -> {role_id}")
+            return None
+
+        # Create device
+        device_data = {
+            "name": name,
+            "site": site_id,
+            "device_type": device_type_id,
+            "role": role_id,
+            "status": device_def.get("status", "active"),
+            "custom_fields": device_def.get("custom_fields", {})
+        }
+        device_data["custom_fields"]["last_discovered"] = datetime.utcnow().isoformat()
+
+        device = netbox_api("/dcim/devices/", "POST", device_data)
+        if not device:
+            logger.error(f"  Failed to create device: {name}")
+            return None
+
+        logger.info(f"  Created device: {name} (ID: {device['id']})")
+        return device
+
+    def create_interfaces(device: dict, interfaces: list):
+        """Create interfaces for a device and assign IPs."""
+        device_id = device["id"]
+        device_name = device["name"]
+        primary_ip_id = None
+
+        for iface_def in interfaces:
+            iface_name = iface_def["name"]
+
+            # Check if interface exists
+            existing = netbox_api(f"/dcim/interfaces/?device_id={device_id}&name={iface_name}")
+            if existing and existing.get("results"):
+                iface = existing["results"][0]
+                logger.info(f"    Interface exists: {iface_name}")
+            else:
+                # Create interface
+                iface_data = {
+                    "device": device_id,
+                    "name": iface_name,
+                    "type": INTERFACE_TYPES.get(iface_def.get("type", "1000base-t"), "1000base-t")
+                }
+                iface = netbox_api("/dcim/interfaces/", "POST", iface_data)
+                if not iface:
+                    logger.error(f"    Failed to create interface: {iface_name}")
+                    continue
+                logger.info(f"    Created interface: {iface_name} (ID: {iface['id']})")
+
+            # Assign IP to interface
+            if iface_def.get("ip"):
+                ip_addr = iface_def["ip"]
+
+                # Check if IP exists
+                ip_check = netbox_api(f"/ipam/ip-addresses/?address={ip_addr.split('/')[0]}")
+                if ip_check and ip_check.get("results"):
+                    ip_obj = ip_check["results"][0]
+                    logger.info(f"      IP exists: {ip_addr}")
+                    # Update assignment if needed
+                    if not ip_obj.get("assigned_object_id"):
+                        netbox_api(f"/ipam/ip-addresses/{ip_obj['id']}/", "PATCH", {
+                            "assigned_object_type": "dcim.interface",
+                            "assigned_object_id": iface["id"]
+                        })
+                else:
+                    # Create IP
+                    ip_data = {
+                        "address": ip_addr,
+                        "status": "active",
+                        "assigned_object_type": "dcim.interface",
+                        "assigned_object_id": iface["id"]
+                    }
+                    ip_obj = netbox_api("/ipam/ip-addresses/", "POST", ip_data)
+                    if ip_obj:
+                        logger.info(f"      Created IP: {ip_addr} (ID: {ip_obj['id']})")
+                    else:
+                        logger.error(f"      Failed to create IP: {ip_addr}")
+                        continue
+
+                # Set first IP as primary
+                if ip_obj and primary_ip_id is None and ip_addr.startswith("10."):
+                    primary_ip_id = ip_obj["id"]
+
+        # Set primary IP on device
+        if primary_ip_id:
+            netbox_api(f"/dcim/devices/{device_id}/", "PATCH", {"primary_ip4": primary_ip_id})
+            logger.info(f"    Set primary IP for {device_name}")
+
+    # ===========================================
+    # MAIN
+    # ===========================================
+
+    def main():
+        logger.info("=" * 60)
+        logger.info("NetBox Device Seeding - Kernow Homelab")
+        logger.info("=" * 60)
+
+        if not NETBOX_TOKEN:
+            logger.error("NETBOX_TOKEN not set!")
+            return
+
+        # Test connection
+        result = netbox_api("/status/")
+        if not result:
+            logger.error("Cannot connect to NetBox API")
+            return
+        logger.info(f"Connected to NetBox {result.get('netbox-version', 'unknown')}")
+
+        # Create devices
+        for device_def in DEVICES:
+            logger.info(f"Processing device: {device_def['name']}")
+            device = create_device(device_def)
+            if device:
+                create_interfaces(device, device_def.get("interfaces", []))
+            time.sleep(0.2)  # Rate limiting
+
+        logger.info("=" * 60)
+        logger.info(f"Device seeding complete! Processed {len(DEVICES)} devices.")
+        logger.info("=" * 60)
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netbox-seed-devices
+  namespace: ai-platform
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-bootstrap
+          image: busybox:1.36
+          command: ['sh', '-c']
+          args:
+            - |
+              echo "Waiting for NetBox data model to be ready..."
+              # Wait for sites to exist (created by bootstrap)
+              for i in $(seq 1 60); do
+                SITES=$(wget -q -O- "http://netbox:8080/api/dcim/sites/" 2>/dev/null | grep -o '"count":[0-9]*' | cut -d: -f2)
+                if [ "$SITES" != "" ] && [ "$SITES" -ge 3 ]; then
+                  echo "NetBox has $SITES sites - ready!"
+                  exit 0
+                fi
+                echo "Attempt $i/60 - Waiting for bootstrap to complete (sites: ${SITES:-0})..."
+                sleep 5
+              done
+              echo "Timeout waiting for bootstrap"
+              exit 1
+      containers:
+        - name: seed
+          image: python:3.11-slim
+          command: ["python", "/app/seed_devices.py"]
+          env:
+            - name: NETBOX_URL
+              value: "http://netbox:8080"
+            - name: NETBOX_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: netbox-credentials
+                  key: API_TOKEN
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: code
+          configMap:
+            name: netbox-seed-devices-code

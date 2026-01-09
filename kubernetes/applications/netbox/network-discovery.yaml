@@ -535,73 +535,232 @@ data:
                     )
 
         # ==========================================
-        # NETBOX SYNC
+        # NETBOX SYNC - DEVICE CREATION
         # ==========================================
+
+        # Device type and role mapping based on discovered device_type
+        DEVICE_TYPE_MAP = {
+            "hypervisor": "proxmox-ve-host",
+            "server": "talos-worker",
+            "router": "opnsense-firewall",
+            "storage": "truenas-scale",
+            "network": "unifi-access-point",
+            "iot": "unknown-device",
+            "iot-hub": "unknown-device",
+            "workstation": "unknown-device",
+            "printer": "unknown-device",
+            "unknown": "unknown-device"
+        }
+
+        DEVICE_ROLE_MAP = {
+            "hypervisor": "hypervisor",
+            "server": "infrastructure",
+            "router": "router-firewall",
+            "storage": "storage",
+            "network": "access-point",
+            "iot": "iot-device",
+            "iot-hub": "iot-device",
+            "workstation": "workstation",
+            "printer": "infrastructure",
+            "unknown": "infrastructure"
+        }
+
+        def _get_id_by_slug(self, endpoint: str, slug: str) -> Optional[int]:
+            """Get object ID by slug."""
+            result = self._netbox_api(f"{endpoint}?slug={slug}")
+            if result and result.get("results"):
+                return result["results"][0]["id"]
+            return None
+
+        def _get_device_by_ip(self, ip: str) -> Optional[dict]:
+            """Find device by its primary IP."""
+            result = self._netbox_api(f"/ipam/ip-addresses/?address={ip}")
+            if result and result.get("results"):
+                ip_obj = result["results"][0]
+                if ip_obj.get("assigned_object") and ip_obj["assigned_object"].get("device"):
+                    device_id = ip_obj["assigned_object"]["device"]["id"]
+                    device = self._netbox_api(f"/dcim/devices/{device_id}/")
+                    return device
+            return None
+
+        def _get_device_by_name(self, name: str) -> Optional[dict]:
+            """Find device by name."""
+            result = self._netbox_api(f"/dcim/devices/?name={name}")
+            if result and result.get("results"):
+                return result["results"][0]
+            return None
+
         def sync_to_netbox(self):
-            """Sync discovered hosts to NetBox IPAM."""
-            logger.info(f"Syncing {len(self.hosts)} hosts to NetBox...")
+            """Sync discovered hosts to NetBox as proper Device objects."""
+            logger.info(f"Syncing {len(self.hosts)} hosts to NetBox as Devices...")
 
-            # Get existing prefixes
-            prefixes = self._netbox_api("/ipam/prefixes/")
-            prefix_map = {}
-            for p in prefixes.get("results", []):
-                prefix_map[p["prefix"]] = p["id"]
+            # Cache lookups for performance
+            site_cache = {}
+            sites = self._netbox_api("/dcim/sites/")
+            if sites and sites.get("results"):
+                for s in sites["results"]:
+                    site_cache[s["slug"]] = s["id"]
 
-            # Create prefixes if needed
-            for net in NETWORKS:
-                if net["cidr"] not in prefix_map:
-                    site_id = self._get_site_id(net["site"])
-                    result = self._netbox_api("/ipam/prefixes/", "POST", {
-                        "prefix": net["cidr"],
-                        "site": site_id,
-                        "status": "active",
-                        "description": f"{net['name']} network"
-                    })
-                    if result:
-                        prefix_map[net["cidr"]] = result["id"]
-                        logger.info(f"Created prefix: {net['cidr']}")
+            device_type_cache = {}
+            device_types = self._netbox_api("/dcim/device-types/")
+            if device_types and device_types.get("results"):
+                for dt in device_types["results"]:
+                    device_type_cache[dt["slug"]] = dt["id"]
 
-            # Sync each host as IP address
+            device_role_cache = {}
+            device_roles = self._netbox_api("/dcim/device-roles/")
+            if device_roles and device_roles.get("results"):
+                for dr in device_roles["results"]:
+                    device_role_cache[dr["slug"]] = dr["id"]
+
+            # Network to site mapping
+            network_site_map = {net["name"]: net["site"] for net in NETWORKS}
+
             synced = 0
+            skipped = 0
             for ip, host in self.hosts.items():
                 try:
-                    # Determine prefix
-                    prefix_id = None
-                    for net in NETWORKS:
-                        if ip.startswith(net["cidr"].rsplit(".", 1)[0]):
-                            prefix_id = prefix_map.get(net["cidr"])
-                            break
+                    # Skip if device already exists (by IP or hostname)
+                    existing_device = self._get_device_by_ip(ip)
+                    if not existing_device and host.hostname:
+                        existing_device = self._get_device_by_name(host.hostname)
 
-                    # Check if IP exists
-                    existing = self._netbox_api(f"/ipam/ip-addresses/?address={ip}")
+                    if existing_device:
+                        # Update last_discovered timestamp
+                        self._netbox_api(f"/dcim/devices/{existing_device['id']}/", "PATCH", {
+                            "custom_fields": {
+                                "last_discovered": host.last_seen,
+                                "discovery_source": f"{existing_device.get('custom_fields', {}).get('discovery_source', '')},{host.source}".strip(",")
+                            }
+                        })
+                        skipped += 1
+                        continue
 
-                    ip_data = {
-                        "address": f"{ip}/24",
+                    # Get site ID from network
+                    site_slug = network_site_map.get(host.network)
+                    site_id = site_cache.get(site_slug) if site_slug else None
+                    if not site_id:
+                        logger.warning(f"No site for {ip} (network: {host.network})")
+                        continue
+
+                    # Map device type and role
+                    dt_slug = self.DEVICE_TYPE_MAP.get(host.device_type, "unknown-device")
+                    role_slug = self.DEVICE_ROLE_MAP.get(host.device_type, "infrastructure")
+
+                    device_type_id = device_type_cache.get(dt_slug)
+                    role_id = device_role_cache.get(role_slug)
+
+                    if not device_type_id or not role_id:
+                        logger.warning(f"Missing type/role for {ip}: {dt_slug}/{role_slug}")
+                        continue
+
+                    # Generate device name
+                    device_name = host.hostname if host.hostname else f"discovered-{ip.replace('.', '-')}"
+
+                    # Create device
+                    device_data = {
+                        "name": device_name,
+                        "site": site_id,
+                        "device_type": device_type_id,
+                        "role": role_id,
                         "status": "active",
-                        "dns_name": host.hostname,
-                        "description": f"{host.device_type} | {host.vendor or ''} | {host.os_guess or ''}".strip(" |"),
                         "custom_fields": {
-                            "mac_address": host.mac,
-                            "discovered_services": json.dumps(host.services[:5]) if host.services else "",
-                            "last_discovered": host.last_seen,
-                            "discovery_source": host.source
+                            "mac_address": host.mac or "",
+                            "discovery_source": host.source,
+                            "last_discovered": host.last_seen
                         }
                     }
 
-                    if existing and existing.get("results"):
-                        # Update existing
-                        ip_id = existing["results"][0]["id"]
-                        self._netbox_api(f"/ipam/ip-addresses/{ip_id}/", "PATCH", ip_data)
-                    else:
-                        # Create new
-                        self._netbox_api("/ipam/ip-addresses/", "POST", ip_data)
+                    device = self._netbox_api("/dcim/devices/", "POST", device_data)
+                    if not device:
+                        logger.warning(f"Failed to create device for {ip}")
+                        continue
+
+                    logger.info(f"Created device: {device_name} (ID: {device['id']})")
+
+                    # Create interface
+                    iface_data = {
+                        "device": device["id"],
+                        "name": "eth0",
+                        "type": "1000base-t",
+                        "mac_address": host.mac if host.mac else None
+                    }
+                    if not host.mac:
+                        del iface_data["mac_address"]
+
+                    iface = self._netbox_api("/dcim/interfaces/", "POST", iface_data)
+                    if not iface:
+                        logger.warning(f"Failed to create interface for {device_name}")
+                        continue
+
+                    # Assign IP to interface
+                    ip_data = {
+                        "address": f"{ip}/24",
+                        "status": "active",
+                        "dns_name": host.hostname or "",
+                        "assigned_object_type": "dcim.interface",
+                        "assigned_object_id": iface["id"]
+                    }
+                    ip_obj = self._netbox_api("/ipam/ip-addresses/", "POST", ip_data)
+
+                    # Set as primary IP
+                    if ip_obj:
+                        self._netbox_api(f"/dcim/devices/{device['id']}/", "PATCH", {
+                            "primary_ip4": ip_obj["id"]
+                        })
 
                     synced += 1
 
                 except Exception as e:
                     logger.warning(f"Failed to sync {ip}: {e}")
 
-            logger.info(f"Synced {synced}/{len(self.hosts)} hosts to NetBox")
+            logger.info(f"Synced {synced} new devices, updated {skipped} existing to NetBox")
+
+            # Cleanup stale devices
+            self._cleanup_stale_devices()
+
+        def _cleanup_stale_devices(self, days_threshold: int = 7):
+            """Mark devices not seen recently as offline, delete very old ones."""
+            logger.info("Checking for stale devices...")
+            from datetime import datetime, timedelta
+
+            threshold = datetime.utcnow() - timedelta(days=days_threshold)
+            delete_threshold = datetime.utcnow() - timedelta(days=30)
+
+            # Get discovered devices (not seeded ones)
+            devices = self._netbox_api("/dcim/devices/?limit=500")
+            if not devices or not devices.get("results"):
+                return
+
+            stale_count = 0
+            deleted_count = 0
+
+            for device in devices["results"]:
+                cf = device.get("custom_fields", {})
+                source = cf.get("discovery_source", "")
+                last_seen = cf.get("last_discovered")
+
+                # Skip seed devices
+                if "seed" in source:
+                    continue
+
+                if last_seen:
+                    try:
+                        last_seen_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00").replace("+00:00", ""))
+                        if last_seen_dt < delete_threshold:
+                            # Delete very old devices
+                            self._netbox_api(f"/dcim/devices/{device['id']}/", "DELETE")
+                            logger.info(f"Deleted stale device: {device['name']}")
+                            deleted_count += 1
+                        elif last_seen_dt < threshold and device.get("status", {}).get("value") != "offline":
+                            # Mark as offline
+                            self._netbox_api(f"/dcim/devices/{device['id']}/", "PATCH", {"status": "offline"})
+                            logger.info(f"Marked offline: {device['name']}")
+                            stale_count += 1
+                    except Exception as e:
+                        logger.warning(f"Error processing {device['name']}: {e}")
+
+            logger.info(f"Cleanup: {stale_count} marked offline, {deleted_count} deleted")
 
         def _netbox_api(self, endpoint: str, method: str = "GET", data: dict = None):
             """Make NetBox API call."""
