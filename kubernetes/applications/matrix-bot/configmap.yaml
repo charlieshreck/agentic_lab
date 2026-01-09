@@ -68,11 +68,18 @@ data:
         async def on_invite(self, room, event):
             """Auto-join rooms when invited."""
             if event.membership == "invite":
-                result = await self.client.join(room.room_id)
-                if isinstance(result, JoinError):
-                    logger.error(f"Failed to join {room.room_id}: {result}")
-                else:
-                    logger.info(f"Joined room {room.room_id}")
+                try:
+                    # Use direct HTTP call for Conduit compatibility
+                    # Conduit requires proper JSON body, nio sends empty body
+                    url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/join/{room.room_id}"
+                    headers = {"Authorization": f"Bearer {self.client.access_token}"}
+                    response = await self.http_client.post(url, headers=headers, json={})
+                    if response.status_code == 200:
+                        logger.info(f"Joined room {room.room_id}")
+                    else:
+                        logger.error(f"Failed to join {room.room_id}: {response.status_code} {response.text}")
+                except Exception as e:
+                    logger.error(f"Exception joining {room.room_id}: {e}")
 
         async def on_message(self, room, event):
             """Handle incoming messages."""
