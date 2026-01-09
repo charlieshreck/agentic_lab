@@ -75,7 +75,7 @@ spec:
           value: "*"
         # Superuser Configuration
         - name: SUPERUSER_NAME
-          value: admin
+          value: chaz
         - name: SUPERUSER_EMAIL
           valueFrom:
             secretKeyRef:
