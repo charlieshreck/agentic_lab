@@ -45,3 +45,8 @@ data:
 
     # Logging
     log = "info"
+
+    # Well-known configuration for external clients
+    # This tells clients to use the external URL, not the internal server_name
+    [global.well_known]
+    client = "https://matrix.kernow.io"
