@@ -47,14 +47,14 @@ data:
             "type": "text",
             "label": "MAC Address",
             "description": "Device MAC address",
-            "object_types": ["dcim.device", "dcim.interface"]
+            "object_types": ["dcim.device", "dcim.interface", "ipam.ipaddress"]
         },
         {
             "name": "credentials_path",
             "type": "text",
             "label": "Credentials Path",
             "description": "Infisical path for credentials",
-            "object_types": ["dcim.device", "ipam.service"]
+            "object_types": ["dcim.device", "ipam.service", "virtualization.virtualmachine"]
         },
         {
             "name": "api_endpoint",
