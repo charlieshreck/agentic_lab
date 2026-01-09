@@ -161,21 +161,22 @@ data:
                 await self.process_approval(room.room_id, thread_id, approved=False)
 
         async def query_gemini(self, message: str, context: dict, history: list = None) -> str:
-            """Query Gemini via LangGraph."""
+            """Query Gemini via LangGraph /query endpoint."""
             try:
                 payload = {
-                    "message": message,
-                    "context": context,
-                    "history": history or [],
+                    "query": message,
+                    "context": context or {},
                     "source": "matrix_bot"
                 }
                 response = await self.http_client.post(
-                    f"{LANGGRAPH_URL}/chat",
+                    f"{LANGGRAPH_URL}/query",
                     json=payload
                 )
                 if response.status_code == 200:
-                    return response.json().get("response", "No response from Gemini")
+                    result = response.json()
+                    return result.get("response", result.get("answer", "No response from Gemini"))
                 else:
+                    logger.error(f"Gemini query failed: {response.status_code} - {response.text}")
                     return f"Error querying Gemini: {response.status_code}"
             except Exception as e:
                 logger.error(f"Error querying Gemini: {e}")
