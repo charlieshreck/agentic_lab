@@ -39,6 +39,8 @@ spec:
           value: "http://langgraph:8000"
         - name: QDRANT_URL
           value: "http://qdrant:6333"
+        - name: ALERT_ROOM_ID
+          value: "!P3BHXqELzL12n7uDOd:agentic.local"
         ports:
         - containerPort: 8000
           name: http
