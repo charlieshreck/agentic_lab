@@ -11,7 +11,7 @@ data:
     Alerting Pipeline - Polls MCP servers and raises AI alerts.
 
     This service periodically checks infrastructure health via MCP servers
-    and raises alerts to the Telegram service when issues are detected.
+    and raises alerts to the Matrix bot when issues are detected.
     """
     import os
     import logging
@@ -28,7 +28,7 @@ data:
     logger = logging.getLogger(__name__)
 
     # Service URLs
-    TELEGRAM_SERVICE_URL = os.environ.get("TELEGRAM_SERVICE_URL", "http://telegram-service:8000")
+    MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
     LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
@@ -351,7 +351,7 @@ data:
 
     async def raise_alert(name: str, severity: str, description: str,
                           source: str, suggested_fix: str = None, context: str = None):
-        """Raise an alert via the Telegram service (fallback/direct alerts)."""
+        """Raise an alert via the Matrix bot service."""
         # Check cooldown
         alert_key = f"{source}:{name}"
         if alert_key in raised_alerts:
@@ -364,11 +364,11 @@ data:
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 response = await client.post(
-                    f"{TELEGRAM_SERVICE_URL}/alert/raise",
+                    f"{MATRIX_BOT_URL}/alert",
                     json={
-                        "name": name,
+                        "title": name,
                         "severity": severity,
-                        "description": description,
+                        "message": description,
                         "suggested_fix": suggested_fix,
                         "source": source,
                         "context": context
@@ -643,8 +643,8 @@ spec:
           env:
             - name: PORT
               value: "8000"
-            - name: TELEGRAM_SERVICE_URL
-              value: "http://telegram-service:8000"
+            - name: MATRIX_BOT_URL
+              value: "http://matrix-bot:8000"
             - name: LANGGRAPH_URL
               value: "http://langgraph:8000"
             - name: UNIFI_MCP_URL
