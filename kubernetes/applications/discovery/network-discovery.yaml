@@ -32,11 +32,11 @@ data:
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
 
-    # MCP endpoints (running in monitoring cluster)
-    MCP_OPNSENSE_URL = os.environ.get("MCP_OPNSENSE_URL", "http://10.30.0.20:31082")
-    MCP_UNIFI_URL = os.environ.get("MCP_UNIFI_URL", "http://10.30.0.20:31083")
-    MCP_PROXMOX_URL = os.environ.get("MCP_PROXMOX_URL", "http://10.30.0.20:31084")
-    MCP_TRUENAS_URL = os.environ.get("MCP_TRUENAS_URL", "http://10.30.0.20:31085")
+    # MCP endpoints (running in ai-platform namespace)
+    MCP_OPNSENSE_URL = os.environ.get("MCP_OPNSENSE_URL", "http://opnsense-mcp:8000")
+    MCP_UNIFI_URL = os.environ.get("MCP_UNIFI_URL", "http://unifi-mcp:8000")
+    MCP_PROXMOX_URL = os.environ.get("MCP_PROXMOX_URL", "http://proxmox-mcp:8000")
+    MCP_TRUENAS_URL = os.environ.get("MCP_TRUENAS_URL", "http://truenas-mcp:8000")
 
     SCAN_NETWORKS = os.environ.get("SCAN_NETWORKS", "10.10.0.0/24,10.20.0.0/24,10.30.0.0/24").split(",")
 
@@ -125,18 +125,18 @@ data:
             return response.status_code == 200
 
 
-    async def call_mcp(base_url: str, tool: str, params: dict = None) -> Optional[dict]:
-        """Call an MCP server tool."""
+    async def call_rest_api(base_url: str, endpoint: str, method: str = "GET", params: dict = None) -> Optional[dict]:
+        """Call an MCP REST API endpoint."""
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{base_url}/tools/{tool}",
-                    json=params or {}
-                )
+                if method == "GET":
+                    response = await client.get(f"{base_url}{endpoint}")
+                else:
+                    response = await client.post(f"{base_url}{endpoint}", json=params or {})
                 if response.status_code == 200:
                     return response.json()
         except Exception as e:
-            logger.warning(f"MCP call failed {base_url}/{tool}: {e}")
+            logger.warning(f"MCP call failed {base_url}{endpoint}: {e}")
         return None
 
 
@@ -144,12 +144,12 @@ data:
         """Get devices from OPNsense DHCP/ARP."""
         entities = []
 
-        # Get DHCP leases
-        leases = await call_mcp(MCP_OPNSENSE_URL, "get_dhcp_leases")
+        # Get DHCP leases via REST API
+        leases = await call_rest_api(MCP_OPNSENSE_URL, "/api/dhcp/leases")
         if leases:
-            for lease in leases.get("rows", []):
+            for lease in leases.get("data", leases.get("rows", [])):
                 entities.append({
-                    "ip": lease.get("address", ""),
+                    "ip": lease.get("address", lease.get("ip", "")),
                     "mac": lease.get("mac", "").upper(),
                     "hostname": lease.get("hostname", ""),
                     "discovered_via": "opnsense_dhcp"
@@ -163,8 +163,9 @@ data:
         """Get devices from UniFi controller."""
         entities = []
 
-        # Get clients
-        clients = await call_mcp(MCP_UNIFI_URL, "list_clients")
+        # Get clients via REST API
+        result = await call_rest_api(MCP_UNIFI_URL, "/api/clients")
+        clients = result.get("data", []) if result else []
         if clients:
             for client in clients if isinstance(clients, list) else []:
                 entities.append({
@@ -176,8 +177,9 @@ data:
                     "discovered_via": "unifi"
                 })
 
-        # Get network devices (APs, switches)
-        devices = await call_mcp(MCP_UNIFI_URL, "list_devices")
+        # Get network devices (APs, switches) via REST API
+        result = await call_rest_api(MCP_UNIFI_URL, "/api/devices")
+        devices = result.get("data", []) if result else []
         if devices:
             for device in devices if isinstance(devices, list) else []:
                 dev_type = device.get("type", "unknown")
@@ -213,7 +215,8 @@ data:
         """Get VMs and containers from Proxmox."""
         entities = []
 
-        vms = await call_mcp(MCP_PROXMOX_URL, "list_vms")
+        result = await call_rest_api(MCP_PROXMOX_URL, "/api/vms")
+        vms = result.get("data", []) if result else []
         if vms:
             for vm in vms if isinstance(vms, list) else []:
                 # Try to get IP from QEMU guest agent
@@ -237,7 +240,8 @@ data:
         """Get TrueNAS system info."""
         entities = []
 
-        system = await call_mcp(MCP_TRUENAS_URL, "get_system_info")
+        result = await call_rest_api(MCP_TRUENAS_URL, "/api/system")
+        system = result.get("data", result) if result else {}
         if system:
             entities.append({
                 "ip": os.environ.get("TRUENAS_IP", "10.40.0.10"),

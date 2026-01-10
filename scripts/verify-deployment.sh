@@ -46,7 +46,6 @@ echo ""
 echo "=== MCP Servers ==="
 check_service "Knowledge MCP" "http://knowledge-mcp:8000" "/health" || true
 check_service "Infrastructure MCP" "http://infrastructure-mcp:8000" "/health" || true
-check_service "NetBox MCP" "http://netbox-mcp:8000" "/health" || true
 check_service "Coroot MCP" "http://coroot-mcp:8000" "/health" || true
 
 # Matrix Services

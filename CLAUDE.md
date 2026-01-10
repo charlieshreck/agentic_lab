@@ -402,8 +402,6 @@ Machine Identity credentials are stored securely for programmatic access to Infi
 │   └── (OAuth tokens)        # Claude Agent service credentials
 ├── matrix/
 │   └── MATRIX_PASSWORD       # Matrix bot user password
-├── netbox/
-│   └── NETBOX_API_TOKEN      # NetBox MCP access
 └── infisical/
     └── (internal)            # Operator credentials
 ```

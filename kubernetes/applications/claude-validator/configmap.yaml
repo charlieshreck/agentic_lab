@@ -245,7 +245,7 @@ data:
 
     Available data sources:
     - Qdrant collections: runbooks, decisions, validations
-    - MCPs: infrastructure-mcp, netbox-mcp, coroot-mcp, knowledge-mcp
+    - MCPs: infrastructure-mcp, coroot-mcp, knowledge-mcp
 
     Generate markdown for .claude/commands/[name].md
     Include clear instructions for querying data and formatting output.

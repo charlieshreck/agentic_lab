@@ -43,7 +43,6 @@ data:
     # MCP servers
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
-    NETBOX_MCP_URL = os.environ.get("NETBOX_MCP_URL", "http://netbox-mcp:8000")
     COROOT_MCP_URL = os.environ.get("COROOT_MCP_URL", "http://coroot-mcp:8000")
 
     # Matrix bot for notifications (replaces Telegram)
@@ -791,58 +790,56 @@ data:
 
     async def discover_service(service_name: str) -> dict:
         """
-        Discover service endpoint and credentials from NetBox CMDB.
+        Discover service endpoint and credentials from Qdrant entities collection.
         Use this before calling infrastructure services to get their endpoints.
         """
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
-                # Call NetBox MCP to get service endpoint
+                # Search entities collection in Qdrant
                 response = await client.post(
-                    NETBOX_MCP_URL + "/mcp",
+                    QDRANT_URL + "/collections/entities/points/scroll",
                     json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {
-                            "name": "netbox_get_service_endpoint",
-                            "arguments": {"name": service_name}
-                        }
+                        "limit": 100,
+                        "with_payload": True,
+                        "filter": {
+                            "should": [
+                                {"key": "hostname", "match": {"text": service_name}},
+                                {"key": "type", "match": {"text": service_name}}
+                            ]
+                        } if service_name != "all" else None
                     }
                 )
                 if response.status_code == 200:
                     result = response.json()
-                    content = result.get("result", {}).get("content", [])
-                    if content and len(content) > 0:
-                        text = content[0].get("text", "{}")
-                        return json.loads(text)
+                    points = result.get("result", {}).get("points", [])
+                    return {"entities": [p.get("payload", {}) for p in points]}
                 return {}
             except Exception as e:
                 logger.warning(f"Service discovery failed for {service_name}: {e}")
                 return {}
 
     async def get_credentials_path(service_name: str) -> str:
-        """Get Infisical credentials path for a service from NetBox."""
+        """Get Infisical credentials path for a service from Qdrant device_types."""
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
+                # Search device_types collection for credentials path
                 response = await client.post(
-                    NETBOX_MCP_URL + "/mcp",
+                    QDRANT_URL + "/collections/device_types/points/scroll",
                     json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {
-                            "name": "netbox_get_credentials_path",
-                            "arguments": {"name": service_name}
+                        "limit": 10,
+                        "with_payload": True,
+                        "filter": {
+                            "must": [
+                                {"key": "name", "match": {"text": service_name}}
+                            ]
                         }
                     }
                 )
                 if response.status_code == 200:
                     result = response.json()
-                    content = result.get("result", {}).get("content", [])
-                    if content and len(content) > 0:
-                        text = content[0].get("text", "{}")
-                        data = json.loads(text)
-                        return data.get("credentials_path", "")
+                    points = result.get("result", {}).get("points", [])
+                    if points:
+                        return points[0].get("payload", {}).get("default_credentials_path", "")
                 return ""
             except Exception as e:
                 logger.warning(f"Credentials path lookup failed for {service_name}: {e}")
@@ -918,12 +915,12 @@ data:
         except:
             context["documentation"] = []
 
-        # Get service inventory from NetBox
+        # Get entity inventory from Qdrant
         try:
             inventory = await discover_service("all")
-            context["service_inventory"] = inventory
+            context["entity_inventory"] = inventory
         except:
-            context["service_inventory"] = {}
+            context["entity_inventory"] = {}
 
         return context
 
@@ -1934,13 +1931,17 @@ data:
                     logger.warning(f"Failed to get cluster context: {e}")
                     errors.append(f"Failed to connect to infrastructure monitoring: {str(e)}")
 
-            # Service discovery context (NetBox MCP may need REST API update too)
-            if any(kw in prompt_lower for kw in ["service", "server", "ip", "host"]):
+            # Entity discovery context from Qdrant
+            if any(kw in prompt_lower for kw in ["service", "server", "ip", "host", "device"]):
                 try:
-                    resp = await client.get("http://netbox-mcp:8000/api/services")
+                    resp = await client.post(
+                        QDRANT_URL + "/collections/entities/points/scroll",
+                        json={"limit": 50, "with_payload": True}
+                    )
                     if resp.status_code == 200:
                         data = resp.json()
-                        context["services"] = data.get("data", [])
+                        points = data.get("result", {}).get("points", [])
+                        context["entities"] = [p.get("payload", {}) for p in points]
                 except:
                     pass
 
@@ -2172,8 +2173,6 @@ spec:
               value: "http://knowledge-mcp:8000"
             - name: INFRASTRUCTURE_MCP_URL
               value: "http://infrastructure-mcp:8000"
-            - name: NETBOX_MCP_URL
-              value: "http://netbox-mcp:8000"
             - name: COROOT_MCP_URL
               value: "http://coroot-mcp:8000"
             # Matrix bot (replaces Telegram)

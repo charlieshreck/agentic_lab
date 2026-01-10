@@ -19,7 +19,6 @@ Validation of all 14 MCP servers revealed significant inconsistencies in impleme
 | infisical-mcp | ✅ `mcp.http_app()` | ❌ None | ❌ 404 | Partial | Missing REST wrappers |
 | infrastructure-mcp | ❌ **Not started** | ⚠️ `/health`, `/execute` | ✅ 200 | **Broken** | Runs FastAPI, no MCP |
 | knowledge-mcp | ✅ `mcp.run(sse)` | ❌ None | ❌ 404 | Partial | Missing REST wrappers |
-| netbox-mcp | ✅ `mcp.http_app()` | ❌ None | ❌ 404 | Partial | Missing REST wrappers |
 | opnsense-mcp | ✅ `mcp.http_app()` | ❌ None | ❌ 404 | Partial | Missing REST wrappers |
 | proxmox-mcp | ✅ `mcp.http_app()` | ❌ None | ❌ 404 | Partial | Missing REST wrappers |
 | truenas-mcp | ✅ `mcp.http_app()` | ❌ None | ❌ 404 | Partial | Missing REST wrappers |
@@ -180,7 +179,6 @@ Each MCP needs REST endpoints that mirror key MCP tools:
 | arr-suite-mcp | `/health`, `/api/shows`, `/api/movies`, `/api/queue` |
 | knowledge-mcp | `/health`, `/api/search`, `/api/documentation` |
 | home-assistant-mcp | `/health`, `/api/entities`, `/api/lights` |
-| netbox-mcp | `/health`, `/api/services`, `/api/devices` |
 | proxmox-mcp | `/health`, `/api/nodes`, `/api/vms` |
 | truenas-mcp | `/health`, `/api/pools`, `/api/datasets` |
 | adguard-mcp | `/health`, `/api/stats`, `/api/status` |
@@ -279,15 +277,14 @@ if __name__ == "__main__":
 | 3 | unifi-mcp | Low | High - SSL fix only |
 | 4 | arr-suite-mcp | Medium | High - Media queries |
 | 5 | knowledge-mcp | Medium | High - RAG context |
-| 6 | netbox-mcp | Medium | Medium - Service discovery |
-| 7 | proxmox-mcp | Medium | Medium - VM context |
-| 8 | truenas-mcp | Medium | Medium - Storage context |
-| 9 | home-assistant-mcp | Medium | Medium - HA context |
-| 10 | adguard-mcp | Low | Low - DNS stats |
-| 11 | cloudflare-mcp | Low | Low - DNS/tunnels |
-| 12 | opnsense-mcp | Low | Low - Firewall |
-| 13 | homepage-mcp | Low | Low - Dashboard |
-| 14 | infisical-mcp | Low | Low - Secrets |
+| 6 | proxmox-mcp | Medium | Medium - VM context |
+| 7 | truenas-mcp | Medium | Medium - Storage context |
+| 8 | home-assistant-mcp | Medium | Medium - HA context |
+| 9 | adguard-mcp | Low | Low - DNS stats |
+| 10 | cloudflare-mcp | Low | Low - DNS/tunnels |
+| 11 | opnsense-mcp | Low | Low - Firewall |
+| 12 | homepage-mcp | Low | Low - Dashboard |
+| 13 | infisical-mcp | Low | Low - Secrets |
 
 ---
 
