@@ -37,6 +37,11 @@ spec:
             secretKeyRef:
               name: gemini-credentials
               key: GEMINI_API_KEY
+        - name: GEMINI_API_KEY_2
+          valueFrom:
+            secretKeyRef:
+              name: gemini-credentials
+              key: GEMINI_API_KEY_2
         resources:
           requests:
             memory: "256Mi"
