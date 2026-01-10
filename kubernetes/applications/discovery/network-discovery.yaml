@@ -530,13 +530,13 @@ spec:
             - name: LITELLM_URL
               value: "http://litellm:4000"
             - name: MCP_OPNSENSE_URL
-              value: "http://10.30.0.20:31082"
+              value: "http://opnsense-mcp.ai-platform.svc.cluster.local:8000"
             - name: MCP_UNIFI_URL
-              value: "http://10.30.0.20:31083"
+              value: "http://unifi-mcp.ai-platform.svc.cluster.local:8000"
             - name: MCP_PROXMOX_URL
-              value: "http://10.30.0.20:31084"
+              value: "http://proxmox-mcp.ai-platform.svc.cluster.local:8000"
             - name: MCP_TRUENAS_URL
-              value: "http://10.30.0.20:31085"
+              value: "http://truenas-mcp.ai-platform.svc.cluster.local:8000"
             - name: TRUENAS_IP
               value: "10.40.0.10"
             - name: SCAN_NETWORKS
