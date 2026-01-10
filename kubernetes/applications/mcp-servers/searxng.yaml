@@ -30,7 +30,7 @@ data:
       image_proxy: false
       http_protocol_version: "1.1"
       method: "GET"
-      secret_key: "ultrasecretkey"
+      secret_key: "agentic-platform-searxng-k8s-7f3d9e2a1b4c"
 
     ui:
       static_use_hash: true
@@ -103,6 +103,15 @@ spec:
       labels:
         app: searxng
     spec:
+      initContainers:
+        - name: copy-config
+          image: busybox:latest
+          command: ['sh', '-c', 'cp /config-ro/settings.yml /etc/searxng/settings.yml && chown 1000:1000 /etc/searxng/settings.yml']
+          volumeMounts:
+            - name: config-ro
+              mountPath: /config-ro
+            - name: config
+              mountPath: /etc/searxng
       containers:
         - name: searxng
           image: searxng/searxng:latest
@@ -114,8 +123,7 @@ spec:
               value: "http://searxng.ai-platform.svc.cluster.local:8080"
           volumeMounts:
             - name: config
-              mountPath: /etc/searxng/settings.yml
-              subPath: settings.yml
+              mountPath: /etc/searxng
           resources:
             requests:
               memory: "128Mi"
@@ -136,9 +144,11 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
       volumes:
-        - name: config
+        - name: config-ro
           configMap:
             name: searxng-config
+        - name: config
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
