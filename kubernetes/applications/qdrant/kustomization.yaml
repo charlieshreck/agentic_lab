@@ -7,4 +7,9 @@ resources:
   - namespace.yaml
   - statefulset.yaml
   - service.yaml
-  - init-collections-job.yaml
+  # NOTE: Seed/init Jobs are NOT included here.
+  # They were removed to prevent ArgoCD recreation loops.
+  # Jobs are immutable - ArgoCD can't update them, so it deletes/recreates every sync.
+  # The seed data is already in Qdrant. To re-seed, run manually:
+  #   kubectl apply -f init-collections-job.yaml
+  #   kubectl apply -f device-types-seed.yaml
