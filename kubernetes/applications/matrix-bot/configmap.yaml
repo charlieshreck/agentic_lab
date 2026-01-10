@@ -108,12 +108,13 @@ data:
                     logger.info("Ignoring own message")
                     return
 
-                # Check if this is in a thread
+                # Check if this is a reply to another message (user clicked "reply")
                 relates_to = event.source.get("content", {}).get("m.relates_to", {})
-                thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+                reply_to = relates_to.get("m.in_reply_to", {}).get("event_id")
 
-                if thread_id:
-                    await self.handle_thread_conversation(room, event, thread_id)
+                if reply_to:
+                    # User replied to a message - include that message as context
+                    await self.handle_reply_with_context(room, event, reply_to)
                 else:
                     await self.handle_command(room, event)
             except Exception as e:
@@ -199,24 +200,65 @@ data:
             logger.info(f"Sending response: {response[:100] if response else 'None'}...")
             await self.send_message(room.room_id, response)
 
-        async def handle_thread_conversation(self, room, event, thread_id):
-            """Full conversational interaction in thread."""
-            # Get or create conversation history
-            history = self.gemini_conversations.get(thread_id, [])
-            history.append({"role": "user", "content": event.body})
+        async def handle_reply_with_context(self, room, event, reply_to_event_id):
+            """Handle when user replies to a message - includes original as context."""
+            import re
+            logger.info(f"Reply detected to event: {reply_to_event_id}")
 
-            # Get thread context
-            context = await self.get_thread_context(thread_id)
+            # Get the original message being replied to (includes sender info)
+            original_content, original_sender = await self.get_original_message(room.room_id, reply_to_event_id)
 
-            # Query Gemini via LangGraph
-            response = await self.query_gemini(event.body, context, history)
+            # Extract user's actual message (Matrix replies include quoted text we need to strip)
+            user_message = event.body
+            # Matrix reply format: "> <@user:server> original message\n\nactual reply"
+            if user_message.startswith(">"):
+                # Find the actual reply after the quoted section
+                parts = user_message.split("\n\n", 1)
+                if len(parts) > 1:
+                    user_message = parts[1].strip()
 
-            # Update history
-            history.append({"role": "assistant", "content": response})
-            self.gemini_conversations[thread_id] = history
+            # Check for trigger word in the reply
+            message_lower = user_message.lower()
+            triggers = [
+                r'^g[,:\s]+',
+                r'^gemini[,:\s]+',
+                r'^hey g[,:\s]*',
+                r'^yo g[,:\s]*',
+                r'^ok g[,:\s]*',
+            ]
 
-            # Reply in thread
-            await self.send_thread_reply(room.room_id, thread_id, response)
+            triggered = False
+            query = user_message
+            for pattern in triggers:
+                match = re.match(pattern, message_lower)
+                if match:
+                    triggered = True
+                    query = user_message[match.end():].strip()
+                    break
+
+            # Only respond if:
+            # 1. User used a trigger word, OR
+            # 2. User is replying to a bot message (alert response)
+            is_reply_to_bot = original_sender == self.client.user_id
+
+            if not triggered and not is_reply_to_bot:
+                logger.info("Reply not addressed to bot and not replying to bot message, ignoring")
+                return
+
+            if not query:
+                query = user_message  # Use full message if no trigger found
+
+            # Build context with original message
+            context_prompt = f"The user is replying to this message:\n\n---\n{original_content}\n---\n\nUser's reply: {query}"
+
+            logger.info(f"Reply with context - Original: {original_content[:80] if original_content else 'None'}...")
+            logger.info(f"User query: {query[:80]}...")
+
+            # Query Gemini with the context
+            response = await self.query_gemini(context_prompt, {"is_reply": True}, [])
+
+            # Send response back to the room
+            await self.send_message(room.room_id, response)
 
         async def on_reaction(self, room, event):
             """Handle reaction-based approvals."""
@@ -313,8 +355,30 @@ data:
 
         async def get_thread_context(self, thread_id: str) -> dict:
             """Get context for a thread (incident details, etc)."""
-            # TODO: Look up thread_id in Qdrant to get incident context
             return {"thread_id": thread_id}
+
+        async def get_original_message(self, room_id: str, event_id: str) -> tuple:
+            """Fetch the original message content and sender."""
+            try:
+                # Use Matrix client API to get the event
+                url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/rooms/{room_id}/event/{event_id}"
+                headers = {"Authorization": f"Bearer {self.client.access_token}"}
+                response = await self.http_client.get(url, headers=headers)
+
+                if response.status_code == 200:
+                    event_data = response.json()
+                    content = event_data.get("content", {})
+                    sender = event_data.get("sender", "")
+                    # Get plain text body
+                    body = content.get("body", "")
+                    logger.info(f"Fetched original message from {sender}: {body[:100]}...")
+                    return body, sender
+                else:
+                    logger.warning(f"Failed to fetch event {event_id}: {response.status_code}")
+                    return None, None
+            except Exception as e:
+                logger.error(f"Error fetching original message: {e}")
+                return None, None
 
         async def process_approval(self, room_id: str, thread_id: str, approved: bool):
             """Process an approval reaction."""
