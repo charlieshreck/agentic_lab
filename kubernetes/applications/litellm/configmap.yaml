@@ -17,7 +17,7 @@ data:
       # Gemini Flash - FREE TIER (use this for everything)
       - model_name: gemini/gemini-2.0-flash
         litellm_params:
-          model: gemini/gemini-2.0-flash
+          model: gemini/gemini-2.5-flash
           api_key: os.environ/GEMINI_API_KEY
 
       # Embedding model - FREE TIER
@@ -26,15 +26,15 @@ data:
           model: gemini/text-embedding-004
           api_key: os.environ/GEMINI_API_KEY
 
-      # Aliases all point to 2.0-flash
+      # Aliases all point to 2.5-flash (separate quota)
       - model_name: gemini-pro
         litellm_params:
-          model: gemini/gemini-2.0-flash
+          model: gemini/gemini-2.5-flash
           api_key: os.environ/GEMINI_API_KEY
 
       - model_name: gemini/gemini-2.0-pro
         litellm_params:
-          model: gemini/gemini-2.0-flash
+          model: gemini/gemini-2.5-flash
           api_key: os.environ/GEMINI_API_KEY
 
     # Router settings - NO RETRIES to prevent cost runaway
