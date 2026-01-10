@@ -21,3 +21,7 @@ resources:
   - infisical-mcp.yaml
   - netbox-mcp.yaml
   - coroot-mcp.yaml
+  # Web search and browser automation
+  - searxng.yaml
+  - web-search-mcp.yaml
+  - browser-automation-mcp.yaml

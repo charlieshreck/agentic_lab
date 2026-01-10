@@ -1,0 +1,156 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: searxng-config
+  namespace: ai-platform
+  labels:
+    app: searxng
+data:
+  settings.yml: |
+    use_default_settings: true
+
+    general:
+      debug: false
+      instance_name: "AI Platform Search"
+      privacypolicy_url: false
+      donation_url: false
+      contact_url: false
+      enable_metrics: false
+
+    search:
+      safe_search: 0
+      autocomplete: ""
+      default_lang: "en"
+      formats:
+        - html
+        - json
+
+    server:
+      limiter: false
+      image_proxy: false
+      http_protocol_version: "1.1"
+      method: "GET"
+      secret_key: "ultrasecretkey"
+
+    ui:
+      static_use_hash: true
+      default_theme: simple
+      results_on_new_tab: false
+      query_in_title: true
+
+    outgoing:
+      request_timeout: 10.0
+      max_request_timeout: 30.0
+      pool_connections: 100
+      pool_maxsize: 20
+
+    engines:
+      - name: google
+        engine: google
+        shortcut: g
+        disabled: false
+      - name: duckduckgo
+        engine: duckduckgo
+        shortcut: ddg
+        disabled: false
+      - name: bing
+        engine: bing
+        shortcut: b
+        disabled: false
+      - name: wikipedia
+        engine: wikipedia
+        shortcut: w
+        disabled: false
+      - name: wikidata
+        engine: wikidata
+        shortcut: wd
+        disabled: false
+      - name: github
+        engine: github
+        shortcut: gh
+        disabled: false
+      - name: stackoverflow
+        engine: stackoverflow
+        shortcut: so
+        disabled: false
+      - name: reddit
+        engine: reddit
+        shortcut: r
+        disabled: false
+      - name: brave
+        engine: brave
+        shortcut: br
+        disabled: false
+      - name: qwant
+        engine: qwant
+        shortcut: qw
+        disabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searxng
+  namespace: ai-platform
+  labels:
+    app: searxng
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: searxng
+  template:
+    metadata:
+      labels:
+        app: searxng
+    spec:
+      containers:
+        - name: searxng
+          image: searxng/searxng:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: SEARXNG_BASE_URL
+              value: "http://searxng.ai-platform.svc.cluster.local:8080"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/searxng/settings.yml
+              subPath: settings.yml
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: searxng-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: searxng
+  namespace: ai-platform
+  labels:
+    app: searxng
+spec:
+  selector:
+    app: searxng
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

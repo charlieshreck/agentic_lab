@@ -72,6 +72,8 @@ When messaging via Matrix:
 - `netbox-mcp`: Service inventory, network topology, IPAM
 - `coroot-mcp`: Metrics, anomalies, service dependencies
 - `knowledge-mcp`: Qdrant queries for runbooks, decisions, docs
+- `web-search-mcp`: Web search (aggregates Google, Bing, DuckDuckGo via SearXNG), page content fetching, news/image search
+- `browser-automation-mcp`: Headless browser control (Playwright) - navigate, screenshot, click, type, evaluate JavaScript, fill forms
 
 ### Qdrant Collections
 - `runbooks`: Operational procedures

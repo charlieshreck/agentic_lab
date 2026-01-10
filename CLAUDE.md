@@ -45,8 +45,19 @@ This repository contains the infrastructure and application code for a **self-im
 - **LangGraph**: Graph-based agent routing and state management
 - **State**: PostgreSQL checkpointer for conversation history
 - **Cache**: Redis for semantic caching and job queues
-- **MCP Servers**: Custom servers for Coroot, NetBox, infrastructure tools
+- **MCP Servers**: Custom servers for infrastructure, search, and automation (see below)
 - **Context Sources**: Full context injection via Gemini's 1M token window
+
+#### 3a. Available MCP Servers
+| Server | Description | Key Tools |
+|--------|-------------|-----------|
+| `infrastructure-mcp` | Cluster state, kubectl, talosctl | kubectl_get_pods, kubectl_logs, talosctl_health |
+| `coroot-mcp` | Observability, metrics, anomalies | get_service_metrics, get_anomalies, get_alerts |
+| `knowledge-mcp` | Qdrant vector DB queries | search_runbooks, add_runbook, search_decisions |
+| `web-search-mcp` | Web search via SearXNG (Google/Bing/DDG) | web_search, get_page_content, search_news, search_images |
+| `browser-automation-mcp` | Headless browser control (Playwright) | navigate, screenshot, click, type_text, evaluate_js, fill_form |
+
+**Usage**: MCP servers are configured in `.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
 
 #### 4. Human-in-the-Loop
 - **Interface**: Matrix/Element (self-hosted Conduit server)

@@ -23,15 +23,25 @@
     "talos-prod": {
       "url": "http://10.30.0.20:31086",
       "description": "Talos MCP for production cluster management"
+    },
+    "web-search": {
+      "url": "http://web-search-mcp.ai-platform.svc.cluster.local:8000",
+      "description": "Web search using self-hosted SearXNG. Tools: web_search, get_page_content, search_news, search_images, search_and_fetch"
+    },
+    "browser-automation": {
+      "url": "http://browser-automation-mcp.ai-platform.svc.cluster.local:8000",
+      "description": "Browser automation using Playwright. Tools: navigate, screenshot, click, type_text, evaluate_js, fill_form, get_page_content"
     }
   },
   "comments": {
-    "note": "Initially using MCP servers from monitoring cluster (10.30.0.20)",
-    "future": "Will deploy dedicated MCP servers for agentic platform after cluster provisioning",
+    "note": "MCP servers from monitoring cluster (10.30.0.20) + agentic cluster (ai-platform namespace)",
+    "agentic_cluster_servers": [
+      "web-search: Aggregates Google/Bing/DuckDuckGo via SearXNG, fetches page content",
+      "browser-automation: Headless Chromium browser control for web app automation"
+    ],
     "planned_additions": [
       "kubernetes-agentic: For managing the agentic platform cluster itself",
       "talos-agentic: For Talos management of the UM690L cluster",
-      "proxmox-carrick: If UM690L is managed via Proxmox on Carrick",
       "home-assistant: For smart home integrations",
       "arr-suite: For media management (Sonarr, Radarr, etc.)",
       "knowledge: For direct Qdrant vector DB access"
