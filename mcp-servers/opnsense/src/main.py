@@ -1,28 +1,42 @@
 #!/usr/bin/env python3
-"""OPNsense MCP server for firewall and router management."""
+"""OPNsense MCP server for firewall, AdGuard Home, and Unbound DNS management."""
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fastmcp import FastMCP
-from pydantic import BaseModel
 import httpx
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# OPNsense API config
 OPNSENSE_HOST = os.environ.get("OPNSENSE_HOST", "https://10.10.0.1")
 OPNSENSE_KEY = os.environ.get("OPNSENSE_KEY", "")
 OPNSENSE_SECRET = os.environ.get("OPNSENSE_SECRET", "")
 
+# AdGuard Home config (runs on OPNsense)
+ADGUARD_HOST = os.environ.get("ADGUARD_HOST", "http://10.10.0.1:3000")
+ADGUARD_USERNAME = os.environ.get("ADGUARD_USERNAME", "")
+ADGUARD_PASSWORD = os.environ.get("ADGUARD_PASSWORD", "")
+
 mcp = FastMCP(
     name="opnsense-mcp",
     instructions="""
-    MCP server for OPNsense firewall management.
-    Provides tools to view firewall rules, interfaces, DHCP leases, and VPN status.
-    Modifications require careful consideration - incorrect rules can lock you out.
+    MCP server for OPNsense firewall, AdGuard Home, and Unbound DNS management.
+
+    Capabilities:
+    - Firewall: View rules, interfaces, DHCP leases, gateway status
+    - AdGuard Home: Stats, query logs, DNS config, filters, protection toggle
+    - Unbound DNS: Stats, host overrides, cache management
+
+    Use with care - incorrect firewall/DNS changes can cause connectivity issues.
     """
 )
 
+
+# =============================================================================
+# OPNsense API Helper
+# =============================================================================
 
 async def opnsense_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
     """Make authenticated API call to OPNsense."""
@@ -33,39 +47,66 @@ async def opnsense_api(endpoint: str, method: str = "GET", data: dict = None) ->
         if method == "GET":
             response = await client.get(url, auth=auth)
         else:
-            response = await client.post(url, auth=auth, json=data)
+            response = await client.post(url, auth=auth, json=data or {})
         response.raise_for_status()
         return response.json()
 
 
+# =============================================================================
+# AdGuard Home API Helper
+# =============================================================================
+
+async def adguard_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
+    """Make authenticated API call to AdGuard Home."""
+    auth = httpx.BasicAuth(ADGUARD_USERNAME, ADGUARD_PASSWORD)
+    url = f"{ADGUARD_HOST}{endpoint}"
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        if method == "GET":
+            response = await client.get(url, auth=auth)
+        elif method == "POST":
+            response = await client.post(url, auth=auth, json=data)
+        else:
+            response = await client.request(method, url, auth=auth, json=data)
+        response.raise_for_status()
+        # Some endpoints return empty body
+        if response.text:
+            return response.json()
+        return {"status": "ok"}
+
+
+# =============================================================================
+# OPNsense Firewall Tools
+# =============================================================================
+
 @mcp.tool()
-async def get_interfaces() -> List[Dict[str, Any]]:
-    """List all network interfaces with status."""
+async def get_interfaces() -> Dict[str, Any]:
+    """List all network interfaces with traffic statistics."""
     try:
         return await opnsense_api("/diagnostics/interface/getInterfaceStatistics")
     except Exception as e:
         logger.error(f"Failed to get interfaces: {e}")
-        return []
+        return {"error": str(e)}
 
 
 @mcp.tool()
-async def get_firewall_rules() -> List[Dict[str, Any]]:
-    """List firewall rules."""
+async def get_firewall_rules() -> Dict[str, Any]:
+    """List firewall filter rules."""
     try:
-        return await opnsense_api("/firewall/filter/searchRule")
+        return await opnsense_api("/firewall/filter/searchRule", "POST")
     except Exception as e:
         logger.error(f"Failed to get firewall rules: {e}")
-        return []
+        return {"error": str(e)}
 
 
 @mcp.tool()
-async def get_dhcp_leases() -> List[Dict[str, Any]]:
+async def get_dhcp_leases() -> Dict[str, Any]:
     """List active DHCP leases."""
     try:
-        return await opnsense_api("/dhcpv4/leases/searchLease")
+        return await opnsense_api("/dhcpv4/leases/searchLease", "POST")
     except Exception as e:
         logger.error(f"Failed to get DHCP leases: {e}")
-        return []
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -75,23 +116,300 @@ async def get_gateway_status() -> Dict[str, Any]:
         return await opnsense_api("/routes/gateway/status")
     except Exception as e:
         logger.error(f"Failed to get gateway status: {e}")
-        return {}
+        return {"error": str(e)}
 
 
 @mcp.tool()
 async def get_system_status() -> Dict[str, Any]:
-    """Get overall system status."""
+    """Get overall OPNsense system status."""
     try:
         return await opnsense_api("/core/system/status")
     except Exception as e:
         logger.error(f"Failed to get system status: {e}")
-        return {}
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_services() -> Dict[str, Any]:
+    """List all services and their running status."""
+    try:
+        return await opnsense_api("/core/service/search")
+    except Exception as e:
+        logger.error(f"Failed to get services: {e}")
+        return {"error": str(e)}
+
+
+# =============================================================================
+# AdGuard Home Tools
+# =============================================================================
+
+@mcp.tool()
+async def get_adguard_stats() -> Dict[str, Any]:
+    """Get AdGuard Home statistics including query counts, blocked queries, and response times."""
+    try:
+        return await adguard_api("/control/stats")
+    except Exception as e:
+        logger.error(f"Failed to get AdGuard stats: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_status() -> Dict[str, Any]:
+    """Get AdGuard Home protection status and version info."""
+    try:
+        return await adguard_api("/control/status")
+    except Exception as e:
+        logger.error(f"Failed to get AdGuard status: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_dns_config() -> Dict[str, Any]:
+    """Get AdGuard Home DNS configuration including upstream servers, cache settings, and rate limits."""
+    try:
+        return await adguard_api("/control/dns_info")
+    except Exception as e:
+        logger.error(f"Failed to get AdGuard DNS config: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_query_log(limit: int = 100, search: str = "") -> Dict[str, Any]:
+    """
+    Get recent DNS query log from AdGuard Home.
+
+    Args:
+        limit: Maximum number of entries to return (default 100)
+        search: Optional search string to filter queries
+    """
+    try:
+        params = f"?limit={limit}"
+        if search:
+            params += f"&search={search}"
+        return await adguard_api(f"/control/querylog{params}")
+    except Exception as e:
+        logger.error(f"Failed to get AdGuard query log: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_top_clients(count: int = 10) -> Dict[str, Any]:
+    """
+    Get top DNS clients by query count.
+
+    Args:
+        count: Number of top clients to return (default 10)
+    """
+    try:
+        stats = await adguard_api("/control/stats")
+        top_clients = stats.get("top_clients", [])[:count]
+        return {"top_clients": top_clients, "total_clients": len(stats.get("top_clients", []))}
+    except Exception as e:
+        logger.error(f"Failed to get top clients: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_filters() -> Dict[str, Any]:
+    """Get list of active DNS filter/blocklists in AdGuard Home."""
+    try:
+        return await adguard_api("/control/filtering/status")
+    except Exception as e:
+        logger.error(f"Failed to get AdGuard filters: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def set_adguard_protection(enabled: bool) -> Dict[str, Any]:
+    """
+    Enable or disable AdGuard Home DNS protection.
+
+    Args:
+        enabled: True to enable protection, False to disable
+    """
+    try:
+        return await adguard_api("/control/dns_config", "POST", {"protection_enabled": enabled})
+    except Exception as e:
+        logger.error(f"Failed to set AdGuard protection: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_safebrowsing_status() -> Dict[str, Any]:
+    """Get AdGuard Home safe browsing and parental control status."""
+    try:
+        status = await adguard_api("/control/status")
+        return {
+            "safebrowsing_enabled": status.get("safebrowsing_enabled", False),
+            "parental_enabled": status.get("parental_enabled", False),
+            "safesearch_enabled": status.get("safesearch", {}).get("enabled", False)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get safebrowsing status: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_blocked_services() -> Dict[str, Any]:
+    """Get list of blocked services (e.g., TikTok, Facebook) in AdGuard Home."""
+    try:
+        return await adguard_api("/control/blocked_services/list")
+    except Exception as e:
+        logger.error(f"Failed to get blocked services: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_adguard_rewrites() -> Dict[str, Any]:
+    """Get DNS rewrites/custom rules in AdGuard Home."""
+    try:
+        return await adguard_api("/control/rewrite/list")
+    except Exception as e:
+        logger.error(f"Failed to get rewrites: {e}")
+        return {"error": str(e)}
+
+
+# =============================================================================
+# Unbound DNS Tools (via OPNsense API)
+# =============================================================================
+
+@mcp.tool()
+async def get_unbound_stats() -> Dict[str, Any]:
+    """Get Unbound DNS resolver statistics."""
+    try:
+        return await opnsense_api("/unbound/diagnostics/stats")
+    except Exception as e:
+        logger.error(f"Failed to get Unbound stats: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_unbound_overrides() -> Dict[str, Any]:
+    """Get Unbound DNS host overrides (local DNS entries)."""
+    try:
+        return await opnsense_api("/unbound/settings/searchHostOverride", "POST")
+    except Exception as e:
+        logger.error(f"Failed to get Unbound overrides: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_unbound_config() -> Dict[str, Any]:
+    """Get Unbound DNS general configuration."""
+    try:
+        return await opnsense_api("/unbound/settings/get")
+    except Exception as e:
+        logger.error(f"Failed to get Unbound config: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def flush_unbound_cache() -> Dict[str, Any]:
+    """Flush the Unbound DNS cache."""
+    try:
+        return await opnsense_api("/unbound/service/dnsbl", "POST")
+    except Exception as e:
+        logger.error(f"Failed to flush Unbound cache: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def add_unbound_override(hostname: str, domain: str, server: str, description: str = "") -> Dict[str, Any]:
+    """
+    Add a new DNS host override in Unbound.
+
+    Args:
+        hostname: Hostname (e.g., 'www' or '*' for wildcard)
+        domain: Domain (e.g., 'example.com')
+        server: IP address to resolve to
+        description: Optional description
+    """
+    try:
+        result = await opnsense_api("/unbound/settings/addHostOverride", "POST", {
+            "host": {
+                "enabled": "1",
+                "hostname": hostname,
+                "domain": domain,
+                "server": server,
+                "description": description
+            }
+        })
+        # Apply changes
+        await opnsense_api("/unbound/service/reconfigure", "POST")
+        return result
+    except Exception as e:
+        logger.error(f"Failed to add Unbound override: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def update_unbound_override(uuid: str, description: str = None, server: str = None, enabled: bool = None) -> Dict[str, Any]:
+    """
+    Update an existing DNS host override in Unbound.
+
+    Args:
+        uuid: UUID of the override to update
+        description: New description (optional)
+        server: New IP address (optional)
+        enabled: Enable/disable the override (optional)
+    """
+    try:
+        update_data = {}
+        if description is not None:
+            update_data["description"] = description
+        if server is not None:
+            update_data["server"] = server
+        if enabled is not None:
+            update_data["enabled"] = "1" if enabled else "0"
+
+        result = await opnsense_api(f"/unbound/settings/setHostOverride/{uuid}", "POST", {"host": update_data})
+        # Apply changes
+        await opnsense_api("/unbound/service/reconfigure", "POST")
+        return result
+    except Exception as e:
+        logger.error(f"Failed to update Unbound override: {e}")
+        return {"error": str(e)}
+
+
+# =============================================================================
+# Combined/Utility Tools
+# =============================================================================
+
+@mcp.tool()
+async def get_dns_summary() -> Dict[str, Any]:
+    """Get a combined summary of both AdGuard Home and Unbound DNS status."""
+    try:
+        adguard_stats = await adguard_api("/control/stats")
+        adguard_status = await adguard_api("/control/status")
+        unbound_stats = await opnsense_api("/unbound/diagnostics/stats")
+
+        return {
+            "adguard": {
+                "protection_enabled": adguard_status.get("protection_enabled", False),
+                "total_queries": adguard_stats.get("num_dns_queries", 0),
+                "blocked_queries": adguard_stats.get("num_blocked_filtering", 0),
+                "block_percentage": round(
+                    (adguard_stats.get("num_blocked_filtering", 0) / max(adguard_stats.get("num_dns_queries", 1), 1)) * 100, 2
+                ),
+                "avg_response_time_ms": adguard_stats.get("avg_processing_time", 0),
+            },
+            "unbound": {
+                "total_queries": unbound_stats.get("data", {}).get("thread0", {}).get("num", {}).get("queries", 0),
+                "cache_hits": unbound_stats.get("data", {}).get("thread0", {}).get("num", {}).get("cachehits", 0),
+                "cache_miss": unbound_stats.get("data", {}).get("thread0", {}).get("num", {}).get("cachemiss", 0),
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get DNS summary: {e}")
+        return {"error": str(e)}
 
 
 def main():
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
     logger.info(f"Starting OPNsense MCP server on port {port}")
+    logger.info(f"OPNsense: {OPNSENSE_HOST}")
+    logger.info(f"AdGuard: {ADGUARD_HOST}")
     uvicorn.run(mcp.get_app(), host="0.0.0.0", port=port)
 
 
