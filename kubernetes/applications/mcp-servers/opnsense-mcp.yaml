@@ -42,8 +42,18 @@ data:
         response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
         search: Optional[str] = Field(default=None, description="Filter leases by hostname or IP")
 
+    import ssl
+
+    def _get_ssl_context():
+        """Create SSL context that works with OPNsense self-signed certs."""
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+        return ctx
+
     async def _opnsense_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
-        async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+        async with httpx.AsyncClient(verify=_get_ssl_context(), timeout=30.0) as client:
             if method == "GET":
                 response = await client.get(f"{OPNSENSE_HOST}/api{endpoint}", auth=(OPNSENSE_KEY, OPNSENSE_SECRET))
             else:
@@ -195,20 +205,26 @@ data:
         annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
     )
     async def caddy_add_reverse_proxy(params: CaddyProxyInput) -> str:
-        """Add a new Caddy reverse proxy configuration."""
+        """Add a new Caddy reverse proxy configuration with Let's Encrypt TLS."""
         try:
-            # First add the reverse proxy entry
+            # Add the reverse proxy entry (domain config)
             add_data = {
-                "reverse_proxy": {
+                "reverse": {
                     "enabled": "1",
                     "FromDomain": params.from_domain,
                     "FromPort": "",
                     "accesslist": "",
                     "basicauth": "",
-                    "DnsChallenge": "0",
+                    "description": params.description or f"Auto-added: {params.from_domain}",
+                    "DnsChallenge": "1",
+                    "DnsChallengeOverrideDomain": "",
                     "CustomCertificate": "",
                     "AccessLog": "0",
-                    "description": params.description or f"Auto-added: {params.from_domain}"
+                    "DynDns": "0",
+                    "AcmePassthrough": "",
+                    "DisableTls": "0",
+                    "ClientAuthMode": "",
+                    "ClientAuthTrustPool": ""
                 }
             }
             result = await _opnsense_api("/caddy/reverse_proxy/add_reverse_proxy", method="POST", data=add_data)
@@ -216,23 +232,30 @@ data:
             if not uuid:
                 return f"Error: Failed to add reverse proxy - {result}"
 
-            # Now add a handle for this domain
+            # Add a handle (upstream target)
             handle_data = {
                 "handle": {
                     "enabled": "1",
-                    "reverse_proxy": uuid,
+                    "reverse": uuid,
+                    "subdomain": "",
                     "HandleType": "handle",
                     "HandlePath": "",
+                    "accesslist": "",
+                    "basicauth": "",
                     "header": "",
+                    "HandleDirective": "reverse_proxy",
                     "ToDomain": params.to_addr,
                     "ToPort": params.to_port,
                     "ToPath": "",
+                    "ForwardAuth": "0",
                     "HttpTls": "0",
+                    "HttpVersion": "",
+                    "HttpKeepalive": "",
+                    "HttpNtlm": "0",
+                    "HttpTlsInsecureSkipVerify": "0",
                     "HttpTlsTrustedCaCerts": "",
                     "HttpTlsServerName": "",
-                    "HttpNtlm": "0",
-                    "PassiveHealthFailDuration": "",
-                    "description": ""
+                    "description": f"{params.from_domain} upstream"
                 }
             }
             handle_result = await _opnsense_api("/caddy/reverse_proxy/add_handle", method="POST", data=handle_data)
@@ -328,7 +351,7 @@ spec:
             - containerPort: 8000
           env:
             - name: OPNSENSE_HOST
-              value: "https://10.10.0.1"
+              value: "https://10.10.0.1:8443"
             - name: OPNSENSE_KEY
               valueFrom:
                 secretKeyRef:
