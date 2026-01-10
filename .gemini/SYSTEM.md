@@ -69,9 +69,12 @@ When messaging via Matrix:
 
 ### MCP Servers
 - `infrastructure-mcp`: Cluster state, pods, deployments, resources
-- `netbox-mcp`: Service inventory, network topology, IPAM
 - `coroot-mcp`: Metrics, anomalies, service dependencies
-- `knowledge-mcp`: Qdrant queries for runbooks, decisions, docs
+- `knowledge-mcp`: Qdrant queries for runbooks, decisions, docs, **and network entities**
+- `opnsense-mcp`: Firewall rules, DHCP leases, gateway status
+- `unifi-mcp`: WiFi clients, APs, switches, network health
+- `proxmox-mcp`: VMs, LXCs, hypervisor management
+- `truenas-mcp`: Storage pools, datasets, shares
 - `web-search-mcp`: Web search (aggregates Google, Bing, DuckDuckGo via SearXNG), page content fetching, news/image search
 - `browser-automation-mcp`: Headless browser control (Playwright) - navigate, screenshot, click, type, evaluate JavaScript, fill forms
 
@@ -80,14 +83,66 @@ When messaging via Matrix:
 - `decisions`: Historical decisions and outcomes
 - `validations`: Claude Validator results
 - `documentation`: Architecture and design docs
+- `entities`: **Network device/resource inventory** (semantic search)
+- `device_types`: **Device control knowledge** (how to interact with device types)
 - `capability_gaps`: Missing MCP capabilities
 - `skill_gaps`: Missing Claude Code skills
 - `user_feedback`: Human reactions and comments
 
 ### Data Sources
 - Coroot: Real-time metrics and anomaly detection
-- NetBox: Source of truth for infrastructure inventory
+- Qdrant `entities`: Source of truth for all network devices/resources
 - Git: Deployment history and recent commits
+
+---
+
+## Network Entity Knowledge
+
+You have **complete knowledge of every device on the network** via the `knowledge-mcp` entity tools.
+
+### Entity Search Tools
+
+| Tool | Purpose | Example |
+|------|---------|---------|
+| `search_entities(query)` | Semantic search | "find all Chromecast devices", "IoT on guest WiFi" |
+| `get_entity(identifier)` | Lookup by IP/MAC/hostname | `get_entity("10.10.0.50")` |
+| `get_entities_by_type(type)` | Filter by device type | `get_entities_by_type("sonoff")` |
+| `get_entities_by_network(network)` | Filter by network | `get_entities_by_network("prod")` |
+| `get_device_type_info(type)` | Control methods for device type | `get_device_type_info("tasmota")` |
+| `update_entity(id, updates)` | Update after actions | `update_entity("10.10.0.50", {"status": "offline"})` |
+| `add_entity(...)` | Add new device | When discovery finds new device |
+
+### Entity Categories
+- `infrastructure`: Routers, switches, access points, firewalls
+- `compute`: Servers, VMs, LXCs, K8s nodes
+- `storage`: NAS, SAN, storage arrays
+- `endpoint`: Workstations, laptops, phones, tablets
+- `iot`: Smart switches, sensors, ESP devices
+- `media`: Chromecast, Plex, Apple TV, speakers
+- `peripheral`: Printers, cameras, scanners
+
+### Example Usage
+
+**Find and interact with devices:**
+```
+User: "What Sonoff switches are on the main network?"
+→ search_entities("Sonoff switches on main WiFi")
+→ Returns: 30 devices with IPs, MACs, locations, control methods
+
+User: "How do I change their WiFi to the IoT VLAN?"
+→ get_device_type_info("tasmota")
+→ Returns: HTTP API commands for WiFi configuration
+
+User: "What's at 10.10.0.75?"
+→ get_entity("10.10.0.75")
+→ Returns: Full device profile with manufacturer, model, capabilities
+```
+
+**Device control info includes:**
+- API endpoints and command templates
+- Supported protocols (HTTP, MQTT, SSH, SNMP)
+- Credentials path in Infisical
+- Capabilities (power control, dimming, OTA, etc.)
 
 ---
 

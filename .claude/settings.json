@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig kubectl:*)",
+      "Bash(KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/generated/kubeconfig kubectl:*)",
+      "Bash(KUBECONFIG=/home/monit_homelab/terraform/talos-single-node/generated/kubeconfig kubectl:*)"
+    ]
+  }
+}

@@ -37,8 +37,8 @@ This repository contains the infrastructure and application code for a **self-im
 
 #### 2. Vector Knowledge Base
 - **Engine**: Qdrant vector database
-- **Collections**: runbooks, decisions, validations, documentation, capability_gaps, skill_gaps, user_feedback
-- **Purpose**: RAG for context-aware decisions, learning from outcomes
+- **Collections**: runbooks, decisions, validations, documentation, **entities**, **device_types**, capability_gaps, skill_gaps, user_feedback
+- **Purpose**: RAG for context-aware decisions, learning from outcomes, **network entity intelligence**
 - **Embeddings**: Gemini text-embedding-004 (768 dimensions)
 
 #### 3. Orchestration
@@ -53,11 +53,33 @@ This repository contains the infrastructure and application code for a **self-im
 |--------|-------------|-----------|
 | `infrastructure-mcp` | Cluster state, kubectl, talosctl | kubectl_get_pods, kubectl_logs, talosctl_health |
 | `coroot-mcp` | Observability, metrics, anomalies | get_service_metrics, get_anomalies, get_alerts |
-| `knowledge-mcp` | Qdrant vector DB queries | search_runbooks, add_runbook, search_decisions |
-| `web-search-mcp` | Web search via SearXNG (Google/Bing/DDG) | web_search, get_page_content, search_news, search_images |
-| `browser-automation-mcp` | Headless browser control (Playwright) | navigate, screenshot, click, type_text, evaluate_js, fill_form |
+| `knowledge-mcp` | Qdrant vector DB + **entity intelligence** | search_runbooks, search_entities, get_entity, get_device_type_info |
+| `opnsense-mcp` | Firewall/router management | get_dhcp_leases, get_firewall_rules, get_gateway_status |
+| `unifi-mcp` | Network infrastructure | list_clients, list_devices, get_health, get_alarms |
+| `proxmox-mcp` | Hypervisor management | list_vms, start_vm, stop_vm, get_vm_status |
+| `truenas-mcp` | Storage management | list_pools, list_datasets, list_shares, get_disk_status |
+| `home-assistant-mcp` | Smart home control | list_lights, turn_on_light, list_climate, get_sensors |
+| `web-search-mcp` | Web search via SearXNG | web_search, get_page_content, search_news |
+| `browser-automation-mcp` | Headless browser (Playwright) | navigate, screenshot, click, type_text |
+| `infisical-mcp` | Secrets management | list_secrets, get_secret (read-only) |
 
 **Usage**: MCP servers are configured in `.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
+
+#### 3b. Network Entity Intelligence (via knowledge-mcp)
+
+The knowledge MCP includes **complete visibility into every device on the network**:
+
+| Tool | Purpose |
+|------|---------|
+| `search_entities(query)` | Semantic search: "find all Chromecast devices", "IoT on guest network" |
+| `get_entity(ip/mac/hostname)` | Exact lookup by identifier |
+| `get_entities_by_type(type)` | Filter by type: "sonoff", "chromecast", "nas", "printer" |
+| `get_entities_by_network(network)` | Filter by network: "prod", "iot-vlan", "guest" |
+| `get_device_type_info(type)` | Control methods for device type (API commands, protocols) |
+| `update_entity(id, updates)` | Update entity after performing actions |
+| `add_entity(...)` | Add newly discovered device |
+
+**Coverage**: Every device on the network - hardware and software, physical and virtual, managed and unmanaged. Entities include IP, MAC, hostname, manufacturer, model, location, capabilities, and control interfaces.
 
 #### 4. Human-in-the-Loop
 - **Interface**: Matrix/Element (self-hosted Conduit server)

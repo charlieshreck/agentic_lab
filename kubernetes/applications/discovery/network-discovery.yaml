@@ -1,0 +1,574 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: discovery-script
+  namespace: ai-platform
+data:
+  discovery.py: |
+    #!/usr/bin/env python3
+    """
+    Network Entity Discovery Pipeline
+
+    Discovers all devices on the network from multiple sources,
+    fingerprints them, and stores in Qdrant for semantic search.
+    """
+    import os
+    import json
+    import asyncio
+    import logging
+    import subprocess
+    import uuid
+    import socket
+    from datetime import datetime, timezone
+    from typing import List, Dict, Optional, Any
+    import httpx
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
+    # Configuration
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-004")
+
+    # MCP endpoints (running in monitoring cluster)
+    MCP_OPNSENSE_URL = os.environ.get("MCP_OPNSENSE_URL", "http://10.30.0.20:31082")
+    MCP_UNIFI_URL = os.environ.get("MCP_UNIFI_URL", "http://10.30.0.20:31083")
+    MCP_PROXMOX_URL = os.environ.get("MCP_PROXMOX_URL", "http://10.30.0.20:31084")
+    MCP_TRUENAS_URL = os.environ.get("MCP_TRUENAS_URL", "http://10.30.0.20:31085")
+
+    SCAN_NETWORKS = os.environ.get("SCAN_NETWORKS", "10.10.0.0/24,10.20.0.0/24,10.30.0.0/24").split(",")
+
+    # Device fingerprinting signatures
+    FINGERPRINT_PROBES = {
+        "tasmota": {
+            "endpoints": ["/cm?cmnd=Status%200"],
+            "identifier": lambda r: "StatusSTS" in str(r) or "StatusFWR" in str(r),
+            "extract": lambda r: {
+                "type": "tasmota",
+                "category": "iot",
+                "firmware": r.get("StatusFWR", {}).get("Version", "unknown") if isinstance(r, dict) else "unknown"
+            }
+        },
+        "shelly": {
+            "endpoints": ["/shelly", "/rpc/Shelly.GetDeviceInfo"],
+            "identifier": lambda r: "type" in str(r) or "id" in str(r),
+            "extract": lambda r: {
+                "type": "shelly",
+                "category": "iot",
+                "model": r.get("type", r.get("model", "unknown")) if isinstance(r, dict) else "unknown"
+            }
+        },
+        "esphome": {
+            "endpoints": ["/"],
+            "identifier": lambda r: "esphome" in str(r).lower(),
+            "extract": lambda r: {"type": "esphome", "category": "iot"}
+        },
+        "wled": {
+            "endpoints": ["/json/info"],
+            "identifier": lambda r: "vid" in str(r) or "WLED" in str(r),
+            "extract": lambda r: {
+                "type": "wled",
+                "category": "iot",
+                "firmware": r.get("ver", "unknown") if isinstance(r, dict) else "unknown"
+            }
+        },
+        "synology": {
+            "endpoints": ["/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query"],
+            "identifier": lambda r: "SYNO" in str(r),
+            "extract": lambda r: {"type": "synology_nas", "category": "storage"}
+        }
+    }
+
+    # MAC vendor prefixes for device identification
+    MAC_VENDORS = {
+        "00:1A:22": ("sonoff", "iot"),
+        "DC:4F:22": ("espressif", "iot"),
+        "AC:0B:FB": ("espressif", "iot"),
+        "18:FE:34": ("espressif", "iot"),
+        "60:01:94": ("espressif", "iot"),
+        "FC:EC:DA": ("ubiquiti", "infrastructure"),
+        "44:D9:E7": ("ubiquiti", "infrastructure"),
+        "24:5A:4C": ("ubiquiti", "infrastructure"),
+        "74:AC:B9": ("ubiquiti", "infrastructure"),
+        "00:11:32": ("synology", "storage"),
+        "00:1E:4F": ("dell", "compute"),
+        "00:25:90": ("supermicro", "compute"),
+        "B8:27:EB": ("raspberry_pi", "compute"),
+        "DC:A6:32": ("raspberry_pi", "compute"),
+        "E4:5F:01": ("raspberry_pi", "compute"),
+        "54:60:09": ("google", "media"),
+        "F4:F5:D8": ("google", "media"),
+        "48:D6:D5": ("google", "media"),
+    }
+
+
+    async def get_embedding(text: str) -> List[float]:
+        """Get embedding from LiteLLM."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{LITELLM_URL}/embeddings",
+                json={"model": EMBEDDING_MODEL, "input": text}
+            )
+            response.raise_for_status()
+            return response.json()["data"][0]["embedding"]
+
+
+    async def qdrant_upsert(points: List[dict]) -> bool:
+        """Upsert points to Qdrant entities collection."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.put(
+                f"{QDRANT_URL}/collections/entities/points",
+                json={"points": points}
+            )
+            return response.status_code == 200
+
+
+    async def call_mcp(base_url: str, tool: str, params: dict = None) -> Optional[dict]:
+        """Call an MCP server tool."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{base_url}/tools/{tool}",
+                    json=params or {}
+                )
+                if response.status_code == 200:
+                    return response.json()
+        except Exception as e:
+            logger.warning(f"MCP call failed {base_url}/{tool}: {e}")
+        return None
+
+
+    async def discover_from_opnsense() -> List[dict]:
+        """Get devices from OPNsense DHCP/ARP."""
+        entities = []
+
+        # Get DHCP leases
+        leases = await call_mcp(MCP_OPNSENSE_URL, "get_dhcp_leases")
+        if leases:
+            for lease in leases.get("rows", []):
+                entities.append({
+                    "ip": lease.get("address", ""),
+                    "mac": lease.get("mac", "").upper(),
+                    "hostname": lease.get("hostname", ""),
+                    "discovered_via": "opnsense_dhcp"
+                })
+
+        logger.info(f"OPNsense: Found {len(entities)} DHCP leases")
+        return entities
+
+
+    async def discover_from_unifi() -> List[dict]:
+        """Get devices from UniFi controller."""
+        entities = []
+
+        # Get clients
+        clients = await call_mcp(MCP_UNIFI_URL, "list_clients")
+        if clients:
+            for client in clients if isinstance(clients, list) else []:
+                entities.append({
+                    "ip": client.get("ip", ""),
+                    "mac": client.get("mac", "").upper(),
+                    "hostname": client.get("hostname", client.get("name", "")),
+                    "network": client.get("network", ""),
+                    "connected_to": client.get("ap_mac", ""),
+                    "discovered_via": "unifi"
+                })
+
+        # Get network devices (APs, switches)
+        devices = await call_mcp(MCP_UNIFI_URL, "list_devices")
+        if devices:
+            for device in devices if isinstance(devices, list) else []:
+                dev_type = device.get("type", "unknown")
+                if dev_type == "uap":
+                    category = "infrastructure"
+                    dtype = "access_point"
+                elif dev_type == "usw":
+                    category = "infrastructure"
+                    dtype = "switch"
+                elif dev_type == "ugw":
+                    category = "infrastructure"
+                    dtype = "gateway"
+                else:
+                    category = "infrastructure"
+                    dtype = dev_type
+
+                entities.append({
+                    "ip": device.get("ip", ""),
+                    "mac": device.get("mac", "").upper(),
+                    "hostname": device.get("name", ""),
+                    "manufacturer": "ubiquiti",
+                    "model": device.get("model", ""),
+                    "type": dtype,
+                    "category": category,
+                    "discovered_via": "unifi"
+                })
+
+        logger.info(f"UniFi: Found {len(entities)} devices/clients")
+        return entities
+
+
+    async def discover_from_proxmox() -> List[dict]:
+        """Get VMs and containers from Proxmox."""
+        entities = []
+
+        vms = await call_mcp(MCP_PROXMOX_URL, "list_vms")
+        if vms:
+            for vm in vms if isinstance(vms, list) else []:
+                # Try to get IP from QEMU guest agent
+                vm_ip = vm.get("ip", "")
+                entities.append({
+                    "ip": vm_ip,
+                    "hostname": vm.get("name", ""),
+                    "type": "vm",
+                    "category": "compute",
+                    "manufacturer": "proxmox",
+                    "model": f"VM-{vm.get('vmid', '')}",
+                    "status": "online" if vm.get("status") == "running" else "offline",
+                    "discovered_via": "proxmox"
+                })
+
+        logger.info(f"Proxmox: Found {len(entities)} VMs/containers")
+        return entities
+
+
+    async def discover_from_truenas() -> List[dict]:
+        """Get TrueNAS system info."""
+        entities = []
+
+        system = await call_mcp(MCP_TRUENAS_URL, "get_system_info")
+        if system:
+            entities.append({
+                "ip": os.environ.get("TRUENAS_IP", "10.40.0.10"),
+                "hostname": system.get("hostname", "truenas"),
+                "type": "nas",
+                "category": "storage",
+                "manufacturer": "truenas",
+                "model": system.get("system_product", "TrueNAS"),
+                "firmware": system.get("version", ""),
+                "discovered_via": "truenas"
+            })
+
+        logger.info(f"TrueNAS: Found {len(entities)} systems")
+        return entities
+
+
+    async def discover_with_nmap(network: str) -> List[dict]:
+        """Scan network with nmap for service detection."""
+        entities = []
+
+        try:
+            # Run nmap with service detection
+            result = subprocess.run(
+                ["nmap", "-sn", "-oG", "-", network],
+                capture_output=True, text=True, timeout=120
+            )
+
+            for line in result.stdout.split("\n"):
+                if "Host:" in line and "Status: Up" in line:
+                    parts = line.split()
+                    ip = parts[1] if len(parts) > 1 else ""
+                    hostname = ""
+                    if "(" in line and ")" in line:
+                        hostname = line.split("(")[1].split(")")[0]
+
+                    if ip:
+                        entities.append({
+                            "ip": ip,
+                            "hostname": hostname,
+                            "discovered_via": "nmap"
+                        })
+
+            logger.info(f"nmap {network}: Found {len(entities)} hosts")
+        except Exception as e:
+            logger.error(f"nmap scan failed for {network}: {e}")
+
+        return entities
+
+
+    async def fingerprint_device(ip: str, existing_data: dict) -> dict:
+        """Deep fingerprint a device via HTTP probing."""
+        updates = {}
+
+        for probe_name, probe in FINGERPRINT_PROBES.items():
+            for endpoint in probe["endpoints"]:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        response = await client.get(f"http://{ip}{endpoint}")
+                        if response.status_code == 200:
+                            try:
+                                data = response.json()
+                            except:
+                                data = response.text
+
+                            if probe["identifier"](data):
+                                extracted = probe["extract"](data)
+                                updates.update(extracted)
+                                logger.debug(f"Fingerprinted {ip} as {probe_name}")
+                                return updates
+                except:
+                    pass
+
+        return updates
+
+
+    def identify_by_mac(mac: str) -> dict:
+        """Identify device type by MAC vendor prefix."""
+        if not mac:
+            return {}
+
+        mac_upper = mac.upper().replace("-", ":")
+        prefix = mac_upper[:8]
+
+        if prefix in MAC_VENDORS:
+            vendor, category = MAC_VENDORS[prefix]
+            return {"manufacturer": vendor, "category": category}
+
+        return {}
+
+
+    def determine_network(ip: str) -> str:
+        """Determine network name from IP address."""
+        if ip.startswith("10.10.0."):
+            return "prod"
+        elif ip.startswith("10.20.0."):
+            return "agentic"
+        elif ip.startswith("10.30.0."):
+            return "monit"
+        elif ip.startswith("10.40.0."):
+            return "storage"
+        return "unknown"
+
+
+    def generate_description(entity: dict) -> str:
+        """Generate rich semantic description for embedding."""
+        parts = []
+
+        if entity.get("manufacturer"):
+            parts.append(entity["manufacturer"])
+        if entity.get("model"):
+            parts.append(entity["model"])
+        if entity.get("type"):
+            parts.append(entity["type"])
+        if entity.get("category"):
+            parts.append(f"({entity['category']})")
+        if entity.get("hostname"):
+            parts.append(f"named {entity['hostname']}")
+        if entity.get("location"):
+            parts.append(f"in {entity['location']}")
+        if entity.get("function"):
+            parts.append(entity["function"])
+        if entity.get("network"):
+            parts.append(f"on {entity['network']} network")
+        if entity.get("ip"):
+            parts.append(f"at {entity['ip']}")
+
+        return " ".join(filter(None, parts)) or f"Unknown device at {entity.get('ip', 'unknown IP')}"
+
+
+    async def merge_entities(all_discovered: List[dict]) -> Dict[str, dict]:
+        """Merge entities from multiple sources by MAC or IP."""
+        merged = {}
+
+        for entity in all_discovered:
+            # Use MAC as primary key, fallback to IP
+            key = entity.get("mac") or entity.get("ip")
+            if not key:
+                continue
+
+            if key in merged:
+                # Merge - prefer non-empty values
+                for k, v in entity.items():
+                    if v and (not merged[key].get(k) or k == "discovered_via"):
+                        if k == "discovered_via":
+                            existing = merged[key].get(k, "")
+                            if existing and v not in existing:
+                                merged[key][k] = f"{existing},{v}"
+                            else:
+                                merged[key][k] = v
+                        else:
+                            merged[key][k] = v
+            else:
+                merged[key] = entity.copy()
+
+        return merged
+
+
+    async def run_discovery():
+        """Main discovery pipeline."""
+        logger.info("Starting network entity discovery...")
+
+        all_entities = []
+
+        # Gather from all sources in parallel
+        results = await asyncio.gather(
+            discover_from_opnsense(),
+            discover_from_unifi(),
+            discover_from_proxmox(),
+            discover_from_truenas(),
+            *[discover_with_nmap(net) for net in SCAN_NETWORKS],
+            return_exceptions=True
+        )
+
+        for result in results:
+            if isinstance(result, list):
+                all_entities.extend(result)
+            elif isinstance(result, Exception):
+                logger.error(f"Discovery source failed: {result}")
+
+        logger.info(f"Total raw entities: {len(all_entities)}")
+
+        # Merge by MAC/IP
+        merged = await merge_entities(all_entities)
+        logger.info(f"After merge: {len(merged)} unique entities")
+
+        # Enrich and fingerprint
+        qdrant_points = []
+        for key, entity in merged.items():
+            # Skip empty IPs
+            if not entity.get("ip"):
+                continue
+
+            # Determine network
+            if not entity.get("network"):
+                entity["network"] = determine_network(entity["ip"])
+
+            # MAC-based identification
+            mac_info = identify_by_mac(entity.get("mac", ""))
+            for k, v in mac_info.items():
+                if not entity.get(k):
+                    entity[k] = v
+
+            # HTTP fingerprinting (only for devices without type)
+            if not entity.get("type"):
+                fingerprint = await fingerprint_device(entity["ip"], entity)
+                entity.update(fingerprint)
+
+            # Set defaults
+            entity.setdefault("category", "endpoint")
+            entity.setdefault("type", "unknown")
+            entity.setdefault("status", "online")
+            entity.setdefault("interfaces", [])
+            entity.setdefault("capabilities", [])
+
+            # Timestamps
+            now = datetime.now(timezone.utc).isoformat()
+            entity.setdefault("first_seen", now)
+            entity["last_seen"] = now
+
+            # Generate description and embedding
+            description = generate_description(entity)
+            try:
+                vector = await get_embedding(description)
+            except Exception as e:
+                logger.error(f"Embedding failed for {entity['ip']}: {e}")
+                continue
+
+            # Create Qdrant point
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
+            qdrant_points.append({
+                "id": point_id,
+                "vector": vector,
+                "payload": entity
+            })
+
+        logger.info(f"Upserting {len(qdrant_points)} entities to Qdrant")
+
+        # Batch upsert
+        batch_size = 50
+        for i in range(0, len(qdrant_points), batch_size):
+            batch = qdrant_points[i:i+batch_size]
+            success = await qdrant_upsert(batch)
+            if success:
+                logger.info(f"Upserted batch {i//batch_size + 1}")
+            else:
+                logger.error(f"Failed to upsert batch {i//batch_size + 1}")
+
+        logger.info("Discovery complete!")
+
+
+    if __name__ == "__main__":
+        asyncio.run(run_discovery())
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: network-entity-discovery
+  namespace: ai-platform
+  labels:
+    app: discovery
+spec:
+  schedule: "*/15 * * * *"  # Every 15 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: discovery
+            image: python:3.11-slim
+            command:
+            - /bin/bash
+            - -c
+            - |
+              pip install -q httpx && \
+              apt-get update -qq && apt-get install -qq -y nmap > /dev/null && \
+              python /scripts/discovery.py
+            env:
+            - name: QDRANT_URL
+              value: "http://qdrant:6333"
+            - name: LITELLM_URL
+              value: "http://litellm:4000"
+            - name: MCP_OPNSENSE_URL
+              value: "http://10.30.0.20:31082"
+            - name: MCP_UNIFI_URL
+              value: "http://10.30.0.20:31083"
+            - name: MCP_PROXMOX_URL
+              value: "http://10.30.0.20:31084"
+            - name: MCP_TRUENAS_URL
+              value: "http://10.30.0.20:31085"
+            - name: TRUENAS_IP
+              value: "10.40.0.10"
+            - name: SCAN_NETWORKS
+              value: "10.10.0.0/24,10.20.0.0/24,10.30.0.0/24"
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+          volumes:
+          - name: script
+            configMap:
+              name: discovery-script
+              defaultMode: 0755
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: network-discovery
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/applications/discovery
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ai-platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

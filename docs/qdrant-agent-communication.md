@@ -310,6 +310,97 @@ engagement_schema = {
 }
 ```
 
+### 9. `entities` - Network Entity Inventory
+
+**Purpose**: Complete inventory of every device/resource on the network with semantic search.
+
+```python
+entities_schema = {
+    # Identity
+    "id": "keyword",                # UUID
+    "ip": "keyword",
+    "mac": "keyword",
+    "hostname": "keyword",
+    "fqdn": "keyword",
+
+    # Classification
+    "category": "keyword",          # infrastructure, compute, storage, endpoint, iot, media, peripheral
+    "type": "keyword",              # router, vm, nas, switch, chromecast, sonoff, printer, etc.
+    "manufacturer": "keyword",
+    "model": "keyword",
+    "firmware": "keyword",
+    "os": "keyword",
+
+    # Location & Purpose
+    "location": "keyword",          # rack1, living_room, office, etc.
+    "function": "text",             # What it does (e.g., "media streaming", "network storage")
+    "owner": "keyword",             # system, user
+
+    # Control Methods
+    "interfaces": "json",           # List of control interfaces
+    # Example: [{"type": "ssh", "port": 22}, {"type": "http", "endpoint": "http://..."}]
+
+    # Capabilities
+    "capabilities": "keyword[]",    # power_control, dimming, ota, mqtt, etc.
+
+    # Relationships
+    "network": "keyword",           # prod, agentic, monit, iot-vlan, guest
+    "vlan": "keyword",
+    "connected_to": "keyword",      # AP or switch device ID
+    "depends_on": "keyword[]",
+    "hosts": "keyword[]",           # If hypervisor: VMs it hosts
+
+    # Discovery
+    "discovered_via": "keyword[]",  # nmap, dhcp, mdns, unifi, proxmox, etc.
+    "first_seen": "datetime",
+    "last_seen": "datetime",
+    "status": "keyword"             # online, offline, unknown
+}
+```
+
+**Usage**: Agents query entities for network operations:
+- `search_entities("all Chromecast devices")` → Semantic search
+- `get_entity("10.10.0.50")` → Exact lookup
+- `get_entities_by_type("sonoff")` → Type filter
+- `get_entities_by_network("prod")` → Network filter
+
+### 10. `device_types` - Device Control Knowledge Base
+
+**Purpose**: Knowledge about how to control each type of device (APIs, protocols, commands).
+
+```python
+device_types_schema = {
+    "id": "keyword",                # type name (e.g., "tasmota", "shelly", "chromecast")
+    "name": "keyword",
+    "description": "text",
+    "category": "keyword",          # iot, media, infrastructure, compute, storage
+
+    # Identification
+    "manufacturers": "keyword[]",   # ["sonoff", "blitzwolf", "tuya"]
+    "discovery_signatures": "json", # How to identify this device type
+    # Example: {"http_endpoints": ["/cm?cmnd=Status%200"], "mdns_service": "_googlecast._tcp"}
+
+    # Control
+    "protocols": "keyword[]",       # ["http", "mqtt", "cast"]
+    "control_api": "json",          # Command templates
+    # Example: {
+    #   "power_on": {"method": "GET", "url": "/cm?cmnd=Power%20On"},
+    #   "wifi_config": {"method": "GET", "url": "/cm?cmnd=Backlog%20SSID1%20{ssid}..."}
+    # }
+
+    # Credentials
+    "default_credentials_path": "keyword",  # Infisical path (e.g., "/iot/tasmota-default")
+    "auth_type": "keyword",         # none, basic, bearer, oauth
+
+    # Capabilities
+    "capabilities": "keyword[]"     # What this device type can do
+}
+```
+
+**Usage**: Agents query device_types to learn how to control devices:
+- `get_device_type_info("tasmota")` → Returns API commands, protocols, credentials path
+- Used to build runbooks for device operations (e.g., WiFi migration)
+
 ---
 
 ## Part II: Event-Driven Agent Communication
