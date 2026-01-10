@@ -7,13 +7,23 @@ metadata:
 data:
   main.py: |
     #!/usr/bin/env python3
-    """UniFi MCP server for network management."""
+    """
+    UniFi MCP Server - Comprehensive Network Management
+
+    Provides tools for:
+    - Monitoring: clients, devices, events, health, rogue APs, DPI
+    - WLAN Management: create, update, delete SSIDs
+    - Device Operations: restart, locate
+    - Client Management: block, unblock, name
+    - RF Optimization: radio AI, roaming assistant
+    """
     import os
     import ssl
     import json
     import logging
     from typing import Optional, List, Dict, Any
     from enum import Enum
+    from datetime import datetime
     from fastmcp import FastMCP
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
@@ -24,16 +34,15 @@ data:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
+    # Configuration
     UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.154:11443")
     UNIFI_API_KEY = os.environ.get("UNIFI_API_KEY", "")
     UNIFI_SITE = os.environ.get("UNIFI_SITE", "default")
 
-    # Create permissive SSL context for UniFi controller (uses self-signed cert + legacy TLS)
     def _get_ssl_context():
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        # Allow legacy ciphers for older UniFi controllers
         ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
         return ctx
 
@@ -41,8 +50,20 @@ data:
 
     mcp = FastMCP(
         name="unifi_mcp",
-        instructions="MCP server for UniFi Network. Provides tools for client management, device status, network health, and alarms."
+        instructions="""UniFi Network MCP Server for comprehensive network management.
+
+        Available capabilities:
+        - Monitor clients, devices, events, alarms, rogue APs
+        - Create/update/delete WLANs (SSIDs)
+        - Restart and locate devices
+        - Block/unblock clients
+        - Configure RF optimization settings
+
+        IMPORTANT: Destructive operations (delete, block, restart) require confirmation=true parameter.
+        """
     )
+
+    # === Input Models ===
 
     class ResponseFormat(str, Enum):
         MARKDOWN = "markdown"
@@ -50,212 +71,811 @@ data:
 
     class BaseInput(BaseModel):
         model_config = ConfigDict(str_strip_whitespace=True)
-        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
-    class ClientSearchInput(BaseModel):
+    class SearchInput(BaseModel):
         model_config = ConfigDict(str_strip_whitespace=True)
-        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
-        search: Optional[str] = Field(default=None, description="Filter by hostname, IP, or MAC address")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+        search: Optional[str] = Field(default=None, description="Filter by name, IP, or MAC")
 
-    async def _unifi_api(endpoint: str) -> Any:
+    class EventsInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+        limit: int = Field(default=20, description="Number of events to return (max 100)")
+        event_type: Optional[str] = Field(default=None, description="Filter by event type (e.g., EVT_WU_Roam)")
+
+    class WlanCreateInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        name: str = Field(description="SSID name")
+        passphrase: str = Field(description="WiFi password (min 8 chars)")
+        band: str = Field(default="both", description="Band: '2g', '5g', '6g', or 'both'")
+        enabled: bool = Field(default=True)
+        hide_ssid: bool = Field(default=False)
+        client_isolation: bool = Field(default=False, description="Prevent clients from seeing each other")
+        iot_optimized: bool = Field(default=False, description="Apply IoT-friendly settings (DTIM, UAPSD, etc.)")
+        confirmation: bool = Field(default=False, description="Must be true to execute")
+
+    class WlanUpdateInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        wlan_id: str = Field(description="WLAN ID to update")
+        name: Optional[str] = Field(default=None)
+        passphrase: Optional[str] = Field(default=None)
+        enabled: Optional[bool] = Field(default=None)
+        band: Optional[str] = Field(default=None)
+        client_isolation: Optional[bool] = Field(default=None)
+        confirmation: bool = Field(default=False, description="Must be true to execute")
+
+    class WlanDeleteInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        wlan_id: str = Field(description="WLAN ID to delete")
+        confirmation: bool = Field(default=False, description="Must be true to execute")
+
+    class DeviceActionInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        mac: str = Field(description="Device MAC address")
+        confirmation: bool = Field(default=False, description="Must be true for restart")
+
+    class ClientActionInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        mac: str = Field(description="Client MAC address")
+        confirmation: bool = Field(default=False, description="Must be true for block/unblock")
+
+    class ClientNameInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        mac: str = Field(description="Client MAC address")
+        name: str = Field(description="Friendly name for client")
+
+    class RFSettingInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        setting: str = Field(description="Setting name: 'radio_ai', 'roaming_assistant', 'band_steering'")
+        enabled: bool = Field(description="Enable or disable")
+        confirmation: bool = Field(default=False, description="Must be true to execute")
+
+    # === API Helpers ===
+
+    async def _api_get(endpoint: str) -> Any:
         headers = {"X-API-KEY": UNIFI_API_KEY}
-        # Use custom SSL context for self-signed certs + legacy TLS on UniFi controller
         async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
-            response = await client.get(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers)
-            response.raise_for_status()
-            return response.json().get("data", [])
+            r = await client.get(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers)
+            r.raise_for_status()
+            return r.json().get("data", [])
+
+    async def _api_post(endpoint: str, data: dict) -> Any:
+        headers = {"X-API-KEY": UNIFI_API_KEY, "Content-Type": "application/json"}
+        async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
+            r = await client.post(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers, json=data)
+            r.raise_for_status()
+            return r.json()
+
+    async def _api_put(endpoint: str, data: dict) -> Any:
+        headers = {"X-API-KEY": UNIFI_API_KEY, "Content-Type": "application/json"}
+        async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
+            r = await client.put(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers, json=data)
+            r.raise_for_status()
+            return r.json()
+
+    async def _api_delete(endpoint: str) -> Any:
+        headers = {"X-API-KEY": UNIFI_API_KEY}
+        async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
+            r = await client.delete(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers)
+            r.raise_for_status()
+            return r.json()
 
     def _handle_error(e: Exception) -> str:
         if isinstance(e, httpx.HTTPStatusError):
             status = e.response.status_code
-            if status == 401:
-                return "Error: Invalid API key. Check UNIFI_API_KEY."
-            elif status == 403:
-                return "Error: API key lacks permissions. Ensure it has network read access."
-            return f"Error: UniFi API returned status {status}."
-        elif isinstance(e, httpx.TimeoutException):
-            return "Error: Request timed out. Check connectivity to UniFi controller."
+            if status == 401: return "Error: Invalid API key"
+            if status == 403: return "Error: API key lacks permission for this operation"
+            if status == 404: return "Error: Resource not found"
+            try:
+                detail = e.response.json().get("meta", {}).get("msg", str(e))
+            except:
+                detail = e.response.text[:200]
+            return f"Error {status}: {detail}"
         return f"Error: {type(e).__name__}: {str(e)}"
 
-    def _format_bytes(b: int) -> str:
+    def _fmt_bytes(b: int) -> str:
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if b < 1024:
-                return f"{b:.1f} {unit}"
+            if b < 1024: return f"{b:.1f}{unit}"
             b /= 1024
-        return f"{b:.1f} PB"
+        return f"{b:.1f}PB"
 
-    @mcp.tool(
-        name="unifi_list_clients",
-        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
-    )
-    async def unifi_list_clients(params: ClientSearchInput) -> str:
-        """List all connected clients with IP, MAC, hostname, and traffic stats."""
+    # === MONITORING TOOLS ===
+
+    @mcp.tool(name="unifi_list_clients", annotations={"readOnlyHint": True})
+    async def unifi_list_clients(params: SearchInput) -> str:
+        """List connected WiFi clients with signal, traffic, and connection info."""
         try:
-            clients = await _unifi_api("/stat/sta")
+            clients = await _api_get("/stat/sta")
             if params.search:
-                search = params.search.lower()
-                clients = [c for c in clients if search in str(c).lower()]
+                s = params.search.lower()
+                clients = [c for c in clients if s in str(c).lower()]
 
             if params.response_format == ResponseFormat.JSON:
                 return json.dumps({"clients": clients, "count": len(clients)}, indent=2)
 
-            lines = ["# Connected Clients", "", f"Found {len(clients)} client(s)", ""]
-            for c in sorted(clients, key=lambda x: x.get("hostname", x.get("mac", ""))):
-                name = c.get("hostname") or c.get("name") or c.get("mac", "Unknown")
-                ip = c.get("ip", "N/A")
-                signal = c.get("signal", c.get("rssi"))
-                signal_str = f" (Signal: {signal} dBm)" if signal else ""
-                tx = _format_bytes(c.get("tx_bytes", 0))
-                rx = _format_bytes(c.get("rx_bytes", 0))
-                lines.append(f"- **{name}**: {ip}{signal_str} | ↑{tx} ↓{rx}")
+            lines = [f"# Connected Clients ({len(clients)})", ""]
+            by_band = {"2.4GHz": [], "5GHz": [], "6GHz": []}
+            for c in clients:
+                ch = c.get("channel", 0)
+                if ch <= 14: by_band["2.4GHz"].append(c)
+                elif ch < 180: by_band["5GHz"].append(c)
+                else: by_band["6GHz"].append(c)
+
+            for band, band_clients in by_band.items():
+                if band_clients:
+                    lines.append(f"## {band} ({len(band_clients)} clients)")
+                    for c in sorted(band_clients, key=lambda x: x.get("signal", 0), reverse=True):
+                        name = c.get("hostname") or c.get("name") or c.get("mac", "?")[:17]
+                        ip = c.get("ip", "N/A")
+                        signal = c.get("signal", "?")
+                        ch = c.get("channel", "?")
+                        tx, rx = _fmt_bytes(c.get("tx_bytes", 0)), _fmt_bytes(c.get("rx_bytes", 0))
+                        lines.append(f"- **{name}** ({ip}) | {signal}dBm ch{ch} | ↑{tx} ↓{rx}")
+                    lines.append("")
             return "\n".join(lines)
         except Exception as e:
             return _handle_error(e)
 
-    @mcp.tool(
-        name="unifi_list_devices",
-        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
-    )
+    @mcp.tool(name="unifi_list_devices", annotations={"readOnlyHint": True})
     async def unifi_list_devices(params: BaseInput) -> str:
-        """List all UniFi network devices (APs, switches, gateways) with status."""
+        """List UniFi network devices (APs, switches, gateways) with status and stats."""
         try:
-            devices = await _unifi_api("/stat/device")
+            devices = await _api_get("/stat/device")
             if params.response_format == ResponseFormat.JSON:
                 return json.dumps({"devices": devices, "count": len(devices)}, indent=2)
 
-            lines = ["# UniFi Devices", "", f"Found {len(devices)} device(s)", ""]
+            lines = [f"# UniFi Devices ({len(devices)})", ""]
             for d in devices:
                 status = "🟢" if d.get("state") == 1 else "🔴"
-                name = d.get("name", d.get("mac", "Unknown"))
-                model = d.get("model", "Unknown")
-                clients = d.get("num_sta", 0)
-                uptime = d.get("uptime", 0) // 3600
+                name = d.get("name", d.get("model", "Unknown"))
+                model = d.get("model", "?")
+                ip = d.get("ip", "N/A")
+                mac = d.get("mac", "?")
+                uptime_h = d.get("uptime", 0) // 3600
+                num_sta = d.get("num_sta", 0)
+                satisfaction = d.get("satisfaction", "N/A")
+
                 lines.append(f"## {name} {status}")
-                lines.append(f"- **Model**: {model}")
-                lines.append(f"- **IP**: {d.get('ip', 'N/A')}")
-                lines.append(f"- **Clients**: {clients}")
-                lines.append(f"- **Uptime**: {uptime} hours")
+                lines.append(f"- **Model**: {model} | **MAC**: {mac}")
+                lines.append(f"- **IP**: {ip} | **Uptime**: {uptime_h}h | **Clients**: {num_sta}")
+                lines.append(f"- **Satisfaction**: {satisfaction}%")
+
+                for rs in d.get("radio_table_stats", []):
+                    band = {"ng": "2.4GHz", "na": "5GHz", "6e": "6GHz"}.get(rs.get("radio"), "?")
+                    ch = rs.get("channel", "?")
+                    bw = rs.get("bw", "?")
+                    util = rs.get("cu_total", 0)
+                    sta = rs.get("num_sta", 0)
+                    retries = rs.get("tx_retries_pct", 0)
+                    lines.append(f"  - {band}: ch{ch}/{bw}MHz | util:{util}% | clients:{sta} | retries:{retries}%")
                 lines.append("")
             return "\n".join(lines)
         except Exception as e:
             return _handle_error(e)
 
-    @mcp.tool(
-        name="unifi_get_health",
-        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
-    )
-    async def unifi_get_health(params: BaseInput) -> str:
-        """Get network health summary including WAN, LAN, and WLAN status."""
+    @mcp.tool(name="unifi_list_events", annotations={"readOnlyHint": True})
+    async def unifi_list_events(params: EventsInput) -> str:
+        """List recent network events (connections, disconnections, roams, alerts)."""
         try:
-            health = await _unifi_api("/stat/health")
+            events = await _api_get("/stat/event")
+            if params.event_type:
+                events = [e for e in events if params.event_type.lower() in e.get("key", "").lower()]
+            events = events[:min(params.limit, 100)]
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"events": events, "count": len(events)}, indent=2)
+
+            lines = [f"# Recent Events ({len(events)})", ""]
+            for e in events:
+                key = e.get("key", "Unknown")
+                msg = e.get("msg", "No message")[:80]
+                ts = e.get("datetime", e.get("time", "?"))
+                lines.append(f"- **{key}**: {msg}")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_get_health", annotations={"readOnlyHint": True})
+    async def unifi_get_health(params: BaseInput) -> str:
+        """Get network health summary for WAN, LAN, WLAN subsystems."""
+        try:
+            health = await _api_get("/stat/health")
             if params.response_format == ResponseFormat.JSON:
                 return json.dumps({"health": health}, indent=2)
 
             lines = ["# Network Health", ""]
             for h in health:
-                subsystem = h.get("subsystem", "Unknown").upper()
-                status = "🟢" if h.get("status") == "ok" else "🔴"
-                lines.append(f"## {subsystem} {status}")
-                if h.get("num_user"):
-                    lines.append(f"- **Users**: {h.get('num_user')}")
-                if h.get("num_guest"):
-                    lines.append(f"- **Guests**: {h.get('num_guest')}")
-                if h.get("tx_bytes-r"):
-                    lines.append(f"- **TX Rate**: {_format_bytes(h.get('tx_bytes-r', 0))}/s")
-                if h.get("rx_bytes-r"):
-                    lines.append(f"- **RX Rate**: {_format_bytes(h.get('rx_bytes-r', 0))}/s")
+                sub = h.get("subsystem", "?").upper()
+                status = "🟢 OK" if h.get("status") == "ok" else "🔴 ISSUE"
+                lines.append(f"## {sub}: {status}")
+                if h.get("num_user"): lines.append(f"  - Users: {h['num_user']}")
+                if h.get("num_ap"): lines.append(f"  - APs: {h['num_ap']}")
+                if h.get("tx_bytes-r"): lines.append(f"  - TX: {_fmt_bytes(h['tx_bytes-r'])}/s")
+                if h.get("rx_bytes-r"): lines.append(f"  - RX: {_fmt_bytes(h['rx_bytes-r'])}/s")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_get_alarms", annotations={"readOnlyHint": True})
+    async def unifi_get_alarms(params: BaseInput) -> str:
+        """Get active alarms and alerts."""
+        try:
+            alarms = await _api_get("/stat/alarm")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"alarms": alarms, "count": len(alarms)}, indent=2)
+
+            if not alarms:
+                return "# Alarms\n\n✅ No active alarms"
+
+            lines = [f"# Active Alarms ({len(alarms)})", ""]
+            for a in alarms[:20]:
+                lines.append(f"- ⚠️ **{a.get('key', '?')}**: {a.get('msg', 'No message')}")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_list_rogueaps", annotations={"readOnlyHint": True})
+    async def unifi_list_rogueaps(params: BaseInput) -> str:
+        """List detected rogue/neighbor access points for RF analysis."""
+        try:
+            rogues = await _api_get("/stat/rogueap")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"rogueaps": rogues, "count": len(rogues)}, indent=2)
+
+            lines = [f"# Neighbor APs ({len(rogues)})", ""]
+            by_channel = {}
+            for r in rogues:
+                ch = r.get("channel", 0)
+                by_channel.setdefault(ch, []).append(r)
+
+            for ch in sorted(by_channel.keys()):
+                aps = by_channel[ch]
+                lines.append(f"## Channel {ch} ({len(aps)} APs)")
+                for r in sorted(aps, key=lambda x: x.get("rssi", 0), reverse=True)[:5]:
+                    essid = r.get("essid", "Hidden") or "Hidden"
+                    rssi = r.get("rssi", "?")
+                    bssid = r.get("bssid", "?")
+                    lines.append(f"  - {essid} ({bssid}) rssi:{rssi}")
                 lines.append("")
             return "\n".join(lines)
         except Exception as e:
             return _handle_error(e)
 
-    @mcp.tool(
-        name="unifi_get_alarms",
-        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
-    )
-    async def unifi_get_alarms(params: BaseInput) -> str:
-        """Get active alarms and alerts from the UniFi controller."""
+    @mcp.tool(name="unifi_get_dpi", annotations={"readOnlyHint": True})
+    async def unifi_get_dpi(params: BaseInput) -> str:
+        """Get Deep Packet Inspection traffic analysis by category."""
         try:
-            alarms = await _unifi_api("/stat/alarm")
+            dpi = await _api_get("/stat/sitedpi")
             if params.response_format == ResponseFormat.JSON:
-                return json.dumps({"alarms": alarms, "count": len(alarms)}, indent=2)
+                return json.dumps({"dpi": dpi}, indent=2)
 
-            if not alarms:
-                return "# Alarms\n\n✅ No active alarms."
+            if not dpi:
+                return "# DPI Stats\n\nNo DPI data available (may need to enable DPI in settings)"
 
-            lines = ["# Active Alarms", "", f"Found {len(alarms)} alarm(s)", ""]
-            for a in alarms[:20]:
-                lines.append(f"- ⚠️ **{a.get('key', 'Unknown')}**: {a.get('msg', 'No message')}")
+            # DPI category mapping
+            cat_names = {0: "Unknown", 1: "Instant Messaging", 3: "Social Networks",
+                         4: "Streaming", 5: "VoIP", 7: "Productivity", 10: "Web",
+                         13: "File Sharing", 18: "Gaming", 20: "Network Protocols"}
+
+            lines = ["# DPI Traffic Analysis", ""]
+            by_cat = dpi[0].get("by_cat", []) if dpi else []
+            by_cat_sorted = sorted(by_cat, key=lambda x: x.get("rx_bytes", 0) + x.get("tx_bytes", 0), reverse=True)
+
+            for cat in by_cat_sorted[:15]:
+                cat_id = cat.get("cat", 0)
+                cat_name = cat_names.get(cat_id, f"Category {cat_id}")
+                rx = cat.get("rx_bytes", 0) / (1024**3)
+                tx = cat.get("tx_bytes", 0) / (1024**3)
+                lines.append(f"- **{cat_name}**: ↓{rx:.2f}GB ↑{tx:.2f}GB")
             return "\n".join(lines)
         except Exception as e:
             return _handle_error(e)
 
-    # REST API endpoints for direct HTTP access (used by LangGraph)
-    async def api_devices(request):
-        """REST endpoint for listing devices."""
+    # === WLAN MANAGEMENT ===
+
+    @mcp.tool(name="unifi_list_wlans", annotations={"readOnlyHint": True})
+    async def unifi_list_wlans(params: BaseInput) -> str:
+        """List all configured WLANs (SSIDs) with detailed settings."""
         try:
-            data = await _unifi_api("/stat/device")
-            return JSONResponse({"status": "ok", "data": data})
+            wlans = await _api_get("/rest/wlanconf")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"wlans": wlans, "count": len(wlans)}, indent=2)
+
+            lines = [f"# WLANs ({len(wlans)})", ""]
+            for w in wlans:
+                status = "🟢" if w.get("enabled") else "🔴"
+                name = w.get("name", "Unknown")
+                wlan_id = w.get("_id", "?")
+                band = w.get("wlan_band", "both")
+                security = w.get("security", "open")
+                hidden = "hidden" if w.get("hide_ssid") else "visible"
+                isolation = "isolated" if w.get("l2_isolation") else "not isolated"
+
+                lines.append(f"## {name} {status}")
+                lines.append(f"- **ID**: `{wlan_id}`")
+                lines.append(f"- **Band**: {band} | **Security**: {security}")
+                lines.append(f"- **Visibility**: {hidden} | **Client Isolation**: {isolation}")
+                lines.append("")
+            return "\n".join(lines)
         except Exception as e:
-            logger.error(f"REST api_devices error: {e}")
-            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_create_wlan", annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def unifi_create_wlan(params: WlanCreateInput) -> str:
+        """Create a new WLAN (SSID). Set confirmation=true to execute."""
+        if not params.confirmation:
+            config = {
+                "name": params.name,
+                "band": params.band,
+                "enabled": params.enabled,
+                "hidden": params.hide_ssid,
+                "client_isolation": params.client_isolation,
+                "iot_optimized": params.iot_optimized,
+            }
+            return f"""# WLAN Creation Preview
+
+**This is a DRY RUN. Set confirmation=true to create.**
+
+## Proposed Configuration
+- **SSID**: {params.name}
+- **Band**: {params.band}
+- **Enabled**: {params.enabled}
+- **Hidden**: {params.hide_ssid}
+- **Client Isolation**: {params.client_isolation}
+- **IoT Optimized**: {params.iot_optimized}
+
+{"### IoT Optimizations Applied:" if params.iot_optimized else ""}
+{"- DTIM period: 3 (battery-friendly)" if params.iot_optimized else ""}
+{"- UAPSD: enabled (power saving)" if params.iot_optimized else ""}
+{"- Fast roaming: disabled" if params.iot_optimized else ""}
+{"- BSS transition: disabled" if params.iot_optimized else ""}
+{"- Proxy ARP: enabled" if params.iot_optimized else ""}
+
+To create this WLAN, call again with `confirmation=true`
+"""
+
+        try:
+            # Get default network ID
+            networks = await _api_get("/rest/networkconf")
+            network_id = None
+            for n in networks:
+                if n.get("purpose") == "corporate":
+                    network_id = n.get("_id")
+                    break
+
+            # Build WLAN config
+            wlan_config = {
+                "name": params.name,
+                "x_passphrase": params.passphrase,
+                "security": "wpapsk",
+                "wpa_mode": "wpa2",
+                "wpa_enc": "ccmp",
+                "enabled": params.enabled,
+                "hide_ssid": params.hide_ssid,
+                "l2_isolation": params.client_isolation,
+                "wlan_band": params.band,
+                "networkconf_id": network_id,
+            }
+
+            # Apply IoT optimizations
+            if params.iot_optimized:
+                wlan_config.update({
+                    "dtim_mode": "custom",
+                    "dtim_ng": 3,
+                    "dtim_na": 3,
+                    "uapsd_enabled": True,
+                    "fast_roaming_enabled": False,
+                    "bss_transition": False,
+                    "proxy_arp": True,
+                    "minrate_ng_enabled": False,
+                    "minrate_na_enabled": False,
+                })
+
+            result = await _api_post("/rest/wlanconf", wlan_config)
+            wlan_id = result.get("data", [{}])[0].get("_id", "unknown")
+
+            return f"""# WLAN Created Successfully ✅
+
+- **SSID**: {params.name}
+- **ID**: `{wlan_id}`
+- **Band**: {params.band}
+- **Client Isolation**: {params.client_isolation}
+- **IoT Optimized**: {params.iot_optimized}
+
+The SSID should appear on your APs within 30 seconds.
+"""
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_update_wlan", annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def unifi_update_wlan(params: WlanUpdateInput) -> str:
+        """Update an existing WLAN. Set confirmation=true to execute."""
+        if not params.confirmation:
+            changes = []
+            if params.name: changes.append(f"name → {params.name}")
+            if params.passphrase: changes.append("passphrase → (new value)")
+            if params.enabled is not None: changes.append(f"enabled → {params.enabled}")
+            if params.band: changes.append(f"band → {params.band}")
+            if params.client_isolation is not None: changes.append(f"client_isolation → {params.client_isolation}")
+
+            return f"""# WLAN Update Preview
+
+**This is a DRY RUN. Set confirmation=true to apply.**
+
+## WLAN ID: `{params.wlan_id}`
+
+## Proposed Changes
+{chr(10).join(f"- {c}" for c in changes) if changes else "- No changes specified"}
+
+To apply these changes, call again with `confirmation=true`
+"""
+
+        try:
+            # Get current config
+            wlans = await _api_get("/rest/wlanconf")
+            current = None
+            for w in wlans:
+                if w.get("_id") == params.wlan_id:
+                    current = w
+                    break
+
+            if not current:
+                return f"Error: WLAN ID `{params.wlan_id}` not found"
+
+            # Build update
+            update = {}
+            if params.name: update["name"] = params.name
+            if params.passphrase: update["x_passphrase"] = params.passphrase
+            if params.enabled is not None: update["enabled"] = params.enabled
+            if params.band: update["wlan_band"] = params.band
+            if params.client_isolation is not None: update["l2_isolation"] = params.client_isolation
+
+            await _api_put(f"/rest/wlanconf/{params.wlan_id}", update)
+
+            return f"""# WLAN Updated Successfully ✅
+
+- **WLAN ID**: `{params.wlan_id}`
+- **Changes Applied**: {len(update)}
+
+Changes will propagate to APs within 30 seconds.
+"""
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_delete_wlan", annotations={"readOnlyHint": False, "destructiveHint": True})
+    async def unifi_delete_wlan(params: WlanDeleteInput) -> str:
+        """Delete a WLAN. DESTRUCTIVE - requires confirmation=true."""
+        if not params.confirmation:
+            try:
+                wlans = await _api_get("/rest/wlanconf")
+                wlan_name = "Unknown"
+                for w in wlans:
+                    if w.get("_id") == params.wlan_id:
+                        wlan_name = w.get("name", "Unknown")
+                        break
+
+                return f"""# ⚠️ WLAN Deletion Warning
+
+**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**
+
+## Target WLAN
+- **Name**: {wlan_name}
+- **ID**: `{params.wlan_id}`
+
+All clients on this SSID will be disconnected immediately.
+
+To delete this WLAN, call again with `confirmation=true`
+"""
+            except Exception as e:
+                return _handle_error(e)
+
+        try:
+            await _api_delete(f"/rest/wlanconf/{params.wlan_id}")
+            return f"""# WLAN Deleted ✅
+
+- **WLAN ID**: `{params.wlan_id}`
+
+The SSID has been removed. Connected clients will be disconnected.
+"""
+        except Exception as e:
+            return _handle_error(e)
+
+    # === DEVICE OPERATIONS ===
+
+    @mcp.tool(name="unifi_restart_device", annotations={"readOnlyHint": False, "destructiveHint": True})
+    async def unifi_restart_device(params: DeviceActionInput) -> str:
+        """Restart a UniFi device. DESTRUCTIVE - requires confirmation=true."""
+        if not params.confirmation:
+            try:
+                devices = await _api_get("/stat/device")
+                device_name = "Unknown"
+                for d in devices:
+                    if d.get("mac", "").lower() == params.mac.lower():
+                        device_name = d.get("name", d.get("model", "Unknown"))
+                        break
+
+                return f"""# ⚠️ Device Restart Warning
+
+**This will cause a brief network outage. Set confirmation=true to proceed.**
+
+## Target Device
+- **Name**: {device_name}
+- **MAC**: {params.mac}
+
+All clients connected to this device will be temporarily disconnected.
+
+To restart, call again with `confirmation=true`
+"""
+            except Exception as e:
+                return _handle_error(e)
+
+        try:
+            await _api_post("/cmd/devmgr", {"cmd": "restart", "mac": params.mac.lower()})
+            return f"""# Device Restart Initiated ✅
+
+- **MAC**: {params.mac}
+
+The device will restart and reconnect within 2-3 minutes.
+"""
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_locate_device", annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def unifi_locate_device(params: DeviceActionInput) -> str:
+        """Flash the LED on a device to locate it physically."""
+        try:
+            await _api_post("/cmd/devmgr", {"cmd": "set-locate", "mac": params.mac.lower()})
+            return f"""# Device Locate Activated ✅
+
+- **MAC**: {params.mac}
+
+The device LED is now flashing. Call again with cmd="unset-locate" to stop.
+"""
+        except Exception as e:
+            return _handle_error(e)
+
+    # === CLIENT MANAGEMENT ===
+
+    @mcp.tool(name="unifi_block_client", annotations={"readOnlyHint": False, "destructiveHint": True})
+    async def unifi_block_client(params: ClientActionInput) -> str:
+        """Block a client from connecting. DESTRUCTIVE - requires confirmation=true."""
+        if not params.confirmation:
+            return f"""# ⚠️ Client Block Warning
+
+**This will disconnect and block the client. Set confirmation=true to proceed.**
+
+## Target Client
+- **MAC**: {params.mac}
+
+The client will be immediately disconnected and unable to reconnect.
+
+To block, call again with `confirmation=true`
+"""
+
+        try:
+            await _api_post("/cmd/stamgr", {"cmd": "block-sta", "mac": params.mac.lower()})
+            return f"""# Client Blocked ✅
+
+- **MAC**: {params.mac}
+
+The client is now blocked from connecting.
+"""
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # Try alternative endpoint for newer UniFi
+                try:
+                    await _api_post("/rest/user", {"mac": params.mac.lower(), "blocked": True})
+                    return f"# Client Blocked ✅\n\n- **MAC**: {params.mac}"
+                except:
+                    pass
+            return _handle_error(e)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_unblock_client", annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def unifi_unblock_client(params: ClientActionInput) -> str:
+        """Unblock a previously blocked client. Requires confirmation=true."""
+        if not params.confirmation:
+            return f"""# Client Unblock Preview
+
+**Set confirmation=true to proceed.**
+
+## Target Client
+- **MAC**: {params.mac}
+
+To unblock, call again with `confirmation=true`
+"""
+
+        try:
+            await _api_post("/cmd/stamgr", {"cmd": "unblock-sta", "mac": params.mac.lower()})
+            return f"""# Client Unblocked ✅
+
+- **MAC**: {params.mac}
+
+The client can now reconnect to the network.
+"""
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                try:
+                    await _api_post("/rest/user", {"mac": params.mac.lower(), "blocked": False})
+                    return f"# Client Unblocked ✅\n\n- **MAC**: {params.mac}"
+                except:
+                    pass
+            return _handle_error(e)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_name_client", annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def unifi_name_client(params: ClientNameInput) -> str:
+        """Assign a friendly name to a client for easier identification."""
+        try:
+            # Check if user exists
+            users = await _api_get("/rest/user")
+            user_id = None
+            for u in users:
+                if u.get("mac", "").lower() == params.mac.lower():
+                    user_id = u.get("_id")
+                    break
+
+            if user_id:
+                await _api_put(f"/rest/user/{user_id}", {"name": params.name})
+            else:
+                await _api_post("/rest/user", {"mac": params.mac.lower(), "name": params.name})
+
+            return f"""# Client Named ✅
+
+- **MAC**: {params.mac}
+- **Name**: {params.name}
+
+The client will now appear with this name in the UniFi dashboard.
+"""
+        except Exception as e:
+            return _handle_error(e)
+
+    # === RF OPTIMIZATION ===
+
+    @mcp.tool(name="unifi_get_rf_settings", annotations={"readOnlyHint": True})
+    async def unifi_get_rf_settings(params: BaseInput) -> str:
+        """Get current RF optimization settings (Radio AI, Roaming Assistant, etc.)."""
+        try:
+            settings = await _api_get("/rest/setting")
+
+            rf_settings = {}
+            for s in settings:
+                key = s.get("key", "")
+                if key in ["radio_ai", "roaming_assistant", "network_optimization"]:
+                    rf_settings[key] = s
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"rf_settings": rf_settings}, indent=2)
+
+            lines = ["# RF Optimization Settings", ""]
+
+            # Radio AI
+            radio_ai = rf_settings.get("radio_ai", {})
+            ai_enabled = radio_ai.get("enabled", False)
+            lines.append(f"## Radio AI: {'🟢 Enabled' if ai_enabled else '🔴 Disabled'}")
+            lines.append("Automatically optimizes channel and power settings")
+            lines.append("")
+
+            # Roaming Assistant
+            roaming = rf_settings.get("roaming_assistant", {})
+            roam_enabled = roaming.get("enabled", False)
+            roam_threshold = roaming.get("rssi_threshold", -70)
+            lines.append(f"## Roaming Assistant: {'🟢 Enabled' if roam_enabled else '🔴 Disabled'}")
+            lines.append(f"RSSI threshold: {roam_threshold} dBm")
+            lines.append("Disconnects clients with poor signal to encourage roaming")
+            lines.append("")
+
+            # Network Optimization
+            net_opt = rf_settings.get("network_optimization", {})
+            opt_enabled = net_opt.get("enabled", False)
+            lines.append(f"## Network Optimization: {'🟢 Enabled' if opt_enabled else '🔴 Disabled'}")
+            lines.append("")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(name="unifi_set_rf_setting", annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def unifi_set_rf_setting(params: RFSettingInput) -> str:
+        """Configure RF optimization settings. Requires confirmation=true."""
+        valid_settings = ["radio_ai", "roaming_assistant", "network_optimization"]
+        if params.setting not in valid_settings:
+            return f"Error: Invalid setting. Choose from: {', '.join(valid_settings)}"
+
+        if not params.confirmation:
+            return f"""# RF Setting Change Preview
+
+**Set confirmation=true to apply.**
+
+## Setting
+- **Name**: {params.setting}
+- **New Value**: {'enabled' if params.enabled else 'disabled'}
+
+To apply, call again with `confirmation=true`
+"""
+
+        try:
+            # Get current setting to find its ID
+            settings = await _api_get("/rest/setting")
+            setting_id = None
+            for s in settings:
+                if s.get("key") == params.setting:
+                    setting_id = s.get("_id")
+                    break
+
+            if not setting_id:
+                return f"Error: Setting '{params.setting}' not found"
+
+            await _api_put(f"/rest/setting/{setting_id}", {"enabled": params.enabled})
+
+            return f"""# RF Setting Updated ✅
+
+- **Setting**: {params.setting}
+- **Status**: {'enabled' if params.enabled else 'disabled'}
+
+Changes will take effect within 30 seconds.
+"""
+        except Exception as e:
+            return _handle_error(e)
+
+    # === REST API ENDPOINTS (for direct HTTP access) ===
+
+    async def api_health_check(request):
+        return JSONResponse({"status": "healthy", "service": "unifi-mcp"})
 
     async def api_clients(request):
-        """REST endpoint for listing clients."""
         try:
-            data = await _unifi_api("/stat/sta")
-            return JSONResponse({"status": "ok", "data": data})
+            data = await _api_get("/stat/sta")
+            return JSONResponse({"status": "ok", "data": data, "count": len(data)})
         except Exception as e:
-            logger.error(f"REST api_clients error: {e}")
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-    async def api_health(request):
-        """REST endpoint for network health."""
+    async def api_devices(request):
         try:
-            data = await _unifi_api("/stat/health")
-            return JSONResponse({"status": "ok", "data": data})
+            data = await _api_get("/stat/device")
+            return JSONResponse({"status": "ok", "data": data, "count": len(data)})
         except Exception as e:
-            logger.error(f"REST api_health error: {e}")
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
-    async def api_alarms(request):
-        """REST endpoint for alarms."""
+    async def api_wlans(request):
         try:
-            data = await _unifi_api("/stat/alarm")
-            return JSONResponse({"status": "ok", "data": data})
+            data = await _api_get("/rest/wlanconf")
+            return JSONResponse({"status": "ok", "data": data, "count": len(data)})
         except Exception as e:
-            logger.error(f"REST api_alarms error: {e}")
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
     async def api_index(request):
-        """REST endpoint listing available APIs."""
         return JSONResponse({
             "status": "ok",
-            "endpoints": [
-                "/health - Service health check",
-                "/api/devices - List all UniFi devices",
-                "/api/clients - List connected clients",
-                "/api/health - Network health status",
-                "/api/alarms - Active alarms",
-            ]
+            "service": "UniFi MCP Server",
+            "endpoints": {
+                "/health": "Health check",
+                "/api/clients": "Connected clients",
+                "/api/devices": "Network devices",
+                "/api/wlans": "WLAN configurations",
+                "/mcp": "MCP protocol endpoint",
+            }
         })
 
-    async def rest_health(request):
-        """Health check endpoint for K8s probes."""
-        return JSONResponse({"status": "healthy"})
+    # === MAIN ===
 
     if __name__ == "__main__":
         import uvicorn
+
         rest_routes = [
-            Route("/health", rest_health),
+            Route("/health", api_health_check),
             Route("/api", api_index),
-            Route("/api/devices", api_devices),
             Route("/api/clients", api_clients),
-            Route("/api/health", api_health),
-            Route("/api/alarms", api_alarms),
+            Route("/api/devices", api_devices),
+            Route("/api/wlans", api_wlans),
         ]
+
         mcp_app = mcp.http_app()
         app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+
         uvicorn.run(app, host="0.0.0.0", port=8000)
 ---
 apiVersion: apps/v1
@@ -272,6 +892,8 @@ spec:
     metadata:
       labels:
         app: unifi-mcp
+      annotations:
+        configmap-hash: "v2-comprehensive"
     spec:
       containers:
         - name: unifi-mcp
@@ -295,6 +917,18 @@ spec:
           resources:
             requests: {memory: "128Mi", cpu: "100m"}
             limits: {memory: "256Mi", cpu: "500m"}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
       volumes:
         - name: code
           configMap:
