@@ -24,7 +24,7 @@ data:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.1:443")
+    UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.154:11443")
     UNIFI_API_KEY = os.environ.get("UNIFI_API_KEY", "")
     UNIFI_SITE = os.environ.get("UNIFI_SITE", "default")
 
@@ -283,7 +283,7 @@ spec:
             - containerPort: 8000
           env:
             - name: UNIFI_HOST
-              value: "https://10.10.0.1:443"
+              value: "https://10.10.0.154:11443"
             - name: UNIFI_API_KEY
               valueFrom:
                 secretKeyRef:

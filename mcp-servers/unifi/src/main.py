@@ -12,7 +12,7 @@ import httpx
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.1:443")
+UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.154:11443")
 UNIFI_USER = os.environ.get("UNIFI_USER", "")
 UNIFI_PASSWORD = os.environ.get("UNIFI_PASSWORD", "")
 UNIFI_SITE = os.environ.get("UNIFI_SITE", "default")
