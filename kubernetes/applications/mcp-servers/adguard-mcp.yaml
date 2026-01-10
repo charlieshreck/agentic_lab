@@ -161,6 +161,74 @@ data:
         except Exception as e:
             return _handle_error(e)
 
+    @mcp.tool(
+        name="adguard_list_rewrites",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def adguard_list_rewrites(params: BaseInput) -> str:
+        """List all DNS rewrites (custom domain to IP mappings)."""
+        try:
+            rewrites = await _adguard_api("control/rewrite/list")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"rewrites": rewrites, "count": len(rewrites)}, indent=2)
+
+            lines = ["# DNS Rewrites", "", f"Total: {len(rewrites)} rewrites", ""]
+            for r in sorted(rewrites, key=lambda x: x.get("domain", "")):
+                domain = r.get("domain", "")
+                answer = r.get("answer", "")
+                lines.append(f"- `{domain}` → `{answer}`")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    class RewriteInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        domain: str = Field(description="Domain name (e.g., qdrant.kernow.io)")
+        answer: str = Field(description="IP address or target domain")
+
+    @mcp.tool(
+        name="adguard_add_rewrite",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def adguard_add_rewrite(params: RewriteInput) -> str:
+        """Add a DNS rewrite rule (domain to IP mapping)."""
+        try:
+            await _adguard_api("control/rewrite/add", method="POST", data={
+                "domain": params.domain,
+                "answer": params.answer
+            })
+            return f"✅ Added rewrite: `{params.domain}` → `{params.answer}`"
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="adguard_delete_rewrite",
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def adguard_delete_rewrite(params: RewriteInput) -> str:
+        """Delete a DNS rewrite rule."""
+        try:
+            await _adguard_api("control/rewrite/delete", method="POST", data={
+                "domain": params.domain,
+                "answer": params.answer
+            })
+            return f"✅ Deleted rewrite: `{params.domain}` → `{params.answer}`"
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # REST API for discovery/automation
+    # ============================================================================
+
+    async def rest_rewrites(request):
+        """REST endpoint to list rewrites."""
+        try:
+            rewrites = await _adguard_api("control/rewrite/list")
+            return JSONResponse({"status": "ok", "data": rewrites})
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
     # ============================================================================
     # REST API
     # ============================================================================
@@ -175,7 +243,10 @@ data:
 
     if __name__ == "__main__":
         import uvicorn
-        rest_routes = [Route("/health", rest_health, methods=["GET"])]
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/rewrites", rest_rewrites, methods=["GET"]),
+        ]
         mcp_app = mcp.http_app()
         app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
         uvicorn.run(app, host="0.0.0.0", port=8000)
