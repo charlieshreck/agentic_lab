@@ -48,3 +48,14 @@ data:
     general_settings:
       master_key: null
       drop_params: true
+
+    # Logging - track all requests to catch abuse
+    litellm_settings:
+      set_verbose: false
+      json_logs: true
+      store_audit_logs: true
+      request_timeout: 60
+
+    # Log every request with caller info
+    environment_variables:
+      LITELLM_LOG_LEVEL: INFO
