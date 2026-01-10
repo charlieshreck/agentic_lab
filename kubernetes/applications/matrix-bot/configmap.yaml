@@ -56,6 +56,9 @@ data:
             self.conversations = {}  # room_id or thread_id -> conversation history
             self.http_client = httpx.AsyncClient(timeout=120.0)
             self.max_history = 20  # Keep last N messages per conversation
+            self.startup_time = int(asyncio.get_event_loop().time() * 1000)  # ms timestamp
+            import time
+            self.startup_time = int(time.time() * 1000)  # Unix ms for comparison with event timestamps
 
         async def login(self):
             """Login to Matrix homeserver."""
@@ -92,6 +95,11 @@ data:
         async def on_message(self, room, event):
             """Handle incoming messages."""
             try:
+                # Ignore messages from before bot started (prevents replay on restart)
+                event_time = event.server_timestamp
+                if event_time < self.startup_time:
+                    return
+
                 logger.info(f"=== MESSAGE RECEIVED from {event.sender} ===")
                 logger.info(f"Body: {event.body}")
 
