@@ -30,7 +30,7 @@ data:
     # Configuration
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
-    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-004")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
 
     # MCP endpoints (running in monitoring cluster)
     MCP_OPNSENSE_URL = os.environ.get("MCP_OPNSENSE_URL", "http://10.30.0.20:31082")

@@ -1,4 +1,329 @@
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: device-types-seed-script
+  namespace: ai-platform
+  labels:
+    app: qdrant
+    component: seed
+data:
+  seed.py: |
+    import httpx
+    import uuid
+    import json
+    import os
+
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+
+    def get_embedding(text):
+        response = httpx.post(
+            f"{LITELLM_URL}/embeddings",
+            json={"model": "embeddings", "input": text},
+            timeout=60.0
+        )
+        response.raise_for_status()
+        return response.json()["data"][0]["embedding"]
+
+    DEVICE_TYPES = [
+        # IoT - Tasmota
+        {
+            "name": "tasmota",
+            "description": "Tasmota open source firmware for ESP8266/ESP32 IoT devices. Common on Sonoff, BlitzWolf, and converted Tuya devices. Supports HTTP API and MQTT.",
+            "category": "iot",
+            "manufacturers": ["sonoff", "blitzwolf", "tuya", "shelly", "wemos"],
+            "protocols": ["http", "mqtt"],
+            "discovery_methods": ["http_probe", "mdns"],
+            "discovery_signatures": {
+                "http_endpoints": ["/cm?cmnd=Status%200"],
+                "response_contains": ["StatusSTS", "StatusFWR"]
+            },
+            "control_api": {
+                "status": {"method": "GET", "url": "/cm?cmnd=Status%200"},
+                "power_on": {"method": "GET", "url": "/cm?cmnd=Power%20On"},
+                "power_off": {"method": "GET", "url": "/cm?cmnd=Power%20Off"},
+                "power_toggle": {"method": "GET", "url": "/cm?cmnd=Power%20Toggle"},
+                "restart": {"method": "GET", "url": "/cm?cmnd=Restart%201"},
+                "wifi_config": {"method": "GET", "url": "/cm?cmnd=Backlog%20SSID1%20{ssid}%3B%20Password1%20{password}"},
+                "ota_update": {"method": "GET", "url": "/cm?cmnd=OtaUrl%20{url}%3B%20Upgrade%201"},
+                "mqtt_config": {"method": "GET", "url": "/cm?cmnd=Backlog%20MqttHost%20{host}%3B%20MqttUser%20{user}%3B%20MqttPassword%20{password}"}
+            },
+            "mqtt_topics": {
+                "state": "tele/{device}/STATE",
+                "sensor": "tele/{device}/SENSOR",
+                "command": "cmnd/{device}/{command}",
+                "result": "stat/{device}/RESULT"
+            },
+            "default_credentials_path": "/iot/tasmota-default",
+            "capabilities": ["power_control", "mqtt", "http_api", "ota", "timers", "rules"]
+        },
+
+        # IoT - Shelly
+        {
+            "name": "shelly",
+            "description": "Shelly smart home devices. Gen1 uses CoAP/HTTP, Gen2+ uses RPC over HTTP. No cloud required.",
+            "category": "iot",
+            "manufacturers": ["shelly"],
+            "protocols": ["http", "mqtt", "coap"],
+            "discovery_methods": ["http_probe", "mdns", "coap"],
+            "discovery_signatures": {
+                "http_endpoints": ["/shelly", "/rpc/Shelly.GetDeviceInfo"],
+                "mdns_service": "_shelly._tcp"
+            },
+            "control_api": {
+                "status_gen1": {"method": "GET", "url": "/status"},
+                "status_gen2": {"method": "GET", "url": "/rpc/Shelly.GetStatus"},
+                "relay_on_gen1": {"method": "GET", "url": "/relay/{channel}?turn=on"},
+                "relay_off_gen1": {"method": "GET", "url": "/relay/{channel}?turn=off"},
+                "switch_on_gen2": {"method": "POST", "url": "/rpc/Switch.Set", "body": {"id": "{channel}", "on": True}},
+                "switch_off_gen2": {"method": "POST", "url": "/rpc/Switch.Set", "body": {"id": "{channel}", "on": False}},
+                "wifi_config_gen2": {"method": "POST", "url": "/rpc/WiFi.SetConfig", "body": {"config": {"sta": {"ssid": "{ssid}", "pass": "{password}"}}}}
+            },
+            "default_credentials_path": "/iot/shelly-default",
+            "capabilities": ["power_control", "power_monitoring", "mqtt", "http_api", "ota", "scripting"]
+        },
+
+        # IoT - ESPHome
+        {
+            "name": "esphome",
+            "description": "ESPHome custom firmware for ESP devices. Configured via YAML, native Home Assistant integration.",
+            "category": "iot",
+            "manufacturers": ["espressif", "wemos", "nodemcu"],
+            "protocols": ["http", "mqtt", "esphome_native"],
+            "discovery_methods": ["mdns", "http_probe"],
+            "discovery_signatures": {
+                "mdns_service": "_esphomelib._tcp",
+                "http_endpoints": ["/"]
+            },
+            "control_api": {
+                "note": "ESPHome uses native API or MQTT. HTTP is mainly for OTA and logs.",
+                "logs": {"method": "GET", "url": "/logs"},
+                "ota": {"method": "POST", "url": "/update"}
+            },
+            "default_credentials_path": "/iot/esphome-default",
+            "capabilities": ["sensors", "actuators", "mqtt", "native_api", "ota", "deep_sleep"]
+        },
+
+        # IoT - WLED
+        {
+            "name": "wled",
+            "description": "WLED LED strip controller firmware. HTTP and MQTT control, extensive effects library.",
+            "category": "iot",
+            "manufacturers": ["espressif", "wemos"],
+            "protocols": ["http", "mqtt", "udp"],
+            "discovery_methods": ["mdns", "http_probe"],
+            "discovery_signatures": {
+                "http_endpoints": ["/json/info"],
+                "response_contains": ["vid", "WLED"]
+            },
+            "control_api": {
+                "status": {"method": "GET", "url": "/json/state"},
+                "set_state": {"method": "POST", "url": "/json/state", "body": {"on": True, "bri": 255}},
+                "power_on": {"method": "GET", "url": "/win&T=1"},
+                "power_off": {"method": "GET", "url": "/win&T=0"},
+                "brightness": {"method": "GET", "url": "/win&A={brightness}"},
+                "effect": {"method": "GET", "url": "/win&FX={effect_id}"}
+            },
+            "default_credentials_path": "/iot/wled-default",
+            "capabilities": ["led_control", "effects", "segments", "mqtt", "http_api", "udp_sync"]
+        },
+
+        # Media - Chromecast/Google Cast
+        {
+            "name": "chromecast",
+            "description": "Google Chromecast and Cast-enabled devices. Use Google Cast protocol for control.",
+            "category": "media",
+            "manufacturers": ["google"],
+            "protocols": ["cast", "mdns"],
+            "discovery_methods": ["mdns"],
+            "discovery_signatures": {
+                "mdns_service": "_googlecast._tcp"
+            },
+            "control_api": {
+                "note": "Use pychromecast library for Cast protocol control",
+                "library": "pychromecast"
+            },
+            "default_credentials_path": None,
+            "capabilities": ["media_playback", "volume_control", "screen_cast", "audio_groups"]
+        },
+
+        # Media - Google Home/Nest
+        {
+            "name": "google_home",
+            "description": "Google Home and Nest smart speakers/displays. Voice control and Cast-enabled.",
+            "category": "media",
+            "manufacturers": ["google"],
+            "protocols": ["cast", "google_assistant"],
+            "discovery_methods": ["mdns"],
+            "discovery_signatures": {
+                "mdns_service": "_googlecast._tcp",
+                "txt_contains": ["md=Google"]
+            },
+            "control_api": {
+                "note": "Use pychromecast for basic control, Google Home API for advanced features",
+                "library": "pychromecast"
+            },
+            "default_credentials_path": "/google/home-oauth",
+            "capabilities": ["voice_assistant", "media_playback", "smart_home_control", "broadcast", "routines"]
+        },
+
+        # Infrastructure - UniFi AP
+        {
+            "name": "unifi_ap",
+            "description": "Ubiquiti UniFi Access Points. Managed via UniFi Controller.",
+            "category": "infrastructure",
+            "manufacturers": ["ubiquiti"],
+            "protocols": ["unifi_inform", "ssh"],
+            "discovery_methods": ["unifi_controller", "snmp"],
+            "control_api": {
+                "note": "Control via UniFi Controller API or SSH",
+                "mcp": "unifi-mcp"
+            },
+            "default_credentials_path": "/infrastructure/unifi",
+            "capabilities": ["wifi_management", "client_tracking", "band_steering", "guest_portal"]
+        },
+
+        # Infrastructure - UniFi Switch
+        {
+            "name": "unifi_switch",
+            "description": "Ubiquiti UniFi managed switches. VLAN, PoE, and port management.",
+            "category": "infrastructure",
+            "manufacturers": ["ubiquiti"],
+            "protocols": ["unifi_inform", "ssh", "snmp"],
+            "discovery_methods": ["unifi_controller", "snmp"],
+            "control_api": {
+                "note": "Control via UniFi Controller API",
+                "mcp": "unifi-mcp"
+            },
+            "default_credentials_path": "/infrastructure/unifi",
+            "capabilities": ["vlan_management", "poe_control", "port_mirroring", "stp"]
+        },
+
+        # Storage - Synology
+        {
+            "name": "synology",
+            "description": "Synology NAS devices running DiskStation Manager (DSM).",
+            "category": "storage",
+            "manufacturers": ["synology"],
+            "protocols": ["http", "ssh", "smb", "nfs"],
+            "discovery_methods": ["http_probe", "snmp"],
+            "discovery_signatures": {
+                "http_endpoints": ["/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query"],
+                "response_contains": ["SYNO"]
+            },
+            "control_api": {
+                "login": {"method": "POST", "url": "/webapi/auth.cgi", "params": {"api": "SYNO.API.Auth", "version": "3", "method": "login"}},
+                "system_info": {"method": "GET", "url": "/webapi/entry.cgi?api=SYNO.Core.System&version=1&method=info"},
+                "volumes": {"method": "GET", "url": "/webapi/entry.cgi?api=SYNO.Core.Storage.Volume&version=1&method=list"}
+            },
+            "default_credentials_path": "/storage/synology",
+            "capabilities": ["file_storage", "backup", "docker", "surveillance", "media_server"]
+        },
+
+        # Storage - TrueNAS
+        {
+            "name": "truenas",
+            "description": "TrueNAS storage appliance (CORE or SCALE).",
+            "category": "storage",
+            "manufacturers": ["ixsystems", "truenas"],
+            "protocols": ["http", "ssh", "smb", "nfs", "iscsi"],
+            "discovery_methods": ["http_probe"],
+            "control_api": {
+                "note": "Control via TrueNAS REST API",
+                "mcp": "truenas-mcp"
+            },
+            "default_credentials_path": "/storage/truenas",
+            "capabilities": ["zfs", "file_storage", "block_storage", "replication", "snapshots", "docker"]
+        },
+
+        # Compute - Proxmox
+        {
+            "name": "proxmox",
+            "description": "Proxmox VE hypervisor for VMs and containers.",
+            "category": "compute",
+            "manufacturers": ["proxmox"],
+            "protocols": ["http", "ssh", "spice", "vnc"],
+            "discovery_methods": ["http_probe"],
+            "control_api": {
+                "note": "Control via Proxmox REST API",
+                "mcp": "proxmox-mcp"
+            },
+            "default_credentials_path": "/infrastructure/proxmox",
+            "capabilities": ["vm_management", "container_management", "live_migration", "backup", "ha_cluster"]
+        },
+
+        # Compute - Talos
+        {
+            "name": "talos",
+            "description": "Talos Linux - immutable Kubernetes OS.",
+            "category": "compute",
+            "manufacturers": ["siderolabs"],
+            "protocols": ["talos_api", "kubernetes"],
+            "discovery_methods": ["kubernetes_api"],
+            "control_api": {
+                "note": "Control via talosctl",
+                "mcp": "infrastructure-mcp"
+            },
+            "default_credentials_path": "/infrastructure/talos",
+            "capabilities": ["kubernetes", "immutable_os", "api_driven", "secure_boot"]
+        },
+
+        # Peripheral - Printer (SNMP)
+        {
+            "name": "network_printer",
+            "description": "Network printers with SNMP management.",
+            "category": "peripheral",
+            "manufacturers": ["hp", "canon", "epson", "brother"],
+            "protocols": ["snmp", "http", "ipp"],
+            "discovery_methods": ["snmp", "mdns"],
+            "discovery_signatures": {
+                "mdns_service": "_ipp._tcp",
+                "snmp_oid": "1.3.6.1.2.1.25.3.2.1.3.1"
+            },
+            "control_api": {
+                "status": {"protocol": "snmp", "oid": "1.3.6.1.2.1.25.3.2.1.5.1"},
+                "name": {"protocol": "snmp", "oid": "1.3.6.1.2.1.25.3.2.1.3.1"},
+                "toner_level": {"protocol": "snmp", "oid": "1.3.6.1.2.1.43.11.1.1.9.1.1"}
+            },
+            "default_credentials_path": "/peripheral/printer",
+            "capabilities": ["print", "scan", "copy", "snmp_monitoring"]
+        }
+    ]
+
+    print("Seeding device_types collection...")
+
+    for device_type in DEVICE_TYPES:
+        # Generate embedding from description
+        description = f"{device_type['name']}: {device_type['description']} Manufacturers: {', '.join(device_type['manufacturers'])}. Protocols: {', '.join(device_type['protocols'])}."
+
+        try:
+            vector = get_embedding(description)
+        except Exception as e:
+            print(f"Failed to get embedding for {device_type['name']}: {e}")
+            continue
+
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, device_type['name']))
+
+        point = {
+            "id": point_id,
+            "vector": vector,
+            "payload": device_type
+        }
+
+        response = httpx.put(
+            f"{QDRANT_URL}/collections/device_types/points",
+            json={"points": [point]},
+            timeout=30.0
+        )
+
+        if response.status_code == 200:
+            print(f"  Seeded: {device_type['name']}")
+        else:
+            print(f"  Failed: {device_type['name']} - {response.text}")
+
+    print("Done!")
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -16,324 +341,13 @@ spec:
       - name: seed
         image: python:3.11-slim
         command:
-        - python
+        - /bin/sh
         - -c
         - |
-          import httpx
-          import uuid
-          import json
-          import os
-
-          QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-          LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
-
-          def get_embedding(text):
-              response = httpx.post(
-                  f"{LITELLM_URL}/embeddings",
-                  json={"model": "text-embedding-004", "input": text},
-                  timeout=60.0
-              )
-              response.raise_for_status()
-              return response.json()["data"][0]["embedding"]
-
-          DEVICE_TYPES = [
-              # IoT - Tasmota
-              {
-                  "name": "tasmota",
-                  "description": "Tasmota open source firmware for ESP8266/ESP32 IoT devices. Common on Sonoff, BlitzWolf, and converted Tuya devices. Supports HTTP API and MQTT.",
-                  "category": "iot",
-                  "manufacturers": ["sonoff", "blitzwolf", "tuya", "shelly", "wemos"],
-                  "protocols": ["http", "mqtt"],
-                  "discovery_methods": ["http_probe", "mdns"],
-                  "discovery_signatures": {
-                      "http_endpoints": ["/cm?cmnd=Status%200"],
-                      "response_contains": ["StatusSTS", "StatusFWR"]
-                  },
-                  "control_api": {
-                      "status": {"method": "GET", "url": "/cm?cmnd=Status%200"},
-                      "power_on": {"method": "GET", "url": "/cm?cmnd=Power%20On"},
-                      "power_off": {"method": "GET", "url": "/cm?cmnd=Power%20Off"},
-                      "power_toggle": {"method": "GET", "url": "/cm?cmnd=Power%20Toggle"},
-                      "restart": {"method": "GET", "url": "/cm?cmnd=Restart%201"},
-                      "wifi_config": {"method": "GET", "url": "/cm?cmnd=Backlog%20SSID1%20{ssid}%3B%20Password1%20{password}"},
-                      "ota_update": {"method": "GET", "url": "/cm?cmnd=OtaUrl%20{url}%3B%20Upgrade%201"},
-                      "mqtt_config": {"method": "GET", "url": "/cm?cmnd=Backlog%20MqttHost%20{host}%3B%20MqttUser%20{user}%3B%20MqttPassword%20{password}"}
-                  },
-                  "mqtt_topics": {
-                      "state": "tele/{device}/STATE",
-                      "sensor": "tele/{device}/SENSOR",
-                      "command": "cmnd/{device}/{command}",
-                      "result": "stat/{device}/RESULT"
-                  },
-                  "default_credentials_path": "/iot/tasmota-default",
-                  "capabilities": ["power_control", "mqtt", "http_api", "ota", "timers", "rules"]
-              },
-
-              # IoT - Shelly
-              {
-                  "name": "shelly",
-                  "description": "Shelly smart home devices. Gen1 uses CoAP/HTTP, Gen2+ uses RPC over HTTP. No cloud required.",
-                  "category": "iot",
-                  "manufacturers": ["shelly"],
-                  "protocols": ["http", "mqtt", "coap"],
-                  "discovery_methods": ["http_probe", "mdns", "coap"],
-                  "discovery_signatures": {
-                      "http_endpoints": ["/shelly", "/rpc/Shelly.GetDeviceInfo"],
-                      "mdns_service": "_shelly._tcp"
-                  },
-                  "control_api": {
-                      "status_gen1": {"method": "GET", "url": "/status"},
-                      "status_gen2": {"method": "GET", "url": "/rpc/Shelly.GetStatus"},
-                      "relay_on_gen1": {"method": "GET", "url": "/relay/{channel}?turn=on"},
-                      "relay_off_gen1": {"method": "GET", "url": "/relay/{channel}?turn=off"},
-                      "switch_on_gen2": {"method": "POST", "url": "/rpc/Switch.Set", "body": {"id": "{channel}", "on": True}},
-                      "switch_off_gen2": {"method": "POST", "url": "/rpc/Switch.Set", "body": {"id": "{channel}", "on": False}},
-                      "wifi_config_gen2": {"method": "POST", "url": "/rpc/WiFi.SetConfig", "body": {"config": {"sta": {"ssid": "{ssid}", "pass": "{password}"}}}}
-                  },
-                  "default_credentials_path": "/iot/shelly-default",
-                  "capabilities": ["power_control", "power_monitoring", "mqtt", "http_api", "ota", "scripting"]
-              },
-
-              # IoT - ESPHome
-              {
-                  "name": "esphome",
-                  "description": "ESPHome custom firmware for ESP devices. Configured via YAML, native Home Assistant integration.",
-                  "category": "iot",
-                  "manufacturers": ["espressif", "wemos", "nodemcu"],
-                  "protocols": ["http", "mqtt", "esphome_native"],
-                  "discovery_methods": ["mdns", "http_probe"],
-                  "discovery_signatures": {
-                      "mdns_service": "_esphomelib._tcp",
-                      "http_endpoints": ["/"]
-                  },
-                  "control_api": {
-                      "note": "ESPHome uses native API or MQTT. HTTP is mainly for OTA and logs.",
-                      "logs": {"method": "GET", "url": "/logs"},
-                      "ota": {"method": "POST", "url": "/update"}
-                  },
-                  "default_credentials_path": "/iot/esphome-default",
-                  "capabilities": ["sensors", "actuators", "mqtt", "native_api", "ota", "deep_sleep"]
-              },
-
-              # IoT - WLED
-              {
-                  "name": "wled",
-                  "description": "WLED LED strip controller firmware. HTTP and MQTT control, extensive effects library.",
-                  "category": "iot",
-                  "manufacturers": ["espressif", "wemos"],
-                  "protocols": ["http", "mqtt", "udp"],
-                  "discovery_methods": ["mdns", "http_probe"],
-                  "discovery_signatures": {
-                      "http_endpoints": ["/json/info"],
-                      "response_contains": ["vid", "WLED"]
-                  },
-                  "control_api": {
-                      "status": {"method": "GET", "url": "/json/state"},
-                      "set_state": {"method": "POST", "url": "/json/state", "body": {"on": True, "bri": 255}},
-                      "power_on": {"method": "GET", "url": "/win&T=1"},
-                      "power_off": {"method": "GET", "url": "/win&T=0"},
-                      "brightness": {"method": "GET", "url": "/win&A={brightness}"},
-                      "effect": {"method": "GET", "url": "/win&FX={effect_id}"}
-                  },
-                  "default_credentials_path": "/iot/wled-default",
-                  "capabilities": ["led_control", "effects", "segments", "mqtt", "http_api", "udp_sync"]
-              },
-
-              # Media - Chromecast/Google Cast
-              {
-                  "name": "chromecast",
-                  "description": "Google Chromecast and Cast-enabled devices. Use Google Cast protocol for control.",
-                  "category": "media",
-                  "manufacturers": ["google"],
-                  "protocols": ["cast", "mdns"],
-                  "discovery_methods": ["mdns"],
-                  "discovery_signatures": {
-                      "mdns_service": "_googlecast._tcp"
-                  },
-                  "control_api": {
-                      "note": "Use pychromecast library for Cast protocol control",
-                      "library": "pychromecast"
-                  },
-                  "default_credentials_path": None,
-                  "capabilities": ["media_playback", "volume_control", "screen_cast", "audio_groups"]
-              },
-
-              # Media - Google Home/Nest
-              {
-                  "name": "google_home",
-                  "description": "Google Home and Nest smart speakers/displays. Voice control and Cast-enabled.",
-                  "category": "media",
-                  "manufacturers": ["google"],
-                  "protocols": ["cast", "google_assistant"],
-                  "discovery_methods": ["mdns"],
-                  "discovery_signatures": {
-                      "mdns_service": "_googlecast._tcp",
-                      "txt_contains": ["md=Google"]
-                  },
-                  "control_api": {
-                      "note": "Use pychromecast for basic control, Google Home API for advanced features",
-                      "library": "pychromecast"
-                  },
-                  "default_credentials_path": "/google/home-oauth",
-                  "capabilities": ["voice_assistant", "media_playback", "smart_home_control", "broadcast", "routines"]
-              },
-
-              # Infrastructure - UniFi AP
-              {
-                  "name": "unifi_ap",
-                  "description": "Ubiquiti UniFi Access Points. Managed via UniFi Controller.",
-                  "category": "infrastructure",
-                  "manufacturers": ["ubiquiti"],
-                  "protocols": ["unifi_inform", "ssh"],
-                  "discovery_methods": ["unifi_controller", "snmp"],
-                  "control_api": {
-                      "note": "Control via UniFi Controller API or SSH",
-                      "mcp": "unifi-mcp"
-                  },
-                  "default_credentials_path": "/infrastructure/unifi",
-                  "capabilities": ["wifi_management", "client_tracking", "band_steering", "guest_portal"]
-              },
-
-              # Infrastructure - UniFi Switch
-              {
-                  "name": "unifi_switch",
-                  "description": "Ubiquiti UniFi managed switches. VLAN, PoE, and port management.",
-                  "category": "infrastructure",
-                  "manufacturers": ["ubiquiti"],
-                  "protocols": ["unifi_inform", "ssh", "snmp"],
-                  "discovery_methods": ["unifi_controller", "snmp"],
-                  "control_api": {
-                      "note": "Control via UniFi Controller API",
-                      "mcp": "unifi-mcp"
-                  },
-                  "default_credentials_path": "/infrastructure/unifi",
-                  "capabilities": ["vlan_management", "poe_control", "port_mirroring", "stp"]
-              },
-
-              # Storage - Synology
-              {
-                  "name": "synology",
-                  "description": "Synology NAS devices running DiskStation Manager (DSM).",
-                  "category": "storage",
-                  "manufacturers": ["synology"],
-                  "protocols": ["http", "ssh", "smb", "nfs"],
-                  "discovery_methods": ["http_probe", "snmp"],
-                  "discovery_signatures": {
-                      "http_endpoints": ["/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query"],
-                      "response_contains": ["SYNO"]
-                  },
-                  "control_api": {
-                      "login": {"method": "POST", "url": "/webapi/auth.cgi", "params": {"api": "SYNO.API.Auth", "version": "3", "method": "login"}},
-                      "system_info": {"method": "GET", "url": "/webapi/entry.cgi?api=SYNO.Core.System&version=1&method=info"},
-                      "volumes": {"method": "GET", "url": "/webapi/entry.cgi?api=SYNO.Core.Storage.Volume&version=1&method=list"}
-                  },
-                  "default_credentials_path": "/storage/synology",
-                  "capabilities": ["file_storage", "backup", "docker", "surveillance", "media_server"]
-              },
-
-              # Storage - TrueNAS
-              {
-                  "name": "truenas",
-                  "description": "TrueNAS storage appliance (CORE or SCALE).",
-                  "category": "storage",
-                  "manufacturers": ["ixsystems", "truenas"],
-                  "protocols": ["http", "ssh", "smb", "nfs", "iscsi"],
-                  "discovery_methods": ["http_probe"],
-                  "control_api": {
-                      "note": "Control via TrueNAS REST API",
-                      "mcp": "truenas-mcp"
-                  },
-                  "default_credentials_path": "/storage/truenas",
-                  "capabilities": ["zfs", "file_storage", "block_storage", "replication", "snapshots", "docker"]
-              },
-
-              # Compute - Proxmox
-              {
-                  "name": "proxmox",
-                  "description": "Proxmox VE hypervisor for VMs and containers.",
-                  "category": "compute",
-                  "manufacturers": ["proxmox"],
-                  "protocols": ["http", "ssh", "spice", "vnc"],
-                  "discovery_methods": ["http_probe"],
-                  "control_api": {
-                      "note": "Control via Proxmox REST API",
-                      "mcp": "proxmox-mcp"
-                  },
-                  "default_credentials_path": "/infrastructure/proxmox",
-                  "capabilities": ["vm_management", "container_management", "live_migration", "backup", "ha_cluster"]
-              },
-
-              # Compute - Talos
-              {
-                  "name": "talos",
-                  "description": "Talos Linux - immutable Kubernetes OS.",
-                  "category": "compute",
-                  "manufacturers": ["siderolabs"],
-                  "protocols": ["talos_api", "kubernetes"],
-                  "discovery_methods": ["kubernetes_api"],
-                  "control_api": {
-                      "note": "Control via talosctl",
-                      "mcp": "infrastructure-mcp"
-                  },
-                  "default_credentials_path": "/infrastructure/talos",
-                  "capabilities": ["kubernetes", "immutable_os", "api_driven", "secure_boot"]
-              },
-
-              # Peripheral - Printer (SNMP)
-              {
-                  "name": "network_printer",
-                  "description": "Network printers with SNMP management.",
-                  "category": "peripheral",
-                  "manufacturers": ["hp", "canon", "epson", "brother"],
-                  "protocols": ["snmp", "http", "ipp"],
-                  "discovery_methods": ["snmp", "mdns"],
-                  "discovery_signatures": {
-                      "mdns_service": "_ipp._tcp",
-                      "snmp_oid": "1.3.6.1.2.1.25.3.2.1.3.1"
-                  },
-                  "control_api": {
-                      "status": {"protocol": "snmp", "oid": "1.3.6.1.2.1.25.3.2.1.5.1"},
-                      "name": {"protocol": "snmp", "oid": "1.3.6.1.2.1.25.3.2.1.3.1"},
-                      "toner_level": {"protocol": "snmp", "oid": "1.3.6.1.2.1.43.11.1.1.9.1.1"}
-                  },
-                  "default_credentials_path": "/peripheral/printer",
-                  "capabilities": ["print", "scan", "copy", "snmp_monitoring"]
-              }
-          ]
-
-          print("Seeding device_types collection...")
-
-          for device_type in DEVICE_TYPES:
-              # Generate embedding from description
-              description = f"{device_type['name']}: {device_type['description']} Manufacturers: {', '.join(device_type['manufacturers'])}. Protocols: {', '.join(device_type['protocols'])}."
-
-              try:
-                  vector = get_embedding(description)
-              except Exception as e:
-                  print(f"Failed to get embedding for {device_type['name']}: {e}")
-                  continue
-
-              point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, device_type['name']))
-
-              point = {
-                  "id": point_id,
-                  "vector": vector,
-                  "payload": device_type
-              }
-
-              response = httpx.put(
-                  f"{QDRANT_URL}/collections/device_types/points",
-                  json={"points": [point]},
-                  timeout=30.0
-              )
-
-              if response.status_code == 200:
-                  print(f"  Seeded: {device_type['name']}")
-              else:
-                  print(f"  Failed: {device_type['name']} - {response.text}")
-
-          print("Done!")
-
+          pip install --quiet httpx && python /scripts/seed.py
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
         env:
         - name: QDRANT_URL
           value: "http://qdrant:6333"
@@ -346,3 +360,7 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+      volumes:
+      - name: script
+        configMap:
+          name: device-types-seed-script

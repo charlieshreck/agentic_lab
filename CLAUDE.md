@@ -147,6 +147,74 @@ See `PHASES.md` for detailed implementation timeline.
 
 ---
 
+## Cluster Access (Claude Code Sessions)
+
+### Kubernetes Clusters
+
+Access clusters via kubectl with explicit kubeconfig:
+
+```bash
+# Agentic cluster (10.20.0.0/24)
+export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/kubeconfig
+kubectl get nodes
+
+# Production cluster (10.10.0.0/24)
+export KUBECONFIG=/home/prod_homelab/kubeconfig
+kubectl get nodes
+
+# Monitoring cluster (10.30.0.0/24)
+export KUBECONFIG=/home/monit_homelab/kubeconfig
+kubectl get nodes
+```
+
+### ArgoCD Operations
+
+ArgoCD runs in the agentic cluster. Use kubectl to interact:
+
+```bash
+# Set kubeconfig for agentic cluster
+export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/kubeconfig
+
+# List all ArgoCD applications
+kubectl get applications -n argocd
+
+# Get application status
+kubectl get application <app-name> -n argocd -o jsonpath='{.status.sync.status}'
+
+# Force sync an application (via patch)
+kubectl patch application <app-name> -n argocd --type merge -p '{"operation": {"initiatedBy": {"username": "claude"}, "sync": {"prune": true}}}'
+
+# Watch application sync status
+kubectl get application <app-name> -n argocd -w
+
+# Get sync details
+kubectl describe application <app-name> -n argocd
+
+# Check ArgoCD server logs
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-server --tail=50
+```
+
+### Common Operations
+
+```bash
+# Watch pods in ai-platform namespace
+kubectl get pods -n ai-platform -w
+
+# Check job status
+kubectl get jobs -n ai-platform
+
+# View logs from latest job
+kubectl logs -n ai-platform job/<job-name>
+
+# Restart a deployment
+kubectl rollout restart deployment/<name> -n ai-platform
+
+# Run a one-off job from CronJob
+kubectl create job --from=cronjob/<cronjob-name> <job-name> -n ai-platform
+```
+
+---
+
 ## Repository Structure
 
 ```
