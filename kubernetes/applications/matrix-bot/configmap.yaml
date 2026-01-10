@@ -114,32 +114,60 @@ data:
                 logger.error(traceback.format_exc())
 
         async def handle_command(self, room, event):
-            """Handle messages in room - enables full conversation."""
+            """Handle messages in room - responds to triggers like 'g', 'gemini', etc."""
+            import re
             message = event.body.strip()
             message_lower = message.lower()
             logger.info(f"Handling message: {message[:50]}")
 
+            # Trigger patterns - bot responds to these prefixes
+            triggers = [
+                r'^g[,:\s]+',           # "g, ..." or "g: ..." or "g ..."
+                r'^gemini[,:\s]+',      # "gemini, ..."
+                r'^hey g[,:\s]*',       # "hey g, ..." or "hey g ..."
+                r'^yo g[,:\s]*',        # "yo g ..."
+                r'^ok g[,:\s]*',        # "ok g ..."
+                r'^@[\w.-]+:[\w.-]+',   # @mentions
+            ]
+
+            # Check if message is addressed to us
+            triggered = False
+            query = message
+            for pattern in triggers:
+                match = re.match(pattern, message_lower)
+                if match:
+                    triggered = True
+                    # Strip the trigger from the message
+                    query = message[match.end():].strip()
+                    break
+
+            # Also strip any @mention that might be embedded
+            query = re.sub(r'@[\w.-]+:[\w.-]+', '', query, flags=re.IGNORECASE).strip()
+
+            if not triggered:
+                logger.info("Message not addressed to bot, ignoring")
+                return
+
+            if not query:
+                await self.send_message(room.room_id, "Yes?")
+                return
+
+            query_lower = query.lower()
+
             # Quick commands that don't need conversation context
-            if message_lower in ["status", "what's happening", "what's happening?"]:
+            if query_lower in ["status", "what's happening", "what's happening?"]:
                 logger.info("Status command detected")
                 response = await self.get_platform_status()
                 await self.send_message(room.room_id, response)
                 return
-            elif message_lower in ["what needs attention", "what needs attention?", "pending"]:
+            elif query_lower in ["what needs attention", "what needs attention?", "pending"]:
                 logger.info("Pending command detected")
                 response = await self.get_pending_items()
                 await self.send_message(room.room_id, response)
                 return
-            elif message_lower in ["clear", "reset", "new conversation"]:
+            elif query_lower in ["clear", "reset", "new conversation"]:
                 self.conversations.pop(room.room_id, None)
                 await self.send_message(room.room_id, "Conversation cleared. Starting fresh!")
-                return
-
-            # All other messages are part of conversation
-            # Strip any @mention if present
-            import re
-            query = re.sub(r'@[\w.-]+:[\w.-]+', '', message, flags=re.IGNORECASE).strip()
-            if not query:
                 return
 
             # Get or create conversation history for this room
