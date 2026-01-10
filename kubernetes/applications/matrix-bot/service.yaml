@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: matrix-bot
+  namespace: ai-platform
+  labels:
+    app: matrix-bot
+    component: interaction-layer
+spec:
+  selector:
+    app: matrix-bot
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  type: ClusterIP

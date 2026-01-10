@@ -39,6 +39,9 @@ spec:
           value: "http://langgraph:8000"
         - name: QDRANT_URL
           value: "http://qdrant:6333"
+        ports:
+        - containerPort: 8000
+          name: http
         resources:
           requests:
             memory: "128Mi"
@@ -50,12 +53,17 @@ spec:
         - name: code
           mountPath: /app
           readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
         livenessProbe:
-          exec:
-            command:
-            - python
-            - -c
-            - "import socket; socket.create_connection(('conduit', 6167), timeout=5)"
+          httpGet:
+            path: /health
+            port: 8000
           initialDelaySeconds: 60
           periodSeconds: 30
           timeoutSeconds: 10
