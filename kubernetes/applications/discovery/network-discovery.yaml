@@ -888,31 +888,38 @@ data:
 
 
     async def merge_entities(all_discovered: List[dict]) -> Dict[str, dict]:
-        """Merge entities from multiple sources by MAC or IP."""
-        merged = {}
+        """Merge entities from multiple sources by IP (primary) with MAC correlation."""
+        # First pass: index by IP (required field)
+        by_ip = {}
+        # Also track MAC -> IP mapping for correlation
+        mac_to_ip = {}
 
         for entity in all_discovered:
-            # Use MAC as primary key, fallback to IP
-            key = entity.get("mac") or entity.get("ip")
-            if not key:
+            ip = entity.get("ip")
+            if not ip:
                 continue
 
-            if key in merged:
-                # Merge - prefer non-empty values
-                for k, v in entity.items():
-                    if v and (not merged[key].get(k) or k == "discovered_via"):
-                        if k == "discovered_via":
-                            existing = merged[key].get(k, "")
-                            if existing and v not in existing:
-                                merged[key][k] = f"{existing},{v}"
-                            else:
-                                merged[key][k] = v
-                        else:
-                            merged[key][k] = v
-            else:
-                merged[key] = entity.copy()
+            mac = entity.get("mac", "").upper()
+            if mac:
+                mac_to_ip[mac] = ip
 
-        return merged
+            if ip in by_ip:
+                # Merge - prefer non-empty values, accumulate discovered_via
+                for k, v in entity.items():
+                    if v and (not by_ip[ip].get(k) or k == "discovered_via"):
+                        if k == "discovered_via":
+                            existing = by_ip[ip].get(k, "")
+                            if existing and v not in existing:
+                                by_ip[ip][k] = f"{existing},{v}"
+                            else:
+                                by_ip[ip][k] = v
+                        else:
+                            by_ip[ip][k] = v
+            else:
+                by_ip[ip] = entity.copy()
+
+        logger.info(f"Merged {len(all_discovered)} raw entities into {len(by_ip)} unique IPs")
+        return by_ip
 
 
     async def run_discovery():
