@@ -1884,6 +1884,8 @@ data:
         prompt: str
         use_claude: bool = False
         context: Optional[dict] = None
+        messages: Optional[List[dict]] = None  # Conversation history [{"role": "user/assistant", "content": "..."}]
+        conversation_id: Optional[str] = None  # For tracking conversations
 
     async def build_query_context(prompt: str) -> dict:
         """Build context from MCPs based on query keywords."""
@@ -2006,9 +2008,30 @@ data:
                     f"Instead, explain what systems failed to respond and suggest troubleshooting steps."
                 )
 
-            result = await call_litellm([{"role": "user", "content": enriched_prompt}])
+            # Build messages list with conversation history
+            llm_messages = []
 
-        return {"response": result}
+            # Add system message for context
+            if has_real_data or errors_str:
+                system_content = "You are an AI assistant for a homelab. "
+                if has_real_data:
+                    system_content += "Answer based ONLY on the data provided. Do not invent device names, versions, or statuses."
+                else:
+                    system_content += "CRITICAL: Could not retrieve homelab data. Tell user what failed and suggest troubleshooting."
+                llm_messages.append({"role": "system", "content": system_content})
+
+            # Add conversation history if provided
+            if request.messages:
+                for msg in request.messages[:-1]:  # Exclude last message (current prompt)
+                    llm_messages.append(msg)
+
+            # Add current message with context
+            current_content = enriched_prompt if not request.messages else f"{context_str}{errors_str}USER: {request.prompt}"
+            llm_messages.append({"role": "user", "content": current_content})
+
+            result = await call_litellm(llm_messages)
+
+        return {"response": result, "conversation_id": request.conversation_id}
 
     @app.post("/claude/run")
     async def run_claude_task(prompt: str, context: Optional[dict] = None):

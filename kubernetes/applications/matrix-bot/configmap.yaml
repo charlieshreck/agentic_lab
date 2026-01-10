@@ -46,8 +46,9 @@ data:
     class AgenticMatrixBot:
         def __init__(self):
             self.client = AsyncClient(MATRIX_HOMESERVER, MATRIX_USER_ID)
-            self.gemini_conversations = {}  # thread_id -> conversation history
+            self.conversations = {}  # room_id or thread_id -> conversation history
             self.http_client = httpx.AsyncClient(timeout=120.0)
+            self.max_history = 20  # Keep last N messages per conversation
 
         async def login(self):
             """Login to Matrix homeserver."""
@@ -106,28 +107,51 @@ data:
                 logger.error(traceback.format_exc())
 
         async def handle_command(self, room, event):
-            """Handle direct commands in room (not in thread)."""
-            message = event.body.lower().strip()
-            logger.info(f"Handling command: {message[:50]}")
+            """Handle messages in room - enables full conversation."""
+            message = event.body.strip()
+            message_lower = message.lower()
+            logger.info(f"Handling message: {message[:50]}")
 
-            if message in ["status", "what's happening", "what's happening?"]:
+            # Quick commands that don't need conversation context
+            if message_lower in ["status", "what's happening", "what's happening?"]:
                 logger.info("Status command detected")
                 response = await self.get_platform_status()
-            elif message in ["what needs attention", "what needs attention?", "pending"]:
+                await self.send_message(room.room_id, response)
+                return
+            elif message_lower in ["what needs attention", "what needs attention?", "pending"]:
                 logger.info("Pending command detected")
                 response = await self.get_pending_items()
-            elif "@agentic" in message or "agentic-bot" in message:
-                # Direct mention - treat as general query
-                # Handle both @agentic and @agentic-bot:agentic.local
-                logger.info("Mention detected - querying Gemini")
-                import re
-                query = re.sub(r'@agentic[-\w]*:?[\w.]*', '', event.body, flags=re.IGNORECASE).strip()
-                if not query:
-                    query = "hello"
-                response = await self.query_gemini(query, {})
-            else:
-                logger.info("No matching command, ignoring")
-                return  # Ignore non-command messages in room
+                await self.send_message(room.room_id, response)
+                return
+            elif message_lower in ["clear", "reset", "new conversation"]:
+                self.conversations.pop(room.room_id, None)
+                await self.send_message(room.room_id, "Conversation cleared. Starting fresh!")
+                return
+
+            # All other messages are part of conversation
+            # Strip any @mention if present
+            import re
+            query = re.sub(r'@[\w.-]+:[\w.-]+', '', message, flags=re.IGNORECASE).strip()
+            if not query:
+                return
+
+            # Get or create conversation history for this room
+            conv_id = room.room_id
+            history = self.conversations.get(conv_id, [])
+
+            # Add user message to history
+            history.append({"role": "user", "content": query})
+
+            # Query Gemini with history
+            response = await self.query_gemini(query, {}, history, conv_id)
+
+            # Add assistant response to history
+            history.append({"role": "assistant", "content": response})
+
+            # Trim history if too long
+            if len(history) > self.max_history:
+                history = history[-self.max_history:]
+            self.conversations[conv_id] = history
 
             logger.info(f"Sending response: {response[:100] if response else 'None'}...")
             await self.send_message(room.room_id, response)
