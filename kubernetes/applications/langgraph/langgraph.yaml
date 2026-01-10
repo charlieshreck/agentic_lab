@@ -2315,12 +2315,11 @@ data:
             runbook = Runbook(
                 name=runbook_data.get("name", f"Fix: {request.issue_summary[:50]}"),
                 description=runbook_data.get("description", request.fix_summary),
-                triggers=Triggers(
+                triggers=TriggerConfig(
                     alert_patterns=[],
-                    keywords=all_keywords,
-                    services=[request.service_affected] if request.service_affected != "unknown" else []
+                    keywords=all_keywords
                 ),
-                diagnosis=Diagnosis(
+                diagnosis=DiagnosisConfig(
                     checks=[
                         DiagnosisCheck(
                             name=c.get("name", "Check"),
@@ -2333,20 +2332,20 @@ data:
                     ],
                     confidence_rules=[]
                 ),
-                decision=Decision(
+                decision=DecisionRules(
                     escalate_if=runbook_data.get("escalate_if", ["confidence < 0.7"]),
                     handle_locally_if=["confidence >= 0.8"]
                 ),
-                fix=Fix(
+                fix=FixConfig(
                     steps=[
                         FixStep(
                             name=s.get("name", f"Step {i+1}"),
-                            description=s.get("description", ""),
+                            action="command",
                             command=s.get("command")
                         )
                         for i, s in enumerate(runbook_data.get("fix_steps", []))
                     ] if runbook_data.get("fix_steps") else [
-                        FixStep(name="Apply fix", description=request.fix_summary, command=None)
+                        FixStep(name="Apply fix", action="command", command="echo 'Manual fix required'")
                     ],
                     validation=[
                         ValidationCheck(
