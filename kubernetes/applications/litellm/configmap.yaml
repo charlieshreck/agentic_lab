@@ -20,17 +20,11 @@ data:
           model: gemini/gemini-2.0-flash
           api_key: os.environ/GEMINI_API_KEY
 
-      # Fallback: Llama 3.3 70B free via OpenRouter (non-Gemini, different provider)
-      - model_name: openrouter-llama
+      # Fallback: Local Ollama (no rate limits)
+      - model_name: ollama-qwen
         litellm_params:
-          model: openrouter/meta-llama/llama-3.3-70b-instruct:free
-          api_key: os.environ/OPENROUTER_API_KEY
-
-      # DeepSeek R1 free - good for reasoning tasks
-      - model_name: deepseek-r1
-        litellm_params:
-          model: openrouter/deepseek/deepseek-r1-0528:free
-          api_key: os.environ/OPENROUTER_API_KEY
+          model: ollama/qwen2.5:7b
+          api_base: http://ollama:11434
 
       # Embedding model
       - model_name: embeddings
@@ -58,11 +52,11 @@ data:
       allowed_fails: 1
       fallbacks:
         - gemini/gemini-2.0-flash:
-            - openrouter-llama
+            - ollama-qwen
         - gemini-pro:
-            - openrouter-llama
+            - ollama-qwen
         - gemini/gemini-2.0-pro:
-            - openrouter-llama
+            - ollama-qwen
 
     # General settings
     general_settings:
