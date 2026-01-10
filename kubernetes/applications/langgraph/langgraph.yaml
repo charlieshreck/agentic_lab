@@ -36,9 +36,8 @@ data:
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 
-    # Claude services - validator for batch review, agent for escalation
+    # Claude services - agent for escalation (validator runs separately as daily cronjob)
     CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
-    CLAUDE_VALIDATOR_URL = os.environ.get("CLAUDE_VALIDATOR_URL", "http://claude-validator:8000")
 
     # MCP servers
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
@@ -773,20 +772,6 @@ data:
             except Exception as e:
                 logger.warning(f"Coroot MCP call failed: {e}")
                 return {}
-
-    async def call_claude_validator(endpoint: str, data: dict) -> dict:
-        """Trigger Claude Validator for review tasks."""
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            try:
-                response = await client.post(
-                    CLAUDE_VALIDATOR_URL + "/" + endpoint,
-                    json=data
-                )
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                logger.error(f"Claude Validator call failed: {e}")
-                return {"error": str(e)}
 
     async def discover_service(service_name: str) -> dict:
         """
@@ -1667,14 +1652,6 @@ data:
             }
         })
 
-        # Trigger Claude Validator for critical items
-        if severity == "critical":
-            await call_claude_validator("validate", {
-                "target_type": "decision",
-                "target_id": alert["id"],
-                "priority": "high"
-            })
-
         return {"approval_status": "pending", "thread_id": result.get("thread_id", "")}
 
     async def execute_solution(state):
@@ -2405,11 +2382,9 @@ spec:
               value: "http://litellm:4000"
             - name: QDRANT_URL
               value: "http://qdrant:6333"
-            # Claude services
+            # Claude services (validator runs separately as daily cronjob)
             - name: CLAUDE_AGENT_URL
               value: "http://claude-agent:8000"
-            - name: CLAUDE_VALIDATOR_URL
-              value: "http://claude-validator:8000"
             # MCP servers
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
