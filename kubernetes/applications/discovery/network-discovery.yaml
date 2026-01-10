@@ -40,6 +40,70 @@ data:
 
     SCAN_NETWORKS = os.environ.get("SCAN_NETWORKS", "10.10.0.0/24,10.20.0.0/24,10.30.0.0/24").split(",")
 
+    # Hostname patterns for device classification (regex patterns)
+    import re
+    HOSTNAME_PATTERNS = [
+        # Google devices
+        (r"google[-_]?home[-_]?mini", {"type": "google_home_mini", "category": "media", "manufacturer": "google"}),
+        (r"google[-_]?home[-_]?max", {"type": "google_home_max", "category": "media", "manufacturer": "google"}),
+        (r"google[-_]?home", {"type": "google_home", "category": "media", "manufacturer": "google"}),
+        (r"google[-_]?nest[-_]?hub", {"type": "nest_hub", "category": "media", "manufacturer": "google"}),
+        (r"nest[-_]?mini", {"type": "nest_mini", "category": "media", "manufacturer": "google"}),
+        (r"chromecast", {"type": "chromecast", "category": "media", "manufacturer": "google"}),
+        # Apple devices
+        (r"iphone", {"type": "iphone", "category": "endpoint", "manufacturer": "apple"}),
+        (r"ipad", {"type": "ipad", "category": "endpoint", "manufacturer": "apple"}),
+        (r"macbook", {"type": "macbook", "category": "compute", "manufacturer": "apple"}),
+        (r"imac", {"type": "imac", "category": "compute", "manufacturer": "apple"}),
+        (r"apple[-_]?tv", {"type": "apple_tv", "category": "media", "manufacturer": "apple"}),
+        (r"homepod", {"type": "homepod", "category": "media", "manufacturer": "apple"}),
+        # Smart home / IoT
+        (r"tasmota", {"type": "tasmota", "category": "iot"}),
+        (r"sonoff", {"type": "sonoff", "category": "iot", "manufacturer": "sonoff"}),
+        (r"shelly", {"type": "shelly", "category": "iot", "manufacturer": "shelly"}),
+        (r"wled", {"type": "wled", "category": "iot"}),
+        (r"esphome", {"type": "esphome", "category": "iot"}),
+        (r"hue[-_]?bridge", {"type": "hue_bridge", "category": "iot", "manufacturer": "philips"}),
+        (r"ecobee", {"type": "thermostat", "category": "iot", "manufacturer": "ecobee"}),
+        (r"ring", {"type": "doorbell", "category": "iot", "manufacturer": "ring"}),
+        (r"roku", {"type": "roku", "category": "media", "manufacturer": "roku"}),
+        (r"fire[-_]?tv|fire[-_]?stick", {"type": "fire_tv", "category": "media", "manufacturer": "amazon"}),
+        (r"echo|alexa", {"type": "echo", "category": "media", "manufacturer": "amazon"}),
+        # Appliances
+        (r"fellow[-_]?aiden|fellow[-_]?kettle|fellow[-_]?stagg", {"type": "smart_kettle", "category": "appliance", "manufacturer": "fellow"}),
+        (r"roomba|irobot", {"type": "robot_vacuum", "category": "appliance", "manufacturer": "irobot"}),
+        (r"roborock", {"type": "robot_vacuum", "category": "appliance", "manufacturer": "roborock"}),
+        (r"dyson", {"type": "smart_appliance", "category": "appliance", "manufacturer": "dyson"}),
+        # Network/Infrastructure
+        (r"unifi|ubnt|uap|usw|ugw", {"type": "unifi_device", "category": "infrastructure", "manufacturer": "ubiquiti"}),
+        (r"opnsense|pfsense", {"type": "firewall", "category": "infrastructure"}),
+        (r"proxmox|pve", {"type": "hypervisor", "category": "compute"}),
+        (r"truenas|freenas", {"type": "nas", "category": "storage"}),
+        (r"synology|diskstation", {"type": "synology_nas", "category": "storage", "manufacturer": "synology"}),
+        (r"qnap", {"type": "qnap_nas", "category": "storage", "manufacturer": "qnap"}),
+        # Printers
+        (r"hp[-_]?(officejet|laserjet|envy|deskjet)", {"type": "printer", "category": "peripheral", "manufacturer": "hp"}),
+        (r"epson", {"type": "printer", "category": "peripheral", "manufacturer": "epson"}),
+        (r"brother", {"type": "printer", "category": "peripheral", "manufacturer": "brother"}),
+        (r"canon[-_]?(pixma|imageclass)", {"type": "printer", "category": "peripheral", "manufacturer": "canon"}),
+        # Computers/Servers
+        (r"raspberry[-_]?pi|raspberrypi|rpi", {"type": "raspberry_pi", "category": "compute"}),
+        (r"talos", {"type": "talos_node", "category": "compute"}),
+        (r"k8s|kubernetes|node", {"type": "kubernetes_node", "category": "compute"}),
+        (r"docker|container", {"type": "docker_host", "category": "compute"}),
+        # Gaming
+        (r"playstation|ps[45]", {"type": "playstation", "category": "media", "manufacturer": "sony"}),
+        (r"xbox", {"type": "xbox", "category": "media", "manufacturer": "microsoft"}),
+        (r"nintendo|switch", {"type": "nintendo_switch", "category": "media", "manufacturer": "nintendo"}),
+        (r"steam[-_]?deck", {"type": "steam_deck", "category": "media", "manufacturer": "valve"}),
+        # TVs
+        (r"samsung[-_]?(tv|smart)", {"type": "smart_tv", "category": "media", "manufacturer": "samsung"}),
+        (r"lg[-_]?(tv|smart|oled)", {"type": "smart_tv", "category": "media", "manufacturer": "lg"}),
+        (r"sony[-_]?(tv|bravia)", {"type": "smart_tv", "category": "media", "manufacturer": "sony"}),
+        (r"vizio", {"type": "smart_tv", "category": "media", "manufacturer": "vizio"}),
+        (r"tcl", {"type": "smart_tv", "category": "media", "manufacturer": "tcl"}),
+    ]
+
     # Device fingerprinting signatures
     FINGERPRINT_PROBES = {
         "tasmota": {
@@ -78,29 +142,221 @@ data:
             "endpoints": ["/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query"],
             "identifier": lambda r: "SYNO" in str(r),
             "extract": lambda r: {"type": "synology_nas", "category": "storage"}
+        },
+        "homeassistant": {
+            "endpoints": ["/api/"],
+            "identifier": lambda r: "Home Assistant" in str(r) or "ha_version" in str(r),
+            "extract": lambda r: {"type": "home_assistant", "category": "iot"}
+        },
+        "plex": {
+            "endpoints": ["/identity"],
+            "identifier": lambda r: "MediaContainer" in str(r) or "machineIdentifier" in str(r),
+            "extract": lambda r: {"type": "plex_server", "category": "media"}
+        },
+        "jellyfin": {
+            "endpoints": ["/System/Info/Public"],
+            "identifier": lambda r: "ServerName" in str(r) or "Jellyfin" in str(r),
+            "extract": lambda r: {"type": "jellyfin_server", "category": "media"}
+        },
+        "unraid": {
+            "endpoints": ["/"],
+            "identifier": lambda r: "unraid" in str(r).lower() or "lime-technology" in str(r).lower(),
+            "extract": lambda r: {"type": "unraid", "category": "storage"}
+        },
+        "printer_ipp": {
+            "endpoints": ["/ipp/print"],
+            "identifier": lambda r: "ipp" in str(r).lower() or "printer" in str(r).lower(),
+            "extract": lambda r: {"type": "printer", "category": "peripheral"}
         }
     }
 
-    # MAC vendor prefixes for device identification
+    # MAC vendor prefixes for device identification (prefix -> (manufacturer, category, optional_type))
     MAC_VENDORS = {
-        "00:1A:22": ("sonoff", "iot"),
-        "DC:4F:22": ("espressif", "iot"),
-        "AC:0B:FB": ("espressif", "iot"),
-        "18:FE:34": ("espressif", "iot"),
-        "60:01:94": ("espressif", "iot"),
-        "FC:EC:DA": ("ubiquiti", "infrastructure"),
-        "44:D9:E7": ("ubiquiti", "infrastructure"),
-        "24:5A:4C": ("ubiquiti", "infrastructure"),
-        "74:AC:B9": ("ubiquiti", "infrastructure"),
-        "00:11:32": ("synology", "storage"),
-        "00:1E:4F": ("dell", "compute"),
-        "00:25:90": ("supermicro", "compute"),
-        "B8:27:EB": ("raspberry_pi", "compute"),
-        "DC:A6:32": ("raspberry_pi", "compute"),
-        "E4:5F:01": ("raspberry_pi", "compute"),
-        "54:60:09": ("google", "media"),
-        "F4:F5:D8": ("google", "media"),
-        "48:D6:D5": ("google", "media"),
+        # Espressif (ESP8266/ESP32) - IoT devices
+        "00:1A:22": ("sonoff", "iot", "sonoff"),
+        "DC:4F:22": ("espressif", "iot", None),
+        "AC:0B:FB": ("espressif", "iot", None),
+        "18:FE:34": ("espressif", "iot", None),
+        "60:01:94": ("espressif", "iot", None),
+        "24:0A:C4": ("espressif", "iot", None),
+        "24:62:AB": ("espressif", "iot", None),
+        "30:AE:A4": ("espressif", "iot", None),
+        "A4:CF:12": ("espressif", "iot", None),
+        "84:CC:A8": ("espressif", "iot", None),
+        "B4:E6:2D": ("espressif", "iot", None),
+        "C4:4F:33": ("espressif", "iot", None),
+        "EC:FA:BC": ("espressif", "iot", None),
+        # Ubiquiti
+        "FC:EC:DA": ("ubiquiti", "infrastructure", "unifi_device"),
+        "44:D9:E7": ("ubiquiti", "infrastructure", "unifi_device"),
+        "24:5A:4C": ("ubiquiti", "infrastructure", "unifi_device"),
+        "74:AC:B9": ("ubiquiti", "infrastructure", "unifi_device"),
+        "78:8A:20": ("ubiquiti", "infrastructure", "unifi_device"),
+        "80:2A:A8": ("ubiquiti", "infrastructure", "unifi_device"),
+        "28:70:4E": ("ubiquiti", "infrastructure", "unifi_device"),
+        "E0:63:DA": ("ubiquiti", "infrastructure", "unifi_device"),
+        # Synology
+        "00:11:32": ("synology", "storage", "synology_nas"),
+        # Dell
+        "00:1E:4F": ("dell", "compute", None),
+        "00:14:22": ("dell", "compute", None),
+        "18:A9:9B": ("dell", "compute", None),
+        # Supermicro
+        "00:25:90": ("supermicro", "compute", "server"),
+        "00:30:48": ("supermicro", "compute", "server"),
+        # Raspberry Pi
+        "B8:27:EB": ("raspberry_pi", "compute", "raspberry_pi"),
+        "DC:A6:32": ("raspberry_pi", "compute", "raspberry_pi"),
+        "E4:5F:01": ("raspberry_pi", "compute", "raspberry_pi"),
+        "28:CD:C1": ("raspberry_pi", "compute", "raspberry_pi"),
+        # Google
+        "54:60:09": ("google", "media", "google_device"),
+        "F4:F5:D8": ("google", "media", "google_device"),
+        "48:D6:D5": ("google", "media", "google_device"),
+        "30:FD:38": ("google", "media", "google_device"),
+        "1C:F2:9A": ("google", "media", "google_device"),
+        "A4:77:33": ("google", "media", "google_device"),
+        "94:EB:2C": ("google", "media", "google_device"),
+        # Apple
+        "00:03:93": ("apple", "endpoint", None),
+        "00:0A:27": ("apple", "endpoint", None),
+        "00:0A:95": ("apple", "endpoint", None),
+        "00:0D:93": ("apple", "endpoint", None),
+        "00:1C:B3": ("apple", "endpoint", None),
+        "00:1D:4F": ("apple", "endpoint", None),
+        "00:1E:52": ("apple", "endpoint", None),
+        "00:1F:5B": ("apple", "endpoint", None),
+        "00:1F:F3": ("apple", "endpoint", None),
+        "00:21:E9": ("apple", "endpoint", None),
+        "00:22:41": ("apple", "endpoint", None),
+        "00:23:12": ("apple", "endpoint", None),
+        "00:23:32": ("apple", "endpoint", None),
+        "00:23:6C": ("apple", "endpoint", None),
+        "00:23:DF": ("apple", "endpoint", None),
+        "00:24:36": ("apple", "endpoint", None),
+        "00:25:00": ("apple", "endpoint", None),
+        "00:25:4B": ("apple", "endpoint", None),
+        "00:25:BC": ("apple", "endpoint", None),
+        "00:26:08": ("apple", "endpoint", None),
+        "00:26:4A": ("apple", "endpoint", None),
+        "00:26:B0": ("apple", "endpoint", None),
+        "00:26:BB": ("apple", "endpoint", None),
+        # Amazon
+        "00:FC:8B": ("amazon", "media", "echo"),
+        "0C:47:C9": ("amazon", "media", "echo"),
+        "10:2C:6B": ("amazon", "media", "echo"),
+        "14:91:82": ("amazon", "media", "echo"),
+        "18:74:2E": ("amazon", "media", "echo"),
+        "34:D2:70": ("amazon", "media", "echo"),
+        "38:F7:3D": ("amazon", "media", "echo"),
+        "40:A2:DB": ("amazon", "media", "echo"),
+        "44:65:0D": ("amazon", "media", "echo"),
+        "4C:EF:C0": ("amazon", "media", "echo"),
+        "50:DC:E7": ("amazon", "media", "echo"),
+        "68:37:E9": ("amazon", "media", "echo"),
+        "68:54:FD": ("amazon", "media", "echo"),
+        "74:C2:46": ("amazon", "media", "fire_tv"),
+        "84:D6:D0": ("amazon", "media", "fire_tv"),
+        "A0:02:DC": ("amazon", "media", "echo"),
+        # Ring
+        "F8:5C:7D": ("ring", "iot", "doorbell"),
+        "DC:C8:F5": ("ring", "iot", "doorbell"),
+        # Roku
+        "08:05:81": ("roku", "media", "roku"),
+        "B0:A7:37": ("roku", "media", "roku"),
+        "B8:3E:59": ("roku", "media", "roku"),
+        "C8:3A:6B": ("roku", "media", "roku"),
+        "D4:E2:2F": ("roku", "media", "roku"),
+        # Samsung
+        "00:12:FB": ("samsung", "media", None),
+        "00:15:B9": ("samsung", "media", None),
+        "00:16:32": ("samsung", "endpoint", None),
+        "00:17:D5": ("samsung", "media", None),
+        "00:18:AF": ("samsung", "media", None),
+        "00:1A:8A": ("samsung", "endpoint", None),
+        "00:1B:98": ("samsung", "media", None),
+        "00:1C:43": ("samsung", "media", None),
+        "00:1D:25": ("samsung", "media", None),
+        "00:1D:F6": ("samsung", "media", None),
+        "00:1E:7D": ("samsung", "media", None),
+        # Philips Hue
+        "00:17:88": ("philips", "iot", "hue_bridge"),
+        # Sonos
+        "00:0E:58": ("sonos", "media", "sonos_speaker"),
+        "5C:AA:FD": ("sonos", "media", "sonos_speaker"),
+        "78:28:CA": ("sonos", "media", "sonos_speaker"),
+        "94:9F:3E": ("sonos", "media", "sonos_speaker"),
+        "B8:E9:37": ("sonos", "media", "sonos_speaker"),
+        # HP Printers
+        "00:17:A4": ("hp", "peripheral", "printer"),
+        "00:1B:78": ("hp", "peripheral", "printer"),
+        "00:1E:0B": ("hp", "peripheral", "printer"),
+        "00:21:5A": ("hp", "peripheral", "printer"),
+        "00:23:7D": ("hp", "peripheral", "printer"),
+        "00:25:B3": ("hp", "peripheral", "printer"),
+        # Canon
+        "00:1E:8F": ("canon", "peripheral", "printer"),
+        "00:BB:C1": ("canon", "peripheral", "printer"),
+        # Brother
+        "00:1B:A9": ("brother", "peripheral", "printer"),
+        "00:80:77": ("brother", "peripheral", "printer"),
+        # Sony
+        "00:01:4A": ("sony", "media", None),
+        "00:04:1F": ("sony", "media", None),
+        "00:12:EE": ("sony", "media", None),
+        "00:13:A9": ("sony", "media", None),
+        "00:15:C1": ("sony", "media", None),
+        "00:18:13": ("sony", "media", None),
+        "00:19:63": ("sony", "media", None),
+        "00:19:C5": ("sony", "media", None),
+        "00:1A:80": ("sony", "media", None),
+        "00:1D:0D": ("sony", "media", None),
+        "00:1D:BA": ("sony", "media", None),
+        "00:1E:A4": ("sony", "media", None),
+        # LG
+        "00:1C:62": ("lg", "media", None),
+        "00:1E:75": ("lg", "media", None),
+        "00:1F:6B": ("lg", "media", None),
+        "00:1F:E2": ("lg", "media", None),
+        "00:22:A9": ("lg", "media", None),
+        "00:24:83": ("lg", "media", None),
+        "00:25:E5": ("lg", "media", None),
+        "00:26:E2": ("lg", "media", None),
+        # Microsoft/Xbox
+        "00:50:F2": ("microsoft", "media", "xbox"),
+        "7C:ED:8D": ("microsoft", "media", "xbox"),
+        "60:45:BD": ("microsoft", "media", "xbox"),
+        "98:5F:D3": ("microsoft", "media", "xbox"),
+        # Nintendo
+        "00:09:BF": ("nintendo", "media", "nintendo_device"),
+        "00:16:56": ("nintendo", "media", "nintendo_device"),
+        "00:17:AB": ("nintendo", "media", "nintendo_device"),
+        "00:19:1D": ("nintendo", "media", "nintendo_device"),
+        "00:19:FD": ("nintendo", "media", "nintendo_device"),
+        "00:1A:E9": ("nintendo", "media", "nintendo_device"),
+        "00:1B:7A": ("nintendo", "media", "nintendo_device"),
+        "00:1B:EA": ("nintendo", "media", "nintendo_device"),
+        "00:1C:BE": ("nintendo", "media", "nintendo_device"),
+        "00:1D:BC": ("nintendo", "media", "nintendo_device"),
+        "00:1E:35": ("nintendo", "media", "nintendo_device"),
+        "00:1F:32": ("nintendo", "media", "nintendo_device"),
+        "00:1F:C5": ("nintendo", "media", "nintendo_device"),
+        "00:21:47": ("nintendo", "media", "nintendo_device"),
+        "00:21:BD": ("nintendo", "media", "nintendo_device"),
+        "00:22:4C": ("nintendo", "media", "nintendo_device"),
+        "00:22:AA": ("nintendo", "media", "nintendo_device"),
+        "00:22:D7": ("nintendo", "media", "nintendo_device"),
+        "00:23:31": ("nintendo", "media", "nintendo_device"),
+        "00:23:CC": ("nintendo", "media", "nintendo_device"),
+        "00:24:1E": ("nintendo", "media", "nintendo_device"),
+        "00:24:44": ("nintendo", "media", "nintendo_device"),
+        "00:24:F3": ("nintendo", "media", "nintendo_device"),
+        "00:25:A0": ("nintendo", "media", "nintendo_device"),
+        # iRobot (Roomba)
+        "50:14:79": ("irobot", "appliance", "robot_vacuum"),
+        "80:C5:F2": ("irobot", "appliance", "robot_vacuum"),
+        # Fellow (coffee equipment)
+        "CC:7B:5C": ("fellow", "appliance", "smart_kettle"),
     }
 
 
@@ -168,14 +424,26 @@ data:
         clients = result.get("data", []) if result else []
         if clients:
             for client in clients if isinstance(clients, list) else []:
-                entities.append({
-                    "ip": client.get("ip", ""),
+                entity = {
+                    "ip": client.get("last_ip", client.get("ip", "")),
                     "mac": client.get("mac", "").upper(),
                     "hostname": client.get("hostname", client.get("name", "")),
                     "network": client.get("network", ""),
-                    "connected_to": client.get("ap_mac", ""),
+                    "connected_to": client.get("last_uplink_name", client.get("ap_mac", "")),
+                    "oui": client.get("oui", ""),  # Manufacturer from UniFi
+                    "first_seen_unifi": client.get("first_seen"),
+                    "last_seen_unifi": client.get("last_seen"),
+                    "is_wired": client.get("is_wired", False),
+                    "is_guest": client.get("is_guest", False),
                     "discovered_via": "unifi"
-                })
+                }
+                # Apply OUI-based identification immediately
+                if entity.get("oui"):
+                    oui_info = identify_by_oui(entity["oui"])
+                    for k, v in oui_info.items():
+                        if not entity.get(k):
+                            entity[k] = v
+                entities.append(entity)
 
         # Get network devices (APs, switches) via REST API
         result = await call_rest_api(MCP_UNIFI_URL, "/api/devices")
@@ -291,6 +559,86 @@ data:
         return entities
 
 
+    # mDNS service type mappings
+    MDNS_SERVICE_TYPES = {
+        "_googlecast._tcp": {"type": "chromecast", "category": "media", "manufacturer": "google"},
+        "_spotify-connect._tcp": {"type": "spotify_connect", "category": "media"},
+        "_airplay._tcp": {"type": "airplay_device", "category": "media", "manufacturer": "apple"},
+        "_raop._tcp": {"type": "airplay_speaker", "category": "media", "manufacturer": "apple"},
+        "_homekit._tcp": {"type": "homekit_device", "category": "iot"},
+        "_hap._tcp": {"type": "homekit_accessory", "category": "iot"},
+        "_matter._tcp": {"type": "matter_device", "category": "iot"},
+        "_sonos._tcp": {"type": "sonos_speaker", "category": "media", "manufacturer": "sonos"},
+        "_printer._tcp": {"type": "printer", "category": "peripheral"},
+        "_ipp._tcp": {"type": "printer", "category": "peripheral"},
+        "_plex._tcp": {"type": "plex_server", "category": "media"},
+        "_smb._tcp": {"type": "file_share", "category": "storage"},
+        "_afpovertcp._tcp": {"type": "file_share", "category": "storage"},
+        "_http._tcp": {"type": "web_server", "category": "compute"},
+        "_ssh._tcp": {"type": "ssh_server", "category": "compute"},
+        "_hue._tcp": {"type": "hue_bridge", "category": "iot", "manufacturer": "philips"},
+        "_esphomelib._tcp": {"type": "esphome", "category": "iot"},
+        "_mqtt._tcp": {"type": "mqtt_broker", "category": "infrastructure"},
+    }
+
+
+    async def discover_with_mdns() -> List[dict]:
+        """Discover devices via mDNS/Bonjour using avahi-browse."""
+        entities = []
+        discovered_ips = set()
+
+        # Service types to scan for
+        service_types = list(MDNS_SERVICE_TYPES.keys())
+
+        for service_type in service_types:
+            try:
+                # Use avahi-browse to find services
+                result = subprocess.run(
+                    ["avahi-browse", "-rptk", service_type],
+                    capture_output=True, text=True, timeout=10
+                )
+
+                for line in result.stdout.split("\n"):
+                    # Parse avahi-browse output: =;interface;protocol;name;type;domain;hostname;address;port;txt
+                    if line.startswith("="):
+                        parts = line.split(";")
+                        if len(parts) >= 8:
+                            name = parts[3]
+                            svc_type = parts[4]
+                            hostname = parts[6].rstrip(".")
+                            ip = parts[7]
+
+                            # Skip if we've already seen this IP for this scan
+                            if ip in discovered_ips:
+                                continue
+                            discovered_ips.add(ip)
+
+                            # Get attributes from service type
+                            attrs = MDNS_SERVICE_TYPES.get(service_type, {}).copy()
+
+                            entity = {
+                                "ip": ip,
+                                "hostname": hostname or name,
+                                "mdns_name": name,
+                                "mdns_service": service_type,
+                                "discovered_via": "mdns",
+                                **attrs
+                            }
+                            entities.append(entity)
+                            logger.debug(f"mDNS: Found {name} ({ip}) via {service_type}")
+
+            except subprocess.TimeoutExpired:
+                logger.debug(f"mDNS scan timeout for {service_type}")
+            except FileNotFoundError:
+                logger.warning("avahi-browse not installed, skipping mDNS discovery")
+                return entities
+            except Exception as e:
+                logger.debug(f"mDNS scan error for {service_type}: {e}")
+
+        logger.info(f"mDNS: Found {len(entities)} services")
+        return entities
+
+
     async def fingerprint_device(ip: str, existing_data: dict) -> dict:
         """Deep fingerprint a device via HTTP probing."""
         updates = {}
@@ -326,8 +674,68 @@ data:
         prefix = mac_upper[:8]
 
         if prefix in MAC_VENDORS:
-            vendor, category = MAC_VENDORS[prefix]
-            return {"manufacturer": vendor, "category": category}
+            vendor_info = MAC_VENDORS[prefix]
+            result = {"manufacturer": vendor_info[0], "category": vendor_info[1]}
+            # Include type if specified (third element)
+            if len(vendor_info) > 2 and vendor_info[2]:
+                result["type"] = vendor_info[2]
+            return result
+
+        return {}
+
+
+    def identify_by_hostname(hostname: str) -> dict:
+        """Identify device type by hostname pattern matching."""
+        if not hostname:
+            return {}
+
+        hostname_lower = hostname.lower().replace(" ", "-")
+
+        for pattern, attrs in HOSTNAME_PATTERNS:
+            if re.search(pattern, hostname_lower, re.IGNORECASE):
+                return attrs.copy()
+
+        return {}
+
+
+    def identify_by_oui(oui: str) -> dict:
+        """Identify device by OUI string from UniFi (e.g., 'Espressif Inc.')."""
+        if not oui:
+            return {}
+
+        oui_lower = oui.lower()
+
+        oui_mappings = {
+            "espressif": {"manufacturer": "espressif", "category": "iot"},
+            "google": {"manufacturer": "google", "category": "media"},
+            "apple": {"manufacturer": "apple", "category": "endpoint"},
+            "amazon": {"manufacturer": "amazon", "category": "media"},
+            "ubiquiti": {"manufacturer": "ubiquiti", "category": "infrastructure"},
+            "raspberry pi": {"manufacturer": "raspberry_pi", "category": "compute"},
+            "samsung": {"manufacturer": "samsung", "category": "media"},
+            "lg electronics": {"manufacturer": "lg", "category": "media"},
+            "sony": {"manufacturer": "sony", "category": "media"},
+            "microsoft": {"manufacturer": "microsoft", "category": "endpoint"},
+            "intel": {"manufacturer": "intel", "category": "compute"},
+            "dell": {"manufacturer": "dell", "category": "compute"},
+            "hp": {"manufacturer": "hp", "category": "compute"},
+            "hewlett packard": {"manufacturer": "hp", "category": "compute"},
+            "sonos": {"manufacturer": "sonos", "category": "media", "type": "sonos_speaker"},
+            "philips": {"manufacturer": "philips", "category": "iot"},
+            "ring": {"manufacturer": "ring", "category": "iot", "type": "doorbell"},
+            "roku": {"manufacturer": "roku", "category": "media", "type": "roku"},
+            "nintendo": {"manufacturer": "nintendo", "category": "media", "type": "nintendo_device"},
+            "synology": {"manufacturer": "synology", "category": "storage", "type": "synology_nas"},
+            "qnap": {"manufacturer": "qnap", "category": "storage", "type": "qnap_nas"},
+            "brother": {"manufacturer": "brother", "category": "peripheral", "type": "printer"},
+            "canon": {"manufacturer": "canon", "category": "peripheral", "type": "printer"},
+            "epson": {"manufacturer": "epson", "category": "peripheral", "type": "printer"},
+            "irobot": {"manufacturer": "irobot", "category": "appliance", "type": "robot_vacuum"},
+        }
+
+        for key, attrs in oui_mappings.items():
+            if key in oui_lower:
+                return attrs.copy()
 
         return {}
 
@@ -345,30 +753,138 @@ data:
         return "unknown"
 
 
+    # Category descriptions for richer embeddings
+    CATEGORY_DESCRIPTIONS = {
+        "iot": "Internet of Things smart home device",
+        "media": "media streaming entertainment device",
+        "compute": "computer server workstation",
+        "storage": "network attached storage NAS file server",
+        "infrastructure": "network infrastructure router switch access point",
+        "endpoint": "user device phone tablet laptop",
+        "peripheral": "peripheral device printer scanner",
+        "appliance": "smart appliance household device",
+    }
+
+    # Type descriptions for richer embeddings
+    TYPE_DESCRIPTIONS = {
+        "tasmota": "Tasmota smart switch plug power relay WiFi controllable",
+        "sonoff": "Sonoff smart switch IoT device WiFi controllable",
+        "shelly": "Shelly smart relay switch WiFi power monitoring",
+        "esphome": "ESPHome custom firmware IoT sensor switch",
+        "wled": "WLED LED strip controller addressable RGB lighting",
+        "google_home": "Google Home smart speaker voice assistant",
+        "google_home_mini": "Google Home Mini smart speaker voice assistant",
+        "nest_mini": "Google Nest Mini smart speaker voice assistant",
+        "chromecast": "Google Chromecast streaming media player cast receiver",
+        "echo": "Amazon Echo Alexa smart speaker voice assistant",
+        "fire_tv": "Amazon Fire TV streaming media player",
+        "apple_tv": "Apple TV streaming media player AirPlay",
+        "homepod": "Apple HomePod smart speaker AirPlay Siri",
+        "airplay_device": "AirPlay compatible wireless streaming device",
+        "roku": "Roku streaming media player",
+        "smart_tv": "Smart TV internet connected television",
+        "sonos_speaker": "Sonos wireless speaker multi-room audio",
+        "hue_bridge": "Philips Hue smart lighting bridge controller",
+        "homekit_device": "Apple HomeKit compatible smart home device",
+        "printer": "network printer scanner copier",
+        "nas": "network attached storage file server",
+        "synology_nas": "Synology DiskStation NAS file server backup",
+        "qnap_nas": "QNAP NAS network storage server",
+        "unifi_device": "Ubiquiti UniFi network infrastructure",
+        "access_point": "WiFi wireless access point",
+        "switch": "network switch ethernet",
+        "firewall": "network firewall router security",
+        "hypervisor": "virtualization hypervisor host VM",
+        "raspberry_pi": "Raspberry Pi single board computer Linux",
+        "robot_vacuum": "robot vacuum cleaner smart cleaning",
+        "smart_kettle": "smart kettle coffee WiFi controllable",
+        "thermostat": "smart thermostat climate control HVAC",
+        "doorbell": "video doorbell smart camera security",
+        "playstation": "Sony PlayStation gaming console",
+        "xbox": "Microsoft Xbox gaming console",
+        "nintendo_device": "Nintendo gaming device Switch",
+    }
+
+
     def generate_description(entity: dict) -> str:
         """Generate rich semantic description for embedding."""
         parts = []
 
+        # Start with manufacturer and model if known
         if entity.get("manufacturer"):
-            parts.append(entity["manufacturer"])
+            parts.append(entity["manufacturer"].replace("_", " ").title())
         if entity.get("model"):
             parts.append(entity["model"])
-        if entity.get("type"):
-            parts.append(entity["type"])
-        if entity.get("category"):
-            parts.append(f"({entity['category']})")
+
+        # Add detailed type description
+        device_type = entity.get("type", "unknown")
+        if device_type in TYPE_DESCRIPTIONS:
+            parts.append(TYPE_DESCRIPTIONS[device_type])
+        elif device_type and device_type != "unknown":
+            parts.append(device_type.replace("_", " "))
+
+        # Add category context
+        category = entity.get("category", "endpoint")
+        if category in CATEGORY_DESCRIPTIONS:
+            parts.append(CATEGORY_DESCRIPTIONS[category])
+
+        # Add hostname (often contains location or purpose hints)
         if entity.get("hostname"):
-            parts.append(f"named {entity['hostname']}")
+            hostname = entity["hostname"].replace("-", " ").replace("_", " ")
+            parts.append(f"named {hostname}")
+
+        # Add mDNS service info if available
+        if entity.get("mdns_name"):
+            parts.append(f"advertising as {entity['mdns_name']}")
+        if entity.get("mdns_service"):
+            service = entity["mdns_service"].replace("_", "").replace(".", " ").strip()
+            parts.append(f"service {service}")
+
+        # Add location if known
         if entity.get("location"):
-            parts.append(f"in {entity['location']}")
+            parts.append(f"located in {entity['location']}")
+
+        # Add function if specified
         if entity.get("function"):
             parts.append(entity["function"])
-        if entity.get("network"):
-            parts.append(f"on {entity['network']} network")
-        if entity.get("ip"):
-            parts.append(f"at {entity['ip']}")
 
-        return " ".join(filter(None, parts)) or f"Unknown device at {entity.get('ip', 'unknown IP')}"
+        # Add network context
+        network = entity.get("network", "unknown")
+        network_names = {
+            "prod": "production home network",
+            "agentic": "AI agent automation network",
+            "monit": "monitoring observability network",
+            "iot": "IoT device network",
+            "guest": "guest WiFi network",
+        }
+        if network in network_names:
+            parts.append(f"on {network_names[network]}")
+        elif network:
+            parts.append(f"on {network} network")
+
+        # Add connection info
+        if entity.get("connected_to"):
+            parts.append(f"connected via {entity['connected_to']}")
+        if entity.get("is_wired"):
+            parts.append("wired ethernet connection")
+        elif entity.get("is_wired") is False:
+            parts.append("wireless WiFi connection")
+
+        # Add firmware/version if known
+        if entity.get("firmware"):
+            parts.append(f"firmware {entity['firmware']}")
+
+        # Add IP address for reference
+        if entity.get("ip"):
+            parts.append(f"at IP {entity['ip']}")
+
+        # Build final description
+        description = " ".join(filter(None, parts))
+
+        if not description or description == f"at IP {entity.get('ip', '')}":
+            return f"Unknown network device at {entity.get('ip', 'unknown IP')}"
+
+        return description
 
 
     async def merge_entities(all_discovered: List[dict]) -> Dict[str, dict]:
@@ -411,6 +927,7 @@ data:
             discover_from_unifi(),
             discover_from_proxmox(),
             discover_from_truenas(),
+            discover_with_mdns(),  # mDNS for Chromecast, AirPlay, etc.
             *[discover_with_nmap(net) for net in SCAN_NETWORKS],
             return_exceptions=True
         )
@@ -438,16 +955,33 @@ data:
             if not entity.get("network"):
                 entity["network"] = determine_network(entity["ip"])
 
-            # MAC-based identification
+            # Layer 1: Hostname-based identification (most specific, from user-defined names)
+            hostname_info = identify_by_hostname(entity.get("hostname", ""))
+            for k, v in hostname_info.items():
+                if not entity.get(k):
+                    entity[k] = v
+
+            # Layer 2: OUI-based identification (from UniFi vendor lookup)
+            if entity.get("oui") and not entity.get("manufacturer"):
+                oui_info = identify_by_oui(entity["oui"])
+                for k, v in oui_info.items():
+                    if not entity.get(k):
+                        entity[k] = v
+
+            # Layer 3: MAC-based identification (from our vendor database)
             mac_info = identify_by_mac(entity.get("mac", ""))
             for k, v in mac_info.items():
                 if not entity.get(k):
                     entity[k] = v
 
-            # HTTP fingerprinting (only for devices without type)
+            # Layer 4: HTTP fingerprinting (active probing for device-specific endpoints)
             if not entity.get("type"):
                 fingerprint = await fingerprint_device(entity["ip"], entity)
                 entity.update(fingerprint)
+
+            # Log enrichment results for debugging
+            if entity.get("type") and entity["type"] != "unknown":
+                logger.info(f"Identified {entity['ip']} as {entity.get('manufacturer', '?')}/{entity['type']} via {entity.get('discovered_via', '?')}")
 
             # Set defaults
             entity.setdefault("category", "endpoint")
@@ -522,7 +1056,7 @@ spec:
             - -c
             - |
               pip install -q httpx && \
-              apt-get update -qq && apt-get install -qq -y nmap > /dev/null && \
+              apt-get update -qq && apt-get install -qq -y nmap avahi-utils > /dev/null 2>&1 && \
               python /scripts/discovery.py
             env:
             - name: QDRANT_URL
