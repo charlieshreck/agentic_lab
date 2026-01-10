@@ -31,7 +31,7 @@ spec:
         - name: OLLAMA_MODELS
           value: "/root/.ollama/models"
         - name: OLLAMA_KEEP_ALIVE
-          value: "24h"
+          value: "5m"
         - name: OLLAMA_NUM_PARALLEL
           value: "2"
         resources:
