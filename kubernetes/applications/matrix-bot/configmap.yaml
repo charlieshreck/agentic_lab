@@ -150,7 +150,7 @@ data:
             history.append({"role": "user", "content": query})
 
             # Query Gemini with history
-            response = await self.query_gemini(query, {}, history, conv_id)
+            response = await self.query_gemini(query, {}, history)
 
             # Add assistant response to history
             history.append({"role": "assistant", "content": response})
@@ -197,7 +197,8 @@ data:
                 payload = {
                     "prompt": message,
                     "context": context or {},
-                    "source": "matrix_bot"
+                    "source": "matrix_bot",
+                    "messages": history or []  # Send conversation history to LangGraph
                 }
                 response = await self.http_client.post(
                     f"{LANGGRAPH_URL}/query",
