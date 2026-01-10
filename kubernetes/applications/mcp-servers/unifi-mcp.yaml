@@ -413,27 +413,10 @@ data:
                 "client_isolation": params.client_isolation,
                 "iot_optimized": params.iot_optimized,
             }
-            return f"""# WLAN Creation Preview
-
-**This is a DRY RUN. Set confirmation=true to create.**
-
-## Proposed Configuration
-- **SSID**: {params.name}
-- **Band**: {params.band}
-- **Enabled**: {params.enabled}
-- **Hidden**: {params.hide_ssid}
-- **Client Isolation**: {params.client_isolation}
-- **IoT Optimized**: {params.iot_optimized}
-
-{"### IoT Optimizations Applied:" if params.iot_optimized else ""}
-{"- DTIM period: 3 (battery-friendly)" if params.iot_optimized else ""}
-{"- UAPSD: enabled (power saving)" if params.iot_optimized else ""}
-{"- Fast roaming: disabled" if params.iot_optimized else ""}
-{"- BSS transition: disabled" if params.iot_optimized else ""}
-{"- Proxy ARP: enabled" if params.iot_optimized else ""}
-
-To create this WLAN, call again with `confirmation=true`
-"""
+            iot_info = ""
+            if params.iot_optimized:
+                iot_info = "\n### IoT Optimizations Applied:\n- DTIM period: 3 (battery-friendly)\n- UAPSD: enabled (power saving)\n- Fast roaming: disabled\n- BSS transition: disabled\n- Proxy ARP: enabled\n"
+            return f"# WLAN Creation Preview\n\n**This is a DRY RUN. Set confirmation=true to create.**\n\n## Proposed Configuration\n- **SSID**: {params.name}\n- **Band**: {params.band}\n- **Enabled**: {params.enabled}\n- **Hidden**: {params.hide_ssid}\n- **Client Isolation**: {params.client_isolation}\n- **IoT Optimized**: {params.iot_optimized}\n{iot_info}\nTo create this WLAN, call again with `confirmation=true`\n"
 
         try:
             # Get default network ID
@@ -475,16 +458,7 @@ To create this WLAN, call again with `confirmation=true`
             result = await _api_post("/rest/wlanconf", wlan_config)
             wlan_id = result.get("data", [{}])[0].get("_id", "unknown")
 
-            return f"""# WLAN Created Successfully ✅
-
-- **SSID**: {params.name}
-- **ID**: `{wlan_id}`
-- **Band**: {params.band}
-- **Client Isolation**: {params.client_isolation}
-- **IoT Optimized**: {params.iot_optimized}
-
-The SSID should appear on your APs within 30 seconds.
-"""
+            return f"# WLAN Created Successfully ✅\n\n- **SSID**: {params.name}\n- **ID**: `{wlan_id}`\n- **Band**: {params.band}\n- **Client Isolation**: {params.client_isolation}\n- **IoT Optimized**: {params.iot_optimized}\n\nThe SSID should appear on your APs within 30 seconds.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -493,23 +467,14 @@ The SSID should appear on your APs within 30 seconds.
         """Update an existing WLAN. Set confirmation=true to execute."""
         if not params.confirmation:
             changes = []
-            if params.name: changes.append(f"name → {params.name}")
-            if params.passphrase: changes.append("passphrase → (new value)")
-            if params.enabled is not None: changes.append(f"enabled → {params.enabled}")
-            if params.band: changes.append(f"band → {params.band}")
-            if params.client_isolation is not None: changes.append(f"client_isolation → {params.client_isolation}")
+            if params.name: changes.append("name -> " + params.name)
+            if params.passphrase: changes.append("passphrase -> (new value)")
+            if params.enabled is not None: changes.append("enabled -> " + str(params.enabled))
+            if params.band: changes.append("band -> " + params.band)
+            if params.client_isolation is not None: changes.append("client_isolation -> " + str(params.client_isolation))
 
-            return f"""# WLAN Update Preview
-
-**This is a DRY RUN. Set confirmation=true to apply.**
-
-## WLAN ID: `{params.wlan_id}`
-
-## Proposed Changes
-{chr(10).join(f"- {c}" for c in changes) if changes else "- No changes specified"}
-
-To apply these changes, call again with `confirmation=true`
-"""
+            changes_str = "\n".join("- " + c for c in changes) if changes else "- No changes specified"
+            return f"# WLAN Update Preview\n\n**This is a DRY RUN. Set confirmation=true to apply.**\n\n## WLAN ID: `{params.wlan_id}`\n\n## Proposed Changes\n{changes_str}\n\nTo apply these changes, call again with `confirmation=true`\n"
 
         try:
             # Get current config
@@ -533,13 +498,7 @@ To apply these changes, call again with `confirmation=true`
 
             await _api_put(f"/rest/wlanconf/{params.wlan_id}", update)
 
-            return f"""# WLAN Updated Successfully ✅
-
-- **WLAN ID**: `{params.wlan_id}`
-- **Changes Applied**: {len(update)}
-
-Changes will propagate to APs within 30 seconds.
-"""
+            return f"# WLAN Updated Successfully ✅\n\n- **WLAN ID**: `{params.wlan_id}`\n- **Changes Applied**: {len(update)}\n\nChanges will propagate to APs within 30 seconds.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -555,29 +514,13 @@ Changes will propagate to APs within 30 seconds.
                         wlan_name = w.get("name", "Unknown")
                         break
 
-                return f"""# ⚠️ WLAN Deletion Warning
-
-**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**
-
-## Target WLAN
-- **Name**: {wlan_name}
-- **ID**: `{params.wlan_id}`
-
-All clients on this SSID will be disconnected immediately.
-
-To delete this WLAN, call again with `confirmation=true`
-"""
+                return f"# ⚠️ WLAN Deletion Warning\n\n**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**\n\n## Target WLAN\n- **Name**: {wlan_name}\n- **ID**: `{params.wlan_id}`\n\nAll clients on this SSID will be disconnected immediately.\n\nTo delete this WLAN, call again with `confirmation=true`\n"
             except Exception as e:
                 return _handle_error(e)
 
         try:
             await _api_delete(f"/rest/wlanconf/{params.wlan_id}")
-            return f"""# WLAN Deleted ✅
-
-- **WLAN ID**: `{params.wlan_id}`
-
-The SSID has been removed. Connected clients will be disconnected.
-"""
+            return f"# WLAN Deleted ✅\n\n- **WLAN ID**: `{params.wlan_id}`\n\nThe SSID has been removed. Connected clients will be disconnected.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -595,29 +538,13 @@ The SSID has been removed. Connected clients will be disconnected.
                         device_name = d.get("name", d.get("model", "Unknown"))
                         break
 
-                return f"""# ⚠️ Device Restart Warning
-
-**This will cause a brief network outage. Set confirmation=true to proceed.**
-
-## Target Device
-- **Name**: {device_name}
-- **MAC**: {params.mac}
-
-All clients connected to this device will be temporarily disconnected.
-
-To restart, call again with `confirmation=true`
-"""
+                return f"# ⚠️ Device Restart Warning\n\n**This will cause a brief network outage. Set confirmation=true to proceed.**\n\n## Target Device\n- **Name**: {device_name}\n- **MAC**: {params.mac}\n\nAll clients connected to this device will be temporarily disconnected.\n\nTo restart, call again with `confirmation=true`\n"
             except Exception as e:
                 return _handle_error(e)
 
         try:
             await _api_post("/cmd/devmgr", {"cmd": "restart", "mac": params.mac.lower()})
-            return f"""# Device Restart Initiated ✅
-
-- **MAC**: {params.mac}
-
-The device will restart and reconnect within 2-3 minutes.
-"""
+            return f"# Device Restart Initiated ✅\n\n- **MAC**: {params.mac}\n\nThe device will restart and reconnect within 2-3 minutes.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -626,12 +553,7 @@ The device will restart and reconnect within 2-3 minutes.
         """Flash the LED on a device to locate it physically."""
         try:
             await _api_post("/cmd/devmgr", {"cmd": "set-locate", "mac": params.mac.lower()})
-            return f"""# Device Locate Activated ✅
-
-- **MAC**: {params.mac}
-
-The device LED is now flashing. Call again with cmd="unset-locate" to stop.
-"""
+            return f"# Device Locate Activated ✅\n\n- **MAC**: {params.mac}\n\nThe device LED is now flashing. Call again with cmd='unset-locate' to stop.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -641,26 +563,11 @@ The device LED is now flashing. Call again with cmd="unset-locate" to stop.
     async def unifi_block_client(params: ClientActionInput) -> str:
         """Block a client from connecting. DESTRUCTIVE - requires confirmation=true."""
         if not params.confirmation:
-            return f"""# ⚠️ Client Block Warning
-
-**This will disconnect and block the client. Set confirmation=true to proceed.**
-
-## Target Client
-- **MAC**: {params.mac}
-
-The client will be immediately disconnected and unable to reconnect.
-
-To block, call again with `confirmation=true`
-"""
+            return f"# ⚠️ Client Block Warning\n\n**This will disconnect and block the client. Set confirmation=true to proceed.**\n\n## Target Client\n- **MAC**: {params.mac}\n\nThe client will be immediately disconnected and unable to reconnect.\n\nTo block, call again with `confirmation=true`\n"
 
         try:
             await _api_post("/cmd/stamgr", {"cmd": "block-sta", "mac": params.mac.lower()})
-            return f"""# Client Blocked ✅
-
-- **MAC**: {params.mac}
-
-The client is now blocked from connecting.
-"""
+            return f"# Client Blocked ✅\n\n- **MAC**: {params.mac}\n\nThe client is now blocked from connecting.\n"
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 # Try alternative endpoint for newer UniFi
@@ -677,24 +584,11 @@ The client is now blocked from connecting.
     async def unifi_unblock_client(params: ClientActionInput) -> str:
         """Unblock a previously blocked client. Requires confirmation=true."""
         if not params.confirmation:
-            return f"""# Client Unblock Preview
-
-**Set confirmation=true to proceed.**
-
-## Target Client
-- **MAC**: {params.mac}
-
-To unblock, call again with `confirmation=true`
-"""
+            return f"# Client Unblock Preview\n\n**Set confirmation=true to proceed.**\n\n## Target Client\n- **MAC**: {params.mac}\n\nTo unblock, call again with `confirmation=true`\n"
 
         try:
             await _api_post("/cmd/stamgr", {"cmd": "unblock-sta", "mac": params.mac.lower()})
-            return f"""# Client Unblocked ✅
-
-- **MAC**: {params.mac}
-
-The client can now reconnect to the network.
-"""
+            return f"# Client Unblocked ✅\n\n- **MAC**: {params.mac}\n\nThe client can now reconnect to the network.\n"
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 try:
@@ -723,13 +617,7 @@ The client can now reconnect to the network.
             else:
                 await _api_post("/rest/user", {"mac": params.mac.lower(), "name": params.name})
 
-            return f"""# Client Named ✅
-
-- **MAC**: {params.mac}
-- **Name**: {params.name}
-
-The client will now appear with this name in the UniFi dashboard.
-"""
+            return f"# Client Named ✅\n\n- **MAC**: {params.mac}\n- **Name**: {params.name}\n\nThe client will now appear with this name in the UniFi dashboard.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -786,16 +674,8 @@ The client will now appear with this name in the UniFi dashboard.
             return f"Error: Invalid setting. Choose from: {', '.join(valid_settings)}"
 
         if not params.confirmation:
-            return f"""# RF Setting Change Preview
-
-**Set confirmation=true to apply.**
-
-## Setting
-- **Name**: {params.setting}
-- **New Value**: {'enabled' if params.enabled else 'disabled'}
-
-To apply, call again with `confirmation=true`
-"""
+            status_str = "enabled" if params.enabled else "disabled"
+            return f"# RF Setting Change Preview\n\n**Set confirmation=true to apply.**\n\n## Setting\n- **Name**: {params.setting}\n- **New Value**: {status_str}\n\nTo apply, call again with `confirmation=true`\n"
 
         try:
             # Get current setting to find its ID
@@ -811,13 +691,8 @@ To apply, call again with `confirmation=true`
 
             await _api_put(f"/rest/setting/{setting_id}", {"enabled": params.enabled})
 
-            return f"""# RF Setting Updated ✅
-
-- **Setting**: {params.setting}
-- **Status**: {'enabled' if params.enabled else 'disabled'}
-
-Changes will take effect within 30 seconds.
-"""
+            result_status = "enabled" if params.enabled else "disabled"
+            return f"# RF Setting Updated ✅\n\n- **Setting**: {params.setting}\n- **Status**: {result_status}\n\nChanges will take effect within 30 seconds.\n"
         except Exception as e:
             return _handle_error(e)
 
