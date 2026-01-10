@@ -48,7 +48,8 @@ data:
     MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
 
     # Model configuration - Gemini only (via LiteLLM)
-    GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini/gemini-2.0-pro")
+    # Using 2.0-flash for everything - best free tier limits (1500 RPD, 10 RPM)
+    GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini/gemini-2.0-flash")
     GEMINI_FLASH_MODEL = os.environ.get("GEMINI_FLASH_MODEL", "gemini/gemini-2.0-flash")
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
 
