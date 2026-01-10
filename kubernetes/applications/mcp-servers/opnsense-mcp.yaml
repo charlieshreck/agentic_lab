@@ -157,6 +157,123 @@ data:
             return _handle_error(e)
 
     # ============================================================================
+    # Caddy Reverse Proxy Management
+    # ============================================================================
+
+    @mcp.tool(
+        name="caddy_list_reverse_proxies",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def caddy_list_reverse_proxies(params: BaseInput) -> str:
+        """List all Caddy reverse proxy configurations."""
+        try:
+            data = await _opnsense_api("/caddy/reverse_proxy/search_reverse_proxy")
+            rows = data.get("rows", [])
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"proxies": rows, "count": len(rows)}, indent=2)
+
+            lines = ["# Caddy Reverse Proxies", "", f"Found {len(rows)} proxy(s)", ""]
+            for r in rows:
+                enabled = "✅" if r.get("enabled") == "1" else "⚫"
+                from_domain = r.get("FromDomain", "")
+                to_addr = r.get("ToDomain", "") + ":" + r.get("ToPort", "")
+                desc = r.get("description", "")
+                lines.append(f"- {enabled} `{from_domain}` → `{to_addr}` ({desc})")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    class CaddyProxyInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        from_domain: str = Field(description="Source domain (e.g., qdrant.kernow.io)")
+        to_addr: str = Field(description="Target address (e.g., 10.20.0.40)")
+        to_port: str = Field(description="Target port (e.g., 30633)")
+        description: str = Field(default="", description="Optional description")
+
+    @mcp.tool(
+        name="caddy_add_reverse_proxy",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def caddy_add_reverse_proxy(params: CaddyProxyInput) -> str:
+        """Add a new Caddy reverse proxy configuration."""
+        try:
+            # First add the reverse proxy entry
+            add_data = {
+                "reverse_proxy": {
+                    "enabled": "1",
+                    "FromDomain": params.from_domain,
+                    "FromPort": "",
+                    "accesslist": "",
+                    "basicauth": "",
+                    "DnsChallenge": "0",
+                    "CustomCertificate": "",
+                    "AccessLog": "0",
+                    "description": params.description or f"Auto-added: {params.from_domain}"
+                }
+            }
+            result = await _opnsense_api("/caddy/reverse_proxy/add_reverse_proxy", method="POST", data=add_data)
+            uuid = result.get("uuid", "")
+            if not uuid:
+                return f"Error: Failed to add reverse proxy - {result}"
+
+            # Now add a handle for this domain
+            handle_data = {
+                "handle": {
+                    "enabled": "1",
+                    "reverse_proxy": uuid,
+                    "HandleType": "handle",
+                    "HandlePath": "",
+                    "header": "",
+                    "ToDomain": params.to_addr,
+                    "ToPort": params.to_port,
+                    "ToPath": "",
+                    "HttpTls": "0",
+                    "HttpTlsTrustedCaCerts": "",
+                    "HttpTlsServerName": "",
+                    "HttpNtlm": "0",
+                    "PassiveHealthFailDuration": "",
+                    "description": ""
+                }
+            }
+            handle_result = await _opnsense_api("/caddy/reverse_proxy/add_handle", method="POST", data=handle_data)
+
+            # Apply the configuration
+            await _opnsense_api("/caddy/service/reconfigure", method="POST")
+
+            return f"✅ Added Caddy reverse proxy:\n  `{params.from_domain}` → `{params.to_addr}:{params.to_port}`\n  UUID: {uuid}\n  Configuration applied."
+        except Exception as e:
+            return _handle_error(e)
+
+    class CaddyDeleteInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        uuid: str = Field(description="UUID of the reverse proxy to delete")
+
+    @mcp.tool(
+        name="caddy_delete_reverse_proxy",
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def caddy_delete_reverse_proxy(params: CaddyDeleteInput) -> str:
+        """Delete a Caddy reverse proxy configuration by UUID."""
+        try:
+            await _opnsense_api(f"/caddy/reverse_proxy/del_reverse_proxy/{params.uuid}", method="POST")
+            await _opnsense_api("/caddy/service/reconfigure", method="POST")
+            return f"✅ Deleted reverse proxy {params.uuid} and applied configuration."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="caddy_apply_config",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def caddy_apply_config(params: BaseInput) -> str:
+        """Apply/reload Caddy configuration."""
+        try:
+            result = await _opnsense_api("/caddy/service/reconfigure", method="POST")
+            return f"✅ Caddy configuration applied: {json.dumps(result)}"
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
     # REST API
     # ============================================================================
 
@@ -168,9 +285,20 @@ data:
         """Health check endpoint."""
         return JSONResponse({"status": "healthy"})
 
+    async def rest_caddy_proxies(request):
+        """REST endpoint to list Caddy proxies."""
+        try:
+            data = await _opnsense_api("/caddy/reverse_proxy/search_reverse_proxy")
+            return JSONResponse({"status": "ok", "data": data.get("rows", [])})
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
     if __name__ == "__main__":
         import uvicorn
-        rest_routes = [Route("/health", rest_health, methods=["GET"])]
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/caddy/proxies", rest_caddy_proxies, methods=["GET"]),
+        ]
         mcp_app = mcp.http_app()
         app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
         uvicorn.run(app, host="0.0.0.0", port=8000)
