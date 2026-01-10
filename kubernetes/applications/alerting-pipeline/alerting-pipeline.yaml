@@ -145,11 +145,11 @@ data:
     CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
 
     # ============================================================================
-    # Local LLM Functions (via LiteLLM/Ollama)
+    # LLM Functions (via LiteLLM/Gemini)
     # ============================================================================
 
-    async def query_local_llm(prompt: str, system_prompt: str = None) -> dict:
-        """Query local LLM via LiteLLM proxy (fast, free, private)."""
+    async def query_llm(prompt: str, system_prompt: str = None) -> dict:
+        """Query LLM via LiteLLM proxy (routes to Gemini)."""
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -175,7 +175,7 @@ data:
                 return {"error": str(e)}
 
     async def get_embedding(text: str) -> List[float]:
-        """Get embedding vector from local model via LiteLLM."""
+        """Get embedding vector via LiteLLM (Gemini text-embedding-004)."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 response = await client.post(
@@ -398,8 +398,8 @@ data:
             except Exception:
                 return False
 
-    async def analyze_issue_locally(issue_description: str) -> dict:
-        """Use local LLM to analyze an issue and determine severity/category."""
+    async def analyze_issue(issue_description: str) -> dict:
+        """Use LLM to analyze an issue and determine severity/category."""
         system_prompt = (
             "You are a homelab infrastructure analyst. Analyze the issue and respond in JSON format with these fields: "
             "severity (critical/warning/info), category (network/storage/compute/service), summary (brief description), "
@@ -407,9 +407,9 @@ data:
             "Only set needs_escalation to true if the issue is complex or requires investigation."
         )
 
-        result = await query_local_llm(issue_description, system_prompt)
+        result = await query_llm(issue_description, system_prompt)
         if "error" in result:
-            return {"needs_escalation": True, "reason": "Local LLM unavailable"}
+            return {"needs_escalation": True, "reason": "LLM unavailable"}
 
         try:
             import json
@@ -433,7 +433,7 @@ data:
             name=f"Known Issue: {runbook.get('name', 'Unknown')}",
             severity="info",
             description=f"Detected known issue. Applying existing runbook.\n\nIssue: {issue[:200]}",
-            source="local-llm",
+            source="gemini-llm",
             suggested_fix=runbook.get("fix_command") or "\n".join(runbook.get("steps", [])),
             context=f"Runbook match score: {runbook.get('score', 0):.2f}"
         )

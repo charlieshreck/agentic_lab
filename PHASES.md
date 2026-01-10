@@ -98,45 +98,41 @@ git push
 
 ## Phase 3: Inference Layer (Week 2-3)
 
-**Goal**: Deploy local LLM infrastructure
+**Goal**: Deploy LLM inference infrastructure via LiteLLM
 
 ### Tasks
 
-- [ ] Deploy Ollama StatefulSet with PVC
-- [ ] Pull models: `qwen2.5:7b`, `nomic-embed-text-v1.5`
-- [ ] Test Ollama API: `curl http://ollama:11434/api/tags`
-- [ ] Deploy LiteLLM with local model configuration
-- [ ] Test LiteLLM routing
-- [ ] Configure Gemini API key in Infisical (optional)
-- [ ] Configure Claude API key in Infisical (optional)
-- [ ] Test hybrid routing (local → cloud escalation)
+- [x] Deploy LiteLLM with Gemini configuration
+- [x] Configure Gemini API key in Infisical
+- [x] Test LiteLLM routing to Gemini
+- [x] Configure embeddings model (text-embedding-004)
+- [ ] Configure Claude API key in Infisical (optional, for validator)
 
 ### Success Criteria
 
 ```bash
-# Ollama healthy with models loaded
-kubectl exec -n ai-platform deploy/ollama -- \
-  curl -s localhost:11434/api/tags | jq '.models[].name'
-# qwen2.5:7b
-# nomic-embed-text-v1.5
-
 # LiteLLM routing works
 kubectl port-forward -n ai-platform svc/litellm 4000:4000 &
 curl http://localhost:4000/v1/models
-# Returns list of available models (local + cloud)
+# Returns list of available models (gemini-pro, embeddings)
 
 # Test inference
 curl http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "local/qwen2.5:7b", "messages": [{"role": "user", "content": "Hello"}]}'
+  -d '{"model": "gemini-pro", "messages": [{"role": "user", "content": "Hello"}]}'
 # Returns response
+
+# Test embeddings
+curl http://localhost:4000/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model": "embeddings", "input": "test"}'
+# Returns 768-dimension vector
 ```
 
 ### Rollback
 
 Via ArgoCD (git revert) or:
 ```bash
-kubectl delete -k kubernetes/applications/ollama/
 kubectl delete -k kubernetes/applications/litellm/
 ```
 
@@ -150,7 +146,7 @@ kubectl delete -k kubernetes/applications/litellm/
 
 - [ ] Deploy Qdrant StatefulSet with persistent volume
 - [ ] Create collection schemas (runbooks, decisions, documentation)
-- [ ] Deploy embedding service (nomic-embed)
+- [x] Configure embeddings via LiteLLM (Gemini text-embedding-004)
 - [ ] Build ingestion pipeline for documentation
 - [ ] Ingest initial docs from `docs/` directory
 - [ ] Test semantic search
@@ -437,7 +433,7 @@ Review automation decisions, success rates, and adjust policies:
 
 - Trust review (audit automated decisions)
 - Infrastructure updates (Talos, Kubernetes versions)
-- Model updates (new Ollama models, cloud model changes)
+- Model updates (Gemini model changes, new capabilities)
 - Architecture review and optimization
 
 ---

@@ -74,7 +74,7 @@ talosctl apply-config --nodes 10.20.0.40 \
 cd /home/agentic_lab
 
 # 1. Make changes to manifests
-vim kubernetes/applications/ollama/deployment.yaml
+vim kubernetes/applications/litellm/deployment.yaml
 
 # 2. Commit to git FIRST (this is the deployment!)
 git add .
@@ -83,7 +83,7 @@ git push
 
 # 3. ArgoCD automatically syncs within 3 minutes
 # OR force sync:
-argocd app sync ollama
+argocd app sync litellm
 
 # 4. Verify
 kubectl get pods -n ai-platform
@@ -126,7 +126,7 @@ kubectl get secret <secret-name> -n ai-platform
 kubectl apply -f deployment.yaml
 
 # WRONG: Manual kubectl edit
-kubectl edit deployment ollama
+kubectl edit deployment litellm
 
 # WRONG: Manual kubectl create
 kubectl create secret generic my-secret
@@ -151,7 +151,7 @@ talosctl patch mc --nodes 10.20.0.40 -p '[...]'
 git add . && git commit -m "Update deployment" && git push
 
 # RIGHT: Update manifest in git
-vim kubernetes/applications/ollama/deployment.yaml
+vim kubernetes/applications/litellm/deployment.yaml
 git add . && git commit && git push
 
 # RIGHT: Use InfisicalSecret CR

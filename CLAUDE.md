@@ -19,7 +19,7 @@ This repository contains the infrastructure and application code for a **self-im
 - **Hardware**: AMD Ryzen 9 6900HX (8C/16T), 32GB DDR5, 1.5TB NVMe
 - **Network**: 10.20.0.0/24 (isolated from production and monitoring networks)
 - **Node IP**: 10.20.0.40
-- **GPU**: AMD Radeon 680M (RDNA2) for local inference acceleration
+- **GPU**: AMD Radeon 680M (RDNA2) - available for future local inference
 - **Storage**: Local path provisioner + future MinIO for backups
 
 ### Key Components
@@ -33,7 +33,6 @@ This repository contains the infrastructure and application code for a **self-im
 
 - **Inference**: LiteLLM proxy routing to Gemini Pro (1M token context)
 - **Embeddings**: Gemini text-embedding-004 (768 dimensions)
-- **Local Inference**: Removed (Ollama) - can revisit when runbook library matures
 
 #### 2. Vector Knowledge Base
 - **Engine**: Qdrant vector database

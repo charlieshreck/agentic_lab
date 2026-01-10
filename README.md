@@ -13,7 +13,7 @@ This is a **hybrid local/cloud AI agent** deployed on dedicated infrastructure (
 - 🧠 **Learns**: Vector knowledge base (Qdrant) stores every decision, outcome, and your feedback
 - 🤝 **Collaborates**: Human-in-the-loop via Telegram Forum with inline keyboard approvals
 - 🚀 **Improves**: Runbooks graduate from manual → prompted → fully automated based on success rate
-- ⚡ **Adapts**: Local inference (Ollama) for speed, cloud (Gemini/Claude) for complex reasoning
+- ⚡ **Adapts**: Cloud inference via LiteLLM routing to Gemini (embeddings + chat)
 - 🔒 **Protects**: PII detection before cloud escalation, network isolation, secrets management
 
 **Philosophy**: Autonomy is earned, not configured. The system starts by asking permission for everything, then gradually proves it can be trusted with more independence.
@@ -38,11 +38,10 @@ This is a **hybrid local/cloud AI agent** deployed on dedicated infrastructure (
 ```
 
 **Components**:
-- **Ollama**: Local LLM (qwen2.5:7b, nomic-embed-text)
+- **LiteLLM**: Unified API routing to Gemini (chat + embeddings)
 - **Qdrant**: Vector database for learning and RAG
 - **LangGraph**: Agent orchestration and state management
 - **Telegram**: Human-in-the-loop approval interface
-- **LiteLLM**: Unified API for local + cloud models
 - **MCP Servers**: Tool integrations (Home Assistant, arr suite, infrastructure)
 
 ---
@@ -129,7 +128,7 @@ ArgoCD will automatically deploy platform services and applications. Monitor pro
 
 ```bash
 argocd app list
-argocd app get platform/ollama
+argocd app get platform/litellm
 ```
 
 ---
@@ -177,11 +176,11 @@ Related Networks:
 - GitOps-native configuration
 - Perfect for infrastructure as code
 
-### Why Hybrid Inference?
-- **Local (Ollama)**: Fast (50ms), private, no API costs, offline capable
-- **Cloud (Gemini/Claude)**: Superior reasoning for complex tasks
-- **PII Detection**: Automatic filtering before cloud escalation
-- **Cost Optimization**: 80% of queries handled locally
+### Why Gemini via LiteLLM?
+- **1M Token Context**: Comprehensive context injection without complex RAG chunking
+- **Cost Effective**: Lower cost than Claude for high-volume operational tasks
+- **Fast Embeddings**: text-embedding-004 (768 dimensions) for semantic search
+- **Unified API**: LiteLLM provides OpenAI-compatible interface for all models
 
 ### Why Qdrant?
 - True vector database (not just indexed Postgres)

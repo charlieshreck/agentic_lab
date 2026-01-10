@@ -6,7 +6,7 @@ This skill assists with the Agentic AI Platform infrastructure and application m
 
 **Infrastructure**: Talos cluster on UM690L (10.20.0.40)
 **Network**: 10.20.0.0/24 (isolated from prod/monitoring)
-**Stack**: Ollama + Qdrant + LangGraph + Telegram + MCP servers
+**Stack**: LiteLLM + Gemini + Qdrant + LangGraph + Telegram + MCP servers
 **Purpose**: Cyclical learning AI agent for homelab management
 
 ## Common Operations
@@ -18,7 +18,7 @@ This skill assists with the Agentic AI Platform infrastructure and application m
 - ArgoCD application sync
 
 ### AI Platform
-- Ollama model management
+- LiteLLM model routing
 - Qdrant collection operations
 - LangGraph state inspection
 - MCP server debugging
@@ -32,8 +32,8 @@ This skill assists with the Agentic AI Platform infrastructure and application m
 
 ## Architecture Notes
 
-- **Hybrid Inference**: Local Ollama (qwen2.5:7b, nomic-embed) + Cloud (Gemini, Claude)
-- **PII Detection**: Presidio + GLiNER before cloud escalation
+- **Inference**: LiteLLM routing to Gemini (chat + embeddings)
+- **Embeddings**: Gemini text-embedding-004 (768 dimensions)
 - **Learning**: Qdrant vector DB with runbooks, decisions, documentation
 - **Human-in-the-Loop**: Telegram Forum with inline keyboard approvals
 - **Progressive Autonomy**: Runbooks graduate from manual → prompted → standard
@@ -46,27 +46,33 @@ This skill assists with the Agentic AI Platform infrastructure and application m
 
 ## Common Queries
 
-### "Check if Ollama is running"
+### "Check if LiteLLM is running"
 ```bash
-kubectl get pods -n ai-platform -l app=ollama
-kubectl logs -n ai-platform deploy/ollama --tail=50
+kubectl get pods -n ai-platform -l app=litellm
+kubectl logs -n ai-platform deploy/litellm --tail=50
 ```
 
-### "List loaded models"
+### "List available models"
 ```bash
-kubectl exec -n ai-platform deploy/ollama -- \
-  curl -s localhost:11434/api/tags | jq '.models[].name'
+curl -s http://10.20.0.40:30400/v1/models | jq '.data[].id'
+```
+
+### "Test embeddings"
+```bash
+curl -s http://10.20.0.40:30400/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model": "embeddings", "input": "test"}' | jq '.data[0].embedding | length'
+# Should return 768
 ```
 
 ### "Check Qdrant collection sizes"
 ```bash
-kubectl port-forward -n ai-platform svc/qdrant 6333:6333 &
-curl -s http://localhost:6333/collections | jq '.result.collections[] | {name: .name, points: .points_count}'
+curl -s http://10.20.0.40:30633/collections | jq '.result.collections[] | {name: .name}'
 ```
 
 ### "View recent agent decisions"
 ```bash
-curl -X POST http://localhost:6333/collections/decisions/points/scroll \
+curl -X POST http://10.20.0.40:30633/collections/decisions/points/scroll \
   -H "Content-Type: application/json" \
   -d '{"limit": 10, "with_payload": true, "with_vector": false}' | \
   jq '.result.points[] | {timestamp: .payload.timestamp, outcome: .payload.outcome}'
@@ -98,20 +104,20 @@ kubectl config view --raw
 
 ## Debugging Common Issues
 
-### Ollama not responding
+### LiteLLM not responding
 ```bash
-kubectl describe pod -n ai-platform -l app=ollama
-kubectl logs -n ai-platform deploy/ollama --tail=100
-# Check if models are loaded:
-kubectl exec -n ai-platform deploy/ollama -- ls -lh /root/.ollama/models
+kubectl describe pod -n ai-platform -l app=litellm
+kubectl logs -n ai-platform deploy/litellm --tail=100
+# Check Gemini API key:
+kubectl get secret -n ai-platform litellm-secrets -o jsonpath='{.data.GEMINI_API_KEY}' | base64 -d | head -c 10
 ```
 
 ### Qdrant collection not syncing
 ```bash
-kubectl logs -n ai-platform deploy/qdrant --tail=50
+kubectl logs -n ai-platform qdrant-0 --tail=50
 kubectl get pvc -n ai-platform | grep qdrant
 # Check storage:
-kubectl exec -n ai-platform deploy/qdrant -- df -h /qdrant/storage
+kubectl exec -n ai-platform qdrant-0 -- df -h /qdrant/storage
 ```
 
 ### Telegram webhook not receiving messages
@@ -142,7 +148,8 @@ kubectl logs -n infisical-operator-system deploy/infisical-operator-controller-m
 
 ## Performance Targets
 
-- **Ollama inference**: <100ms (local qwen2.5:7b)
+- **LiteLLM inference**: <500ms (Gemini API)
+- **Embeddings**: <200ms (text-embedding-004)
 - **Qdrant search**: <10ms (for 100K vectors)
 - **Telegram webhook**: <5min from alert to notification
 - **ArgoCD sync**: <3min auto-sync interval
@@ -152,7 +159,6 @@ kubectl logs -n infisical-operator-system deploy/infisical-operator-controller-m
 Monitor these in Qdrant:
 - Runbook success rates
 - Approval vs. ignore ratios
-- Cloud escalation frequency
 - Automation level distribution (manual/prompted/standard)
 
 ## References
