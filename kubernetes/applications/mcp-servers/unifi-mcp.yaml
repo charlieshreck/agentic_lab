@@ -815,8 +815,10 @@ metadata:
   name: unifi-mcp
   namespace: ai-platform
 spec:
+  type: NodePort
   selector:
     app: unifi-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31088

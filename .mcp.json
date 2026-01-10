@@ -31,6 +31,10 @@
     "browser-automation": {
       "url": "http://browser-automation-mcp.ai-platform.svc.cluster.local:8000",
       "description": "Browser automation using Playwright. Tools: navigate, screenshot, click, type_text, evaluate_js, fill_form, get_page_content"
+    },
+    "unifi": {
+      "url": "http://10.20.0.40:31088",
+      "description": "UniFi network management. Tools: clients, devices, WLANs, events, networks, rogue APs, DPI, create/update/delete SSIDs, restart/locate devices, block/unblock/name clients, RF optimization"
     }
   },
   "comments": {
