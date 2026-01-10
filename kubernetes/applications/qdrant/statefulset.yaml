@@ -61,6 +61,64 @@ spec:
             port: 6333
           initialDelaySeconds: 10
           periodSeconds: 5
+      # Sidecar: Creates collections on startup, then idles
+      # Runs alongside Qdrant, waits for ready, creates collections (idempotent)
+      - name: init-collections
+        image: curlimages/curl:8.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          QDRANT_URL="http://localhost:6333"
+
+          echo "Waiting for Qdrant to be ready..."
+          until curl -sf "${QDRANT_URL}/readyz" > /dev/null 2>&1; do
+            echo "Qdrant not ready, waiting..."
+            sleep 2
+          done
+          echo "Qdrant is ready!"
+
+          # Create collections (PUT is idempotent - creates or returns existing)
+          for collection in runbooks decisions documentation agent_events tool_knowledge validations capability_gaps skill_gaps user_feedback entities device_types; do
+            echo "Ensuring collection '${collection}' exists..."
+            curl -sf -X PUT "${QDRANT_URL}/collections/${collection}" \
+              -H "Content-Type: application/json" \
+              -d '{"vectors":{"size":768,"distance":"Cosine"},"on_disk_payload":true}' \
+              > /dev/null 2>&1 || true
+          done
+
+          # Create indexes for entities collection
+          echo "Creating indexes for 'entities' collection..."
+          for field in ip mac hostname category type manufacturer network status; do
+            curl -sf -X PUT "${QDRANT_URL}/collections/entities/index" \
+              -H "Content-Type: application/json" \
+              -d "{\"field_name\":\"${field}\",\"field_schema\":\"keyword\"}" \
+              > /dev/null 2>&1 || true
+          done
+
+          # Create indexes for device_types collection
+          echo "Creating indexes for 'device_types' collection..."
+          for field in name category; do
+            curl -sf -X PUT "${QDRANT_URL}/collections/device_types/index" \
+              -H "Content-Type: application/json" \
+              -d "{\"field_name\":\"${field}\",\"field_schema\":\"keyword\"}" \
+              > /dev/null 2>&1 || true
+          done
+
+          echo "Collections initialized!"
+          curl -s "${QDRANT_URL}/collections" | grep -o '"name":"[^"]*"' || true
+
+          # Sleep forever - sidecar must stay running
+          echo "Init complete. Sidecar idling..."
+          exec sleep infinity
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "10m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
   volumeClaimTemplates:
   - metadata:
       name: qdrant-storage

@@ -5,7 +5,6 @@ namespace: ai-platform
 
 resources:
   - langgraph.yaml
-  - seed-runbooks.yaml  # ConfigMap only - Job was removed
-  # NOTE: Seed Jobs are NOT managed by ArgoCD.
-  # Jobs are immutable - ArgoCD can't update them, so it deletes/recreates every sync.
-  # The seed runbooks are already in Qdrant. To re-seed, apply the Job manually.
+  - seed-runbooks.yaml  # ConfigMap with runbook definitions (reference data)
+  # Runbooks are seeded in Qdrant via knowledge-mcp or manual ingestion
+  # The ConfigMap provides the canonical runbook definitions
