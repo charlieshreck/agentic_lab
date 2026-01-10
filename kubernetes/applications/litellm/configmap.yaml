@@ -20,10 +20,10 @@ data:
           model: gemini/gemini-2.0-flash
           api_key: os.environ/GEMINI_API_KEY
 
-      # Fallback: OpenRouter free Gemini (used when direct API hits 429)
-      - model_name: openrouter-gemini-flash
+      # Fallback: Llama 3.3 70B free via OpenRouter (non-Gemini, different provider)
+      - model_name: openrouter-llama
         litellm_params:
-          model: openrouter/google/gemini-2.0-flash-exp:free
+          model: openrouter/meta-llama/llama-3.3-70b-instruct:free
           api_key: os.environ/OPENROUTER_API_KEY
 
       # DeepSeek R1 free - good for reasoning tasks
@@ -58,11 +58,11 @@ data:
       allowed_fails: 1
       fallbacks:
         - gemini/gemini-2.0-flash:
-            - openrouter-gemini-flash
+            - openrouter-llama
         - gemini-pro:
-            - openrouter-gemini-flash
+            - openrouter-llama
         - gemini/gemini-2.0-pro:
-            - openrouter-gemini-flash
+            - openrouter-llama
 
     # General settings
     general_settings:
