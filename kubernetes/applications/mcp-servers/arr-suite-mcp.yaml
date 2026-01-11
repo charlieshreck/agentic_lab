@@ -427,9 +427,8 @@ data:
     # TAUTULLI TOOLS (Plex Stats)
     # ==========================================================================
 
-    @mcp.tool()
-    async def tautulli_get_activity() -> dict:
-        """Get current Plex streaming activity."""
+    async def _tautulli_get_activity_impl() -> dict:
+        """Internal implementation for Plex activity (callable by both MCP tool and REST API)."""
         try:
             activity = await tautulli_request("get_activity")
             sessions = []
@@ -448,6 +447,11 @@ data:
             }
         except Exception as e:
             return {"error": str(e)}
+
+    @mcp.tool()
+    async def tautulli_get_activity() -> dict:
+        """Get current Plex streaming activity."""
+        return await _tautulli_get_activity_impl()
 
     @mcp.tool()
     async def tautulli_get_history(length: int = 10) -> List[dict]:
@@ -627,9 +631,8 @@ data:
     # COMBINED/STATUS TOOLS
     # ==========================================================================
 
-    @mcp.tool()
-    async def get_all_downloads() -> dict:
-        """Get combined download status from all clients."""
+    async def _get_all_downloads_impl() -> dict:
+        """Internal implementation for downloads (callable by both MCP tool and REST API)."""
         result = {"sonarr": [], "radarr": [], "transmission": [], "sabnzbd": {}}
 
         try:
@@ -653,6 +656,11 @@ data:
             pass
 
         return result
+
+    @mcp.tool()
+    async def get_all_downloads() -> dict:
+        """Get combined download status from all clients."""
+        return await _get_all_downloads_impl()
 
     async def _get_system_status_impl() -> dict:
         """Internal implementation for system status (callable by both MCP tool and REST API)."""
@@ -713,11 +721,11 @@ data:
 
     async def rest_api_downloads(request: Request):
         """Get all downloads for LangGraph context."""
-        return JSONResponse({"status": "ok", "data": await get_all_downloads()})
+        return JSONResponse({"status": "ok", "data": await _get_all_downloads_impl()})
 
     async def rest_api_activity(request: Request):
         """Get Plex activity for LangGraph context."""
-        return JSONResponse({"status": "ok", "data": await tautulli_get_activity()})
+        return JSONResponse({"status": "ok", "data": await _tautulli_get_activity_impl()})
 
     # ==========================================================================
     # MAIN
