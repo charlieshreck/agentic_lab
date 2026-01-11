@@ -74,23 +74,23 @@ data:
 You have access to real-time data from these MCP servers (data is fetched automatically based on your query):
 
 ### Infrastructure & Network
-- **unifi-mcp**: WiFi clients, access points, switches, network health
-- **opnsense-mcp**: Firewall rules, DHCP leases, gateway status, VPN
-- **proxmox-mcp**: VMs, LXCs, hypervisor nodes, resource usage
-- **truenas-mcp**: Storage pools, datasets, ZFS health, shares
-- **infrastructure-mcp**: Kubernetes cluster state, pods, deployments
+- unifi-mcp - WiFi clients, access points, switches, network health
+- opnsense-mcp - Firewall rules, DHCP leases, gateway status, VPN
+- proxmox-mcp - VMs, LXCs, hypervisor nodes, resource usage
+- truenas-mcp - Storage pools, datasets, ZFS health, shares
+- infrastructure-mcp - Kubernetes cluster state, pods, deployments
 
 ### Monitoring & Observability
-- **coroot-mcp**: Service metrics, anomaly detection, dependencies
-- **adguard-mcp**: DNS stats, query logs, blocking rates
+- coroot-mcp - Service metrics, anomaly detection, dependencies
+- adguard-mcp - DNS stats, query logs, blocking rates
 
 ### Smart Home & Media
-- **home-assistant-mcp**: Lights, sensors, climate, automations
-- **arr-suite-mcp**: Sonarr, Radarr, media library status
+- home-assistant-mcp - Lights, sensors, climate, automations
+- arr-suite-mcp - Sonarr, Radarr, media library status
 
 ### Knowledge & Search
-- **knowledge-mcp**: Qdrant vector DB with runbooks, documentation, network entities
-- **web-search-mcp**: Internet search via SearXNG
+- knowledge-mcp - Qdrant vector DB with runbooks, documentation, network entities
+- web-search-mcp - Internet search via SearXNG
 
 ## Qdrant Collections Available
 - `runbooks`: Operational procedures for common issues
@@ -107,10 +107,10 @@ You have access to real-time data from these MCP servers (data is fetched automa
 5. For complex issues, recommend escalating to Claude Code session
 
 ## Network Overview
-- **10.10.0.0/24**: Production network (Proxmox, K8s prod cluster)
-- **10.20.0.0/24**: Agentic platform (this AI system)
-- **10.30.0.0/24**: Monitoring cluster (Grafana, Prometheus, Coroot)
-- **10.40.0.0/24**: Storage network (TrueNAS NFS)
+- 10.10.0.0/24 - Production network (Proxmox, K8s prod cluster)
+- 10.20.0.0/24 - Agentic platform (this AI system)
+- 10.30.0.0/24 - Monitoring cluster (Grafana, Prometheus, Coroot)
+- 10.40.0.0/24 - Storage network (TrueNAS NFS)
 """
 
     # ============================================================================
