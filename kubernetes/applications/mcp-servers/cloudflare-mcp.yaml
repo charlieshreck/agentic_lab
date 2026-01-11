@@ -157,6 +157,286 @@ data:
             return _handle_error(e)
 
     # ============================================================================
+    # DNS RECORD MANAGEMENT
+    # ============================================================================
+
+    class DNSRecordCreateInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        zone_id: str = Field(..., description="Zone ID", min_length=32, max_length=32)
+        record_type: str = Field(..., description="Record type: A, AAAA, CNAME, TXT, MX, etc.")
+        name: str = Field(..., description="Record name (e.g., 'www' or 'sub.domain.com')")
+        content: str = Field(..., description="Record content (IP, target, etc.)")
+        ttl: int = Field(default=1, description="TTL in seconds (1 = auto)")
+        proxied: bool = Field(default=False, description="Enable Cloudflare proxy (orange cloud)")
+        priority: Optional[int] = Field(default=None, description="Priority for MX records")
+
+    class DNSRecordUpdateInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        zone_id: str = Field(..., description="Zone ID", min_length=32, max_length=32)
+        record_id: str = Field(..., description="Record ID to update")
+        record_type: Optional[str] = Field(default=None, description="Record type")
+        name: Optional[str] = Field(default=None, description="Record name")
+        content: Optional[str] = Field(default=None, description="Record content")
+        ttl: Optional[int] = Field(default=None, description="TTL")
+        proxied: Optional[bool] = Field(default=None, description="Proxy status")
+
+    class DNSRecordDeleteInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        zone_id: str = Field(..., description="Zone ID", min_length=32, max_length=32)
+        record_id: str = Field(..., description="Record ID to delete")
+        confirmation: bool = Field(default=False, description="Must be true to delete")
+
+    class DNSRecordSearchInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        zone_id: str = Field(..., description="Zone ID", min_length=32, max_length=32)
+        name: Optional[str] = Field(default=None, description="Filter by name")
+        record_type: Optional[str] = Field(default=None, description="Filter by type")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @mcp.tool(
+        name="cloudflare_search_dns_records",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def cloudflare_search_dns_records(params: DNSRecordSearchInput) -> str:
+        """Search DNS records by name or type."""
+        try:
+            endpoint = f"/zones/{params.zone_id}/dns_records"
+            query_params = []
+            if params.name:
+                query_params.append(f"name={params.name}")
+            if params.record_type:
+                query_params.append(f"type={params.record_type}")
+            if query_params:
+                endpoint += "?" + "&".join(query_params)
+
+            result = await _cf_api(endpoint)
+            records = result.get("result", [])
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"records": records, "count": len(records)}, indent=2)
+
+            if not records:
+                return "No matching DNS records found."
+
+            lines = [f"# DNS Records ({len(records)} found)", ""]
+            for r in records:
+                proxied = "☁️" if r.get("proxied") else "⚡"
+                lines.append(f"- {proxied} **{r.get('type')}** `{r.get('name')}` → `{r.get('content')[:50]}`")
+                lines.append(f"  - ID: `{r.get('id')}`")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="cloudflare_add_dns_record",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def cloudflare_add_dns_record(params: DNSRecordCreateInput) -> str:
+        """Create a new DNS record."""
+        try:
+            data = {
+                "type": params.record_type.upper(),
+                "name": params.name,
+                "content": params.content,
+                "ttl": params.ttl,
+                "proxied": params.proxied
+            }
+            if params.priority is not None:
+                data["priority"] = params.priority
+
+            result = await _cf_api(f"/zones/{params.zone_id}/dns_records", "POST", data)
+            record = result.get("result", {})
+
+            return f"""# DNS Record Created ✅
+
+- **Type**: {record.get('type')}
+- **Name**: {record.get('name')}
+- **Content**: {record.get('content')}
+- **Proxied**: {record.get('proxied')}
+- **ID**: `{record.get('id')}`
+
+Record is now active."""
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="cloudflare_update_dns_record",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def cloudflare_update_dns_record(params: DNSRecordUpdateInput) -> str:
+        """Update an existing DNS record."""
+        try:
+            # Get current record first
+            current = await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}")
+            record = current.get("result", {})
+
+            # Build update payload with current values as defaults
+            data = {
+                "type": params.record_type or record.get("type"),
+                "name": params.name or record.get("name"),
+                "content": params.content or record.get("content"),
+                "ttl": params.ttl if params.ttl is not None else record.get("ttl", 1),
+                "proxied": params.proxied if params.proxied is not None else record.get("proxied", False)
+            }
+
+            result = await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}", "PUT", data)
+            updated = result.get("result", {})
+
+            return f"""# DNS Record Updated ✅
+
+- **Type**: {updated.get('type')}
+- **Name**: {updated.get('name')}
+- **Content**: {updated.get('content')}
+- **Proxied**: {updated.get('proxied')}
+- **ID**: `{updated.get('id')}`"""
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="cloudflare_delete_dns_record",
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def cloudflare_delete_dns_record(params: DNSRecordDeleteInput) -> str:
+        """Delete a DNS record. DESTRUCTIVE - requires confirmation=true."""
+        if not params.confirmation:
+            try:
+                # Get record info for preview
+                current = await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}")
+                record = current.get("result", {})
+                return f"""# ⚠️ DNS Record Deletion Warning
+
+**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**
+
+## Target Record
+- **Type**: {record.get('type')}
+- **Name**: {record.get('name')}
+- **Content**: {record.get('content')}
+- **ID**: `{params.record_id}`
+
+To delete this record, call again with `confirmation=true`"""
+            except Exception as e:
+                return _handle_error(e)
+
+        try:
+            await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}", "DELETE")
+            return f"# DNS Record Deleted ✅\n\n- **ID**: `{params.record_id}`\n\nThe record has been removed."
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # CACHE MANAGEMENT
+    # ============================================================================
+
+    class PurgeCacheInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        zone_id: str = Field(..., description="Zone ID", min_length=32, max_length=32)
+        purge_everything: bool = Field(default=False, description="Purge all cached content")
+        files: Optional[List[str]] = Field(default=None, description="List of URLs to purge")
+        tags: Optional[List[str]] = Field(default=None, description="Cache tags to purge")
+        confirmation: bool = Field(default=False, description="Must be true to purge")
+
+    @mcp.tool(
+        name="cloudflare_purge_cache",
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def cloudflare_purge_cache(params: PurgeCacheInput) -> str:
+        """Purge Cloudflare cache. Requires confirmation=true."""
+        if not params.confirmation:
+            action = "EVERYTHING" if params.purge_everything else f"{len(params.files or [])} files"
+            return f"""# ⚠️ Cache Purge Warning
+
+**Set confirmation=true to proceed.**
+
+## Purge Target
+- **Zone**: {params.zone_id}
+- **Scope**: {action}
+
+To purge, call again with `confirmation=true`"""
+
+        try:
+            data = {}
+            if params.purge_everything:
+                data["purge_everything"] = True
+            elif params.files:
+                data["files"] = params.files
+            elif params.tags:
+                data["tags"] = params.tags
+            else:
+                return "Error: Specify purge_everything, files, or tags"
+
+            await _cf_api(f"/zones/{params.zone_id}/purge_cache", "POST", data)
+            return "# Cache Purged ✅\n\nCache has been purged. Changes may take a few seconds to propagate."
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # ZONE SETTINGS
+    # ============================================================================
+
+    class ZoneSettingInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        zone_id: str = Field(..., description="Zone ID", min_length=32, max_length=32)
+
+    @mcp.tool(
+        name="cloudflare_get_zone_settings",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def cloudflare_get_zone_settings(params: ZoneSettingInput) -> str:
+        """Get zone security and performance settings."""
+        try:
+            result = await _cf_api(f"/zones/{params.zone_id}/settings")
+            settings = result.get("result", [])
+
+            # Extract key settings
+            key_settings = {}
+            for s in settings:
+                if s.get("id") in ["ssl", "always_use_https", "min_tls_version", "security_level", "waf", "development_mode"]:
+                    key_settings[s.get("id")] = s.get("value")
+
+            lines = ["# Zone Settings", ""]
+            lines.append(f"- **SSL Mode**: {key_settings.get('ssl', 'N/A')}")
+            lines.append(f"- **Always HTTPS**: {key_settings.get('always_use_https', 'N/A')}")
+            lines.append(f"- **Min TLS**: {key_settings.get('min_tls_version', 'N/A')}")
+            lines.append(f"- **Security Level**: {key_settings.get('security_level', 'N/A')}")
+            lines.append(f"- **Dev Mode**: {key_settings.get('development_mode', 'N/A')}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="cloudflare_get_analytics",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def cloudflare_get_analytics(params: ZoneSettingInput) -> str:
+        """Get zone analytics summary (requests, bandwidth, threats)."""
+        try:
+            # Get analytics for last 24 hours
+            result = await _cf_api(f"/zones/{params.zone_id}/analytics/dashboard?since=-1440")
+            data = result.get("result", {})
+            totals = data.get("totals", {})
+            requests = totals.get("requests", {})
+            bandwidth = totals.get("bandwidth", {})
+            threats = totals.get("threats", {})
+
+            lines = ["# Zone Analytics (24h)", ""]
+            lines.append("## Requests")
+            lines.append(f"- **Total**: {requests.get('all', 0):,}")
+            lines.append(f"- **Cached**: {requests.get('cached', 0):,}")
+            lines.append(f"- **Uncached**: {requests.get('uncached', 0):,}")
+            lines.append("")
+            lines.append("## Bandwidth")
+            lines.append(f"- **Total**: {bandwidth.get('all', 0) / (1024**3):.2f} GB")
+            lines.append(f"- **Cached**: {bandwidth.get('cached', 0) / (1024**3):.2f} GB")
+            lines.append("")
+            lines.append("## Threats")
+            lines.append(f"- **Total Blocked**: {threats.get('all', 0):,}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
     # REST API
     # ============================================================================
 

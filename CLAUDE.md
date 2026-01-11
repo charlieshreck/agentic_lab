@@ -154,7 +154,7 @@ Access clusters via kubectl with explicit kubeconfig:
 
 ```bash
 # Agentic cluster (10.20.0.0/24)
-export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/kubeconfig
+export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/generated/kubeconfig
 kubectl get nodes
 
 # Production cluster (10.10.0.0/24)
@@ -172,7 +172,7 @@ ArgoCD runs in the agentic cluster. Use kubectl to interact:
 
 ```bash
 # Set kubeconfig for agentic cluster
-export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/kubeconfig
+export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/generated/kubeconfig
 
 # List all ArgoCD applications
 kubectl get applications -n argocd

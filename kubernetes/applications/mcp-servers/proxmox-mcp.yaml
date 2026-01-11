@@ -200,6 +200,325 @@ data:
         except Exception as e:
             return _handle_error(e)
 
+    @mcp.tool(
+        name="proxmox_reboot_vm",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def proxmox_reboot_vm(params: VMOperationInput) -> str:
+        """Gracefully reboot a VM via ACPI."""
+        try:
+            result = await _proxmox_api(f"/nodes/{params.node}/qemu/{params.vmid}/status/reboot", "POST")
+            return f"✅ VM {params.vmid} reboot initiated on {params.node}. Task: {result}"
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # LXC CONTAINER TOOLS
+    # ============================================================================
+
+    @mcp.tool(
+        name="proxmox_list_containers",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_list_containers(params: ListVMsInput) -> str:
+        """List all LXC containers across the cluster."""
+        try:
+            if params.node:
+                containers = await _proxmox_api(f"/nodes/{params.node}/lxc")
+                for ct in containers:
+                    ct["node"] = params.node
+            else:
+                nodes = await _proxmox_api("/nodes")
+                containers = []
+                for n in nodes:
+                    node_containers = await _proxmox_api(f"/nodes/{n['node']}/lxc")
+                    for ct in node_containers:
+                        ct["node"] = n["node"]
+                    containers.extend(node_containers)
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"containers": containers, "count": len(containers)}, indent=2)
+
+            lines = ["# LXC Containers", "", f"Found {len(containers)} container(s)", ""]
+            for ct in sorted(containers, key=lambda x: x.get("vmid", 0)):
+                status_icon = "🟢" if ct.get("status") == "running" else "⚫"
+                mem_gb = ct.get("maxmem", 0) / (1024**3)
+                lines.append(f"## {ct.get('name', 'unnamed')} (ID: {ct.get('vmid')}) {status_icon}")
+                lines.append(f"- **Node**: {ct.get('node')}")
+                lines.append(f"- **Status**: {ct.get('status')}")
+                lines.append(f"- **CPUs**: {ct.get('cpus', 'N/A')}")
+                lines.append(f"- **Memory**: {mem_gb:.1f} GB")
+                lines.append("")
+            return "\n".join(lines) if containers else "No containers found."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="proxmox_get_container_status",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_get_container_status(params: VMOperationInput) -> str:
+        """Get detailed status of a specific LXC container."""
+        try:
+            status = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/current")
+            return json.dumps(status, indent=2)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="proxmox_start_container",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def proxmox_start_container(params: VMOperationInput) -> str:
+        """Start a stopped LXC container."""
+        try:
+            result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/start", "POST")
+            return f"✅ Container {params.vmid} start initiated on {params.node}. Task: {result}"
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="proxmox_stop_container",
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def proxmox_stop_container(params: VMOperationInput) -> str:
+        """Stop a running LXC container (hard stop)."""
+        try:
+            result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/stop", "POST")
+            return f"⚠️ Container {params.vmid} stop initiated on {params.node}. Task: {result}"
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="proxmox_shutdown_container",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def proxmox_shutdown_container(params: VMOperationInput) -> str:
+        """Gracefully shutdown an LXC container."""
+        try:
+            result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/shutdown", "POST")
+            return f"✅ Container {params.vmid} shutdown initiated on {params.node}. Task: {result}"
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="proxmox_reboot_container",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def proxmox_reboot_container(params: VMOperationInput) -> str:
+        """Reboot an LXC container."""
+        try:
+            result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/reboot", "POST")
+            return f"✅ Container {params.vmid} reboot initiated on {params.node}. Task: {result}"
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # STORAGE TOOLS
+    # ============================================================================
+
+    @mcp.tool(
+        name="proxmox_list_storage",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_list_storage(params: ListNodesInput) -> str:
+        """List all storage pools across the cluster."""
+        try:
+            storage = await _proxmox_api("/storage")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"storage": storage, "count": len(storage)}, indent=2)
+
+            lines = ["# Storage Pools", "", f"Found {len(storage)} storage pool(s)", ""]
+            for s in storage:
+                enabled = "🟢" if s.get("disable") != 1 else "🔴"
+                lines.append(f"## {s.get('storage')} {enabled}")
+                lines.append(f"- **Type**: {s.get('type')}")
+                lines.append(f"- **Content**: {s.get('content', 'N/A')}")
+                lines.append(f"- **Shared**: {'Yes' if s.get('shared') else 'No'}")
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    class StorageStatusInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        node: str = Field(..., description="Node name", min_length=1)
+        storage: str = Field(..., description="Storage name")
+        response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
+
+    @mcp.tool(
+        name="proxmox_get_storage_status",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_get_storage_status(params: StorageStatusInput) -> str:
+        """Get storage pool status with usage on a specific node."""
+        try:
+            status = await _proxmox_api(f"/nodes/{params.node}/storage/{params.storage}/status")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps(status, indent=2)
+
+            total = status.get("total", 0) / (1024**3)
+            used = status.get("used", 0) / (1024**3)
+            avail = status.get("avail", 0) / (1024**3)
+            pct = (used / total * 100) if total > 0 else 0
+
+            lines = [f"# Storage: {params.storage}", ""]
+            lines.append(f"- **Type**: {status.get('type')}")
+            lines.append(f"- **Total**: {total:.1f} GB")
+            lines.append(f"- **Used**: {used:.1f} GB ({pct:.1f}%)")
+            lines.append(f"- **Available**: {avail:.1f} GB")
+            lines.append(f"- **Active**: {'Yes' if status.get('active') else 'No'}")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # SNAPSHOT TOOLS
+    # ============================================================================
+
+    class SnapshotInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        node: str = Field(..., description="Node name", min_length=1)
+        vmid: int = Field(..., description="VM/Container ID", ge=100)
+        snapname: str = Field(..., description="Snapshot name")
+
+    class SnapshotCreateInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        node: str = Field(..., description="Node name", min_length=1)
+        vmid: int = Field(..., description="VM/Container ID", ge=100)
+        snapname: str = Field(..., description="Snapshot name")
+        description: str = Field(default="", description="Snapshot description")
+        vmstate: bool = Field(default=False, description="Include VM RAM (only for VMs)")
+
+    @mcp.tool(
+        name="proxmox_list_snapshots",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_list_snapshots(params: VMOperationInput) -> str:
+        """List all snapshots for a VM or container."""
+        try:
+            # Try QEMU first, then LXC
+            try:
+                snapshots = await _proxmox_api(f"/nodes/{params.node}/qemu/{params.vmid}/snapshot")
+            except:
+                snapshots = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/snapshot")
+
+            lines = [f"# Snapshots for {params.vmid}", ""]
+            for snap in snapshots:
+                if snap.get("name") == "current":
+                    continue
+                lines.append(f"- **{snap.get('name')}**")
+                if snap.get("description"):
+                    lines.append(f"  - {snap.get('description')}")
+                if snap.get("snaptime"):
+                    from datetime import datetime
+                    ts = datetime.fromtimestamp(snap.get("snaptime"))
+                    lines.append(f"  - Created: {ts.isoformat()}")
+            return "\n".join(lines) if len(lines) > 2 else "No snapshots found."
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="proxmox_create_snapshot",
+        annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+    )
+    async def proxmox_create_snapshot(params: SnapshotCreateInput) -> str:
+        """Create a snapshot of a VM or container."""
+        try:
+            data = {"snapname": params.snapname}
+            if params.description:
+                data["description"] = params.description
+            if params.vmstate:
+                data["vmstate"] = 1
+
+            # Try QEMU first, then LXC
+            try:
+                result = await _proxmox_api(f"/nodes/{params.node}/qemu/{params.vmid}/snapshot", "POST", data)
+            except:
+                result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/snapshot", "POST", data)
+
+            return f"✅ Snapshot '{params.snapname}' created for {params.vmid}. Task: {result}"
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # TASK MONITORING
+    # ============================================================================
+
+    class TaskInput(BaseModel):
+        model_config = ConfigDict(str_strip_whitespace=True)
+        node: str = Field(..., description="Node name", min_length=1)
+        upid: str = Field(..., description="Task UPID")
+
+    @mcp.tool(
+        name="proxmox_get_task_status",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_get_task_status(params: TaskInput) -> str:
+        """Get status of a running or completed task."""
+        try:
+            status = await _proxmox_api(f"/nodes/{params.node}/tasks/{params.upid}/status")
+            return json.dumps(status, indent=2)
+        except Exception as e:
+            return _handle_error(e)
+
+    @mcp.tool(
+        name="proxmox_list_tasks",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_list_tasks(params: ListNodesInput) -> str:
+        """List recent tasks on all nodes."""
+        try:
+            nodes = await _proxmox_api("/nodes")
+            all_tasks = []
+            for n in nodes:
+                tasks = await _proxmox_api(f"/nodes/{n['node']}/tasks?limit=10")
+                for t in tasks:
+                    t["node"] = n["node"]
+                all_tasks.extend(tasks)
+
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps({"tasks": all_tasks[:20]}, indent=2)
+
+            lines = ["# Recent Tasks", ""]
+            for t in sorted(all_tasks, key=lambda x: x.get("starttime", 0), reverse=True)[:15]:
+                status_icon = "✅" if t.get("status") == "OK" else "🔄" if t.get("status") is None else "❌"
+                lines.append(f"- {status_icon} **{t.get('type')}** on {t.get('node')}")
+                lines.append(f"  - ID: {t.get('id', 'N/A')} | Status: {t.get('status', 'running')}")
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
+    # ============================================================================
+    # CLUSTER OVERVIEW
+    # ============================================================================
+
+    @mcp.tool(
+        name="proxmox_get_cluster_status",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+    )
+    async def proxmox_get_cluster_status(params: ListNodesInput) -> str:
+        """Get overall cluster status including quorum and node health."""
+        try:
+            status = await _proxmox_api("/cluster/status")
+            if params.response_format == ResponseFormat.JSON:
+                return json.dumps(status, indent=2)
+
+            lines = ["# Cluster Status", ""]
+            for item in status:
+                if item.get("type") == "cluster":
+                    lines.append(f"## Cluster: {item.get('name')}")
+                    lines.append(f"- **Quorum**: {'Yes' if item.get('quorate') else 'No'}")
+                    lines.append(f"- **Nodes**: {item.get('nodes')}")
+                    lines.append("")
+                elif item.get("type") == "node":
+                    online = "🟢" if item.get("online") else "🔴"
+                    lines.append(f"- {online} **{item.get('name')}** (ID: {item.get('nodeid')})")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return _handle_error(e)
+
     # ============================================================================
     # REST API
     # ============================================================================
