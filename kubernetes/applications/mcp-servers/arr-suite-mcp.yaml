@@ -654,9 +654,8 @@ data:
 
         return result
 
-    @mcp.tool()
-    async def get_system_status() -> dict:
-        """Get status of all media services."""
+    async def _get_system_status_impl() -> dict:
+        """Internal implementation for system status (callable by both MCP tool and REST API)."""
         status = {}
 
         services = [
@@ -688,13 +687,18 @@ data:
 
         return status
 
+    @mcp.tool()
+    async def get_system_status() -> dict:
+        """Get status of all media services."""
+        return await _get_system_status_impl()
+
     # ==========================================================================
     # REST API (for LangGraph context building)
     # ==========================================================================
 
     async def rest_health(request: Request):
         """Health check endpoint."""
-        status = await get_system_status()
+        status = await _get_system_status_impl()
         online_count = sum(1 for s in status.values() if s.get("status") == "online")
         return JSONResponse({
             "status": "healthy" if online_count >= 3 else "degraded",
@@ -705,7 +709,7 @@ data:
 
     async def rest_api_status(request: Request):
         """Get system status for LangGraph context."""
-        return JSONResponse({"status": "ok", "data": await get_system_status()})
+        return JSONResponse({"status": "ok", "data": await _get_system_status_impl()})
 
     async def rest_api_downloads(request: Request):
         """Get all downloads for LangGraph context."""
