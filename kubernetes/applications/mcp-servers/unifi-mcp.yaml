@@ -227,7 +227,7 @@ data:
 
             lines = [f"# UniFi Devices ({len(devices)})", ""]
             for d in devices:
-                status = "🟢" if d.get("state") == 1 else "🔴"
+                status = "[OK]" if d.get("state") == 1 else "[ERR]"
                 name = d.get("name", d.get("model", "Unknown"))
                 model = d.get("model", "?")
                 ip = d.get("ip", "N/A")
@@ -287,7 +287,7 @@ data:
             lines = ["# Network Health", ""]
             for h in health:
                 sub = h.get("subsystem", "?").upper()
-                status = "🟢 OK" if h.get("status") == "ok" else "🔴 ISSUE"
+                status = "[OK] OK" if h.get("status") == "ok" else "[ERR] ISSUE"
                 lines.append(f"## {sub}: {status}")
                 if h.get("num_user"): lines.append(f"  - Users: {h['num_user']}")
                 if h.get("num_ap"): lines.append(f"  - APs: {h['num_ap']}")
@@ -306,11 +306,11 @@ data:
                 return json.dumps({"alarms": alarms, "count": len(alarms)}, indent=2)
 
             if not alarms:
-                return "# Alarms\n\n✅ No active alarms"
+                return "# Alarms\n\n No active alarms"
 
             lines = [f"# Active Alarms ({len(alarms)})", ""]
             for a in alarms[:20]:
-                lines.append(f"- ⚠️ **{a.get('key', '?')}**: {a.get('msg', 'No message')}")
+                lines.append(f"- [!] **{a.get('key', '?')}**: {a.get('msg', 'No message')}")
             return "\n".join(lines)
         except Exception as e:
             return _handle_error(e)
@@ -384,7 +384,7 @@ data:
 
             lines = [f"# WLANs ({len(wlans)})", ""]
             for w in wlans:
-                status = "🟢" if w.get("enabled") else "🔴"
+                status = "[OK]" if w.get("enabled") else "[ERR]"
                 name = w.get("name", "Unknown")
                 wlan_id = w.get("_id", "?")
                 band = w.get("wlan_band", "both")
@@ -458,7 +458,7 @@ data:
             result = await _api_post("/rest/wlanconf", wlan_config)
             wlan_id = result.get("data", [{}])[0].get("_id", "unknown")
 
-            return f"# WLAN Created Successfully ✅\n\n- **SSID**: {params.name}\n- **ID**: `{wlan_id}`\n- **Band**: {params.band}\n- **Client Isolation**: {params.client_isolation}\n- **IoT Optimized**: {params.iot_optimized}\n\nThe SSID should appear on your APs within 30 seconds.\n"
+            return f"# WLAN Created Successfully \n\n- **SSID**: {params.name}\n- **ID**: `{wlan_id}`\n- **Band**: {params.band}\n- **Client Isolation**: {params.client_isolation}\n- **IoT Optimized**: {params.iot_optimized}\n\nThe SSID should appear on your APs within 30 seconds.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -498,7 +498,7 @@ data:
 
             await _api_put(f"/rest/wlanconf/{params.wlan_id}", update)
 
-            return f"# WLAN Updated Successfully ✅\n\n- **WLAN ID**: `{params.wlan_id}`\n- **Changes Applied**: {len(update)}\n\nChanges will propagate to APs within 30 seconds.\n"
+            return f"# WLAN Updated Successfully \n\n- **WLAN ID**: `{params.wlan_id}`\n- **Changes Applied**: {len(update)}\n\nChanges will propagate to APs within 30 seconds.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -514,13 +514,13 @@ data:
                         wlan_name = w.get("name", "Unknown")
                         break
 
-                return f"# ⚠️ WLAN Deletion Warning\n\n**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**\n\n## Target WLAN\n- **Name**: {wlan_name}\n- **ID**: `{params.wlan_id}`\n\nAll clients on this SSID will be disconnected immediately.\n\nTo delete this WLAN, call again with `confirmation=true`\n"
+                return f"# [!] WLAN Deletion Warning\n\n**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**\n\n## Target WLAN\n- **Name**: {wlan_name}\n- **ID**: `{params.wlan_id}`\n\nAll clients on this SSID will be disconnected immediately.\n\nTo delete this WLAN, call again with `confirmation=true`\n"
             except Exception as e:
                 return _handle_error(e)
 
         try:
             await _api_delete(f"/rest/wlanconf/{params.wlan_id}")
-            return f"# WLAN Deleted ✅\n\n- **WLAN ID**: `{params.wlan_id}`\n\nThe SSID has been removed. Connected clients will be disconnected.\n"
+            return f"# WLAN Deleted \n\n- **WLAN ID**: `{params.wlan_id}`\n\nThe SSID has been removed. Connected clients will be disconnected.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -538,13 +538,13 @@ data:
                         device_name = d.get("name", d.get("model", "Unknown"))
                         break
 
-                return f"# ⚠️ Device Restart Warning\n\n**This will cause a brief network outage. Set confirmation=true to proceed.**\n\n## Target Device\n- **Name**: {device_name}\n- **MAC**: {params.mac}\n\nAll clients connected to this device will be temporarily disconnected.\n\nTo restart, call again with `confirmation=true`\n"
+                return f"# [!] Device Restart Warning\n\n**This will cause a brief network outage. Set confirmation=true to proceed.**\n\n## Target Device\n- **Name**: {device_name}\n- **MAC**: {params.mac}\n\nAll clients connected to this device will be temporarily disconnected.\n\nTo restart, call again with `confirmation=true`\n"
             except Exception as e:
                 return _handle_error(e)
 
         try:
             await _api_post("/cmd/devmgr", {"cmd": "restart", "mac": params.mac.lower()})
-            return f"# Device Restart Initiated ✅\n\n- **MAC**: {params.mac}\n\nThe device will restart and reconnect within 2-3 minutes.\n"
+            return f"# Device Restart Initiated \n\n- **MAC**: {params.mac}\n\nThe device will restart and reconnect within 2-3 minutes.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -553,7 +553,7 @@ data:
         """Flash the LED on a device to locate it physically."""
         try:
             await _api_post("/cmd/devmgr", {"cmd": "set-locate", "mac": params.mac.lower()})
-            return f"# Device Locate Activated ✅\n\n- **MAC**: {params.mac}\n\nThe device LED is now flashing. Call again with cmd='unset-locate' to stop.\n"
+            return f"# Device Locate Activated \n\n- **MAC**: {params.mac}\n\nThe device LED is now flashing. Call again with cmd='unset-locate' to stop.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -563,17 +563,17 @@ data:
     async def unifi_block_client(params: ClientActionInput) -> str:
         """Block a client from connecting. DESTRUCTIVE - requires confirmation=true."""
         if not params.confirmation:
-            return f"# ⚠️ Client Block Warning\n\n**This will disconnect and block the client. Set confirmation=true to proceed.**\n\n## Target Client\n- **MAC**: {params.mac}\n\nThe client will be immediately disconnected and unable to reconnect.\n\nTo block, call again with `confirmation=true`\n"
+            return f"# [!] Client Block Warning\n\n**This will disconnect and block the client. Set confirmation=true to proceed.**\n\n## Target Client\n- **MAC**: {params.mac}\n\nThe client will be immediately disconnected and unable to reconnect.\n\nTo block, call again with `confirmation=true`\n"
 
         try:
             await _api_post("/cmd/stamgr", {"cmd": "block-sta", "mac": params.mac.lower()})
-            return f"# Client Blocked ✅\n\n- **MAC**: {params.mac}\n\nThe client is now blocked from connecting.\n"
+            return f"# Client Blocked \n\n- **MAC**: {params.mac}\n\nThe client is now blocked from connecting.\n"
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 # Try alternative endpoint for newer UniFi
                 try:
                     await _api_post("/rest/user", {"mac": params.mac.lower(), "blocked": True})
-                    return f"# Client Blocked ✅\n\n- **MAC**: {params.mac}"
+                    return f"# Client Blocked \n\n- **MAC**: {params.mac}"
                 except:
                     pass
             return _handle_error(e)
@@ -588,12 +588,12 @@ data:
 
         try:
             await _api_post("/cmd/stamgr", {"cmd": "unblock-sta", "mac": params.mac.lower()})
-            return f"# Client Unblocked ✅\n\n- **MAC**: {params.mac}\n\nThe client can now reconnect to the network.\n"
+            return f"# Client Unblocked \n\n- **MAC**: {params.mac}\n\nThe client can now reconnect to the network.\n"
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 try:
                     await _api_post("/rest/user", {"mac": params.mac.lower(), "blocked": False})
-                    return f"# Client Unblocked ✅\n\n- **MAC**: {params.mac}"
+                    return f"# Client Unblocked \n\n- **MAC**: {params.mac}"
                 except:
                     pass
             return _handle_error(e)
@@ -617,7 +617,7 @@ data:
             else:
                 await _api_post("/rest/user", {"mac": params.mac.lower(), "name": params.name})
 
-            return f"# Client Named ✅\n\n- **MAC**: {params.mac}\n- **Name**: {params.name}\n\nThe client will now appear with this name in the UniFi dashboard.\n"
+            return f"# Client Named \n\n- **MAC**: {params.mac}\n- **Name**: {params.name}\n\nThe client will now appear with this name in the UniFi dashboard.\n"
         except Exception as e:
             return _handle_error(e)
 
@@ -643,7 +643,7 @@ data:
             # Radio AI
             radio_ai = rf_settings.get("radio_ai", {})
             ai_enabled = radio_ai.get("enabled", False)
-            lines.append(f"## Radio AI: {'🟢 Enabled' if ai_enabled else '🔴 Disabled'}")
+            lines.append(f"## Radio AI: {'[OK] Enabled' if ai_enabled else '[ERR] Disabled'}")
             lines.append("Automatically optimizes channel and power settings")
             lines.append("")
 
@@ -651,7 +651,7 @@ data:
             roaming = rf_settings.get("roaming_assistant", {})
             roam_enabled = roaming.get("enabled", False)
             roam_threshold = roaming.get("rssi_threshold", -70)
-            lines.append(f"## Roaming Assistant: {'🟢 Enabled' if roam_enabled else '🔴 Disabled'}")
+            lines.append(f"## Roaming Assistant: {'[OK] Enabled' if roam_enabled else '[ERR] Disabled'}")
             lines.append(f"RSSI threshold: {roam_threshold} dBm")
             lines.append("Disconnects clients with poor signal to encourage roaming")
             lines.append("")
@@ -659,7 +659,7 @@ data:
             # Network Optimization
             net_opt = rf_settings.get("network_optimization", {})
             opt_enabled = net_opt.get("enabled", False)
-            lines.append(f"## Network Optimization: {'🟢 Enabled' if opt_enabled else '🔴 Disabled'}")
+            lines.append(f"## Network Optimization: {'[OK] Enabled' if opt_enabled else '[ERR] Disabled'}")
             lines.append("")
 
             return "\n".join(lines)
@@ -692,7 +692,7 @@ data:
             await _api_put(f"/rest/setting/{setting_id}", {"enabled": params.enabled})
 
             result_status = "enabled" if params.enabled else "disabled"
-            return f"# RF Setting Updated ✅\n\n- **Setting**: {params.setting}\n- **Status**: {result_status}\n\nChanges will take effect within 30 seconds.\n"
+            return f"# RF Setting Updated \n\n- **Setting**: {params.setting}\n- **Status**: {result_status}\n\nChanges will take effect within 30 seconds.\n"
         except Exception as e:
             return _handle_error(e)
 

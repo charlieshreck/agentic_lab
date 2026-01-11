@@ -95,7 +95,7 @@ data:
                 lines.append("## Top Blocked Domains")
                 for domain in list(stats["top_blocked_domains"])[:10]:
                     for name, count in domain.items():
-                        lines.append(f"- 🚫 {name}: {count:,}")
+                        lines.append(f"- [BLOCK] {name}: {count:,}")
 
             return "\n".join(lines)
         except Exception as e:
@@ -124,7 +124,7 @@ data:
                 domain = question.get("name", "Unknown")
                 client = q.get("client", "Unknown")
                 reason = q.get("reason", "")
-                icon = "🚫" if reason else "✅"
+                icon = "[BLOCK]" if reason else ""
                 lines.append(f"- {icon} `{domain}` from {client}" + (f" ({reason})" if reason else ""))
 
             return "\n".join(lines)
@@ -142,14 +142,14 @@ data:
             if params.response_format == ResponseFormat.JSON:
                 return json.dumps(status, indent=2)
 
-            enabled = "🟢 Enabled" if status.get("enabled") else "🔴 Disabled"
+            enabled = "[OK] Enabled" if status.get("enabled") else "[ERR] Disabled"
             lines = ["# Filtering Status", "", f"**Status**: {enabled}", ""]
 
             filters = status.get("filters", [])
             if filters:
                 lines.append("## Active Filter Lists")
                 for f in filters:
-                    icon = "✅" if f.get("enabled") else "⚫"
+                    icon = "" if f.get("enabled") else "[ ]"
                     lines.append(f"- {icon} **{f.get('name')}**: {f.get('rules_count', 0):,} rules")
                 lines.append("")
 
@@ -198,7 +198,7 @@ data:
                 "domain": params.domain,
                 "answer": params.answer
             })
-            return f"✅ Added rewrite: `{params.domain}` → `{params.answer}`"
+            return f" Added rewrite: `{params.domain}` → `{params.answer}`"
         except Exception as e:
             return _handle_error(e)
 
@@ -213,7 +213,7 @@ data:
                 "domain": params.domain,
                 "answer": params.answer
             })
-            return f"✅ Deleted rewrite: `{params.domain}` → `{params.answer}`"
+            return f" Deleted rewrite: `{params.domain}` → `{params.answer}`"
         except Exception as e:
             return _handle_error(e)
 

@@ -90,9 +90,9 @@ data:
             for z in zones:
                 status = "[OK] Active" if z.get("status") == "active" else f"[!] {z.get('status')}"
                 lines.append(f"## {z.get('name')} ({status})")
-                lines.append(f"- **ID**: `{z.get('id')}`")
-                lines.append(f"- **Plan**: {z.get('plan', {}).get('name', 'Unknown')}")
-                lines.append(f"- **Nameservers**: {', '.join(z.get('name_servers', []))}")
+                lines.append(f"- ID: `{z.get('id')}`")
+                lines.append(f"- Plan: {z.get('plan', {}).get('name', 'Unknown')}")
+                lines.append(f"- Nameservers: {', '.join(z.get('name_servers', []))}")
                 lines.append("")
             return "\n".join(lines)
         except Exception as e:
@@ -135,9 +135,9 @@ data:
                 status = "[OK]" if t.get("status") == "healthy" else "[ERR]"
                 conns = len(t.get("connections", []))
                 lines.append(f"## {t.get('name')} {status}")
-                lines.append(f"- **ID**: `{t.get('id')}`")
-                lines.append(f"- **Status**: {t.get('status')}")
-                lines.append(f"- **Connections**: {conns}")
+                lines.append(f"- ID: `{t.get('id')}`")
+                lines.append(f"- Status: {t.get('status')}")
+                lines.append(f"- Connections: {conns}")
                 lines.append("")
             return "\n".join(lines)
         except Exception as e:
@@ -247,15 +247,13 @@ data:
             result = await _cf_api(f"/zones/{params.zone_id}/dns_records", "POST", data)
             record = result.get("result", {})
 
-            return f"""# DNS Record Created
-
-- **Type**: {record.get('type')}
-- **Name**: {record.get('name')}
-- **Content**: {record.get('content')}
-- **Proxied**: {record.get('proxied')}
-- **ID**: `{record.get('id')}`
-
-Record is now active."""
+            return (f"# DNS Record Created\n\n"
+                    f"- Type: {record.get('type')}\n"
+                    f"- Name: {record.get('name')}\n"
+                    f"- Content: {record.get('content')}\n"
+                    f"- Proxied: {record.get('proxied')}\n"
+                    f"- ID: `{record.get('id')}`\n\n"
+                    f"Record is now active.")
         except Exception as e:
             return _handle_error(e)
 
@@ -282,13 +280,12 @@ Record is now active."""
             result = await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}", "PUT", data)
             updated = result.get("result", {})
 
-            return f"""# DNS Record Updated
-
-- **Type**: {updated.get('type')}
-- **Name**: {updated.get('name')}
-- **Content**: {updated.get('content')}
-- **Proxied**: {updated.get('proxied')}
-- **ID**: `{updated.get('id')}`"""
+            return (f"# DNS Record Updated\n\n"
+                    f"- Type: {updated.get('type')}\n"
+                    f"- Name: {updated.get('name')}\n"
+                    f"- Content: {updated.get('content')}\n"
+                    f"- Proxied: {updated.get('proxied')}\n"
+                    f"- ID: `{updated.get('id')}`")
         except Exception as e:
             return _handle_error(e)
 
@@ -303,23 +300,20 @@ Record is now active."""
                 # Get record info for preview
                 current = await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}")
                 record = current.get("result", {})
-                return f"""# WARNING: DNS Record Deletion
-
-**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**
-
-## Target Record
-- **Type**: {record.get('type')}
-- **Name**: {record.get('name')}
-- **Content**: {record.get('content')}
-- **ID**: `{params.record_id}`
-
-To delete this record, call again with `confirmation=true`"""
+                return (f"# WARNING: DNS Record Deletion\n\n"
+                        f"**This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**\n\n"
+                        f"## Target Record\n"
+                        f"- Type: {record.get('type')}\n"
+                        f"- Name: {record.get('name')}\n"
+                        f"- Content: {record.get('content')}\n"
+                        f"- ID: `{params.record_id}`\n\n"
+                        f"To delete this record, call again with `confirmation=true`")
             except Exception as e:
                 return _handle_error(e)
 
         try:
             await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}", "DELETE")
-            return f"# DNS Record Deleted\n\n- **ID**: `{params.record_id}`\n\nThe record has been removed."
+            return f"# DNS Record Deleted\n\n- ID: `{params.record_id}`\n\nThe record has been removed."
         except Exception as e:
             return _handle_error(e)
 
@@ -343,15 +337,12 @@ To delete this record, call again with `confirmation=true`"""
         """Purge Cloudflare cache. Requires confirmation=true."""
         if not params.confirmation:
             action = "EVERYTHING" if params.purge_everything else f"{len(params.files or [])} files"
-            return f"""# WARNING: Cache Purge
-
-**Set confirmation=true to proceed.**
-
-## Purge Target
-- **Zone**: {params.zone_id}
-- **Scope**: {action}
-
-To purge, call again with `confirmation=true`"""
+            return (f"# WARNING: Cache Purge\n\n"
+                    f"**Set confirmation=true to proceed.**\n\n"
+                    f"## Purge Target\n"
+                    f"- Zone: {params.zone_id}\n"
+                    f"- Scope: {action}\n\n"
+                    f"To purge, call again with `confirmation=true`")
 
         try:
             data = {}
@@ -394,11 +385,11 @@ To purge, call again with `confirmation=true`"""
                     key_settings[s.get("id")] = s.get("value")
 
             lines = ["# Zone Settings", ""]
-            lines.append(f"- **SSL Mode**: {key_settings.get('ssl', 'N/A')}")
-            lines.append(f"- **Always HTTPS**: {key_settings.get('always_use_https', 'N/A')}")
-            lines.append(f"- **Min TLS**: {key_settings.get('min_tls_version', 'N/A')}")
-            lines.append(f"- **Security Level**: {key_settings.get('security_level', 'N/A')}")
-            lines.append(f"- **Dev Mode**: {key_settings.get('development_mode', 'N/A')}")
+            lines.append(f"- SSL Mode: {key_settings.get('ssl', 'N/A')}")
+            lines.append(f"- Always HTTPS: {key_settings.get('always_use_https', 'N/A')}")
+            lines.append(f"- Min TLS: {key_settings.get('min_tls_version', 'N/A')}")
+            lines.append(f"- Security Level: {key_settings.get('security_level', 'N/A')}")
+            lines.append(f"- Dev Mode: {key_settings.get('development_mode', 'N/A')}")
 
             return "\n".join(lines)
         except Exception as e:
@@ -421,16 +412,16 @@ To purge, call again with `confirmation=true`"""
 
             lines = ["# Zone Analytics (24h)", ""]
             lines.append("## Requests")
-            lines.append(f"- **Total**: {requests.get('all', 0):,}")
-            lines.append(f"- **Cached**: {requests.get('cached', 0):,}")
-            lines.append(f"- **Uncached**: {requests.get('uncached', 0):,}")
+            lines.append(f"- Total: {requests.get('all', 0):,}")
+            lines.append(f"- Cached: {requests.get('cached', 0):,}")
+            lines.append(f"- Uncached: {requests.get('uncached', 0):,}")
             lines.append("")
             lines.append("## Bandwidth")
-            lines.append(f"- **Total**: {bandwidth.get('all', 0) / (1024**3):.2f} GB")
-            lines.append(f"- **Cached**: {bandwidth.get('cached', 0) / (1024**3):.2f} GB")
+            lines.append(f"- Total: {bandwidth.get('all', 0) / (1024**3):.2f} GB")
+            lines.append(f"- Cached: {bandwidth.get('cached', 0) / (1024**3):.2f} GB")
             lines.append("")
             lines.append("## Threats")
-            lines.append(f"- **Total Blocked**: {threats.get('all', 0):,}")
+            lines.append(f"- Total Blocked: {threats.get('all', 0):,}")
 
             return "\n".join(lines)
         except Exception as e:

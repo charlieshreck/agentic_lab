@@ -116,7 +116,7 @@ data:
 
             lines = [f"# Storage Pools ({params.instance})", ""]
             for p in pools:
-                status = "🟢" if p.get("healthy") else "🔴"
+                status = "[OK]" if p.get("healthy") else "[ERR]"
                 size = _format_bytes(p.get("size"))
                 free = _format_bytes(p.get("free"))
                 lines.append(f"## {p.get('name')} {status}")
@@ -170,13 +170,13 @@ data:
             if smb:
                 lines.append("## SMB Shares")
                 for s in smb:
-                    enabled = "✅" if s.get("enabled") else "⚫"
+                    enabled = "" if s.get("enabled") else "[ ]"
                     lines.append(f"- {enabled} **{s.get('name')}**: {s.get('path')}")
                 lines.append("")
             if nfs:
                 lines.append("## NFS Shares")
                 for n in nfs:
-                    enabled = "✅" if n.get("enabled") else "⚫"
+                    enabled = "" if n.get("enabled") else "[ ]"
                     lines.append(f"- {enabled} {n.get('path')} → {', '.join(n.get('hosts', ['*']))}")
             return "\n".join(lines) if (smb or nfs) else "No shares configured."
         except Exception as e:
@@ -194,11 +194,11 @@ data:
                 return json.dumps({"instance": params.instance, "alerts": alerts}, indent=2)
 
             if not alerts:
-                return f"# Alerts ({params.instance})\n\n✅ No active alerts."
+                return f"# Alerts ({params.instance})\n\n No active alerts."
 
             lines = [f"# Alerts ({params.instance})", "", f"Found {len(alerts)} alert(s)", ""]
             for a in alerts:
-                level = {"WARNING": "⚠️", "CRITICAL": "🔴", "INFO": "ℹ️"}.get(a.get("level"), "❓")
+                level = {"WARNING": "[!]", "CRITICAL": "[ERR]", "INFO": "[INFO]"}.get(a.get("level"), "[?]")
                 lines.append(f"- {level} **{a.get('klass')}**: {a.get('formatted', a.get('text', 'No message'))}")
             return "\n".join(lines)
         except Exception as e:
@@ -219,14 +219,14 @@ data:
                 lines.append(f"## {name} ({len(alerts)} alerts)")
                 if alerts:
                     for a in alerts[:5]:
-                        level = {"WARNING": "⚠️", "CRITICAL": "🔴"}.get(a.get("level"), "ℹ️")
+                        level = {"WARNING": "[!]", "CRITICAL": "[ERR]"}.get(a.get("level"), "[INFO]")
                         lines.append(f"- {level} {a.get('klass')}: {a.get('formatted', '')[:80]}")
                 else:
-                    lines.append("✅ No alerts")
+                    lines.append(" No alerts")
                 lines.append("")
             except Exception as e:
-                lines.append(f"## {name}\n🔴 Error: {str(e)}\n")
-        return "\n".join(lines) if total else "✅ No alerts on any TrueNAS instance."
+                lines.append(f"## {name}\n[ERR] Error: {str(e)}\n")
+        return "\n".join(lines) if total else " No alerts on any TrueNAS instance."
 
     @mcp.tool(
         name="truenas_list_snapshots",

@@ -99,7 +99,7 @@ data:
 
             lines = ["# Proxmox Cluster Nodes", "", f"Found {len(nodes)} node(s)", ""]
             for n in nodes:
-                status = "🟢 Online" if n.get("status") == "online" else "🔴 Offline"
+                status = "[OK] Online" if n.get("status") == "online" else "[ERR] Offline"
                 cpu = f"{n.get('cpu', 0)*100:.1f}%" if n.get('cpu') else "N/A"
                 mem_used = n.get('mem', 0) / (1024**3)
                 mem_total = n.get('maxmem', 1) / (1024**3)
@@ -141,7 +141,7 @@ data:
 
             lines = ["# Virtual Machines", "", f"Found {len(vms)} VM(s)", ""]
             for vm in sorted(vms, key=lambda x: x.get("vmid", 0)):
-                status_icon = "🟢" if vm.get("status") == "running" else "⚫"
+                status_icon = "[OK]" if vm.get("status") == "running" else "[ ]"
                 mem_gb = vm.get("maxmem", 0) / (1024**3)
                 lines.append(f"## {vm.get('name', 'unnamed')} (ID: {vm.get('vmid')}) {status_icon}")
                 lines.append(f"- **Node**: {vm.get('node')}")
@@ -173,7 +173,7 @@ data:
         """Start a stopped VM. Returns the task ID for tracking the operation."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/qemu/{params.vmid}/status/start", "POST")
-            return f"✅ VM {params.vmid} start initiated on {params.node}. Task: {result}"
+            return f" VM {params.vmid} start initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -185,7 +185,7 @@ data:
         """Stop a running VM (hard stop). For graceful shutdown, use proxmox_shutdown_vm."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/qemu/{params.vmid}/status/stop", "POST")
-            return f"⚠️ VM {params.vmid} stop initiated on {params.node}. Task: {result}"
+            return f"[!] VM {params.vmid} stop initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -197,7 +197,7 @@ data:
         """Gracefully shutdown a VM via ACPI. Preferred over hard stop."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/qemu/{params.vmid}/status/shutdown", "POST")
-            return f"✅ VM {params.vmid} shutdown initiated on {params.node}. Task: {result}"
+            return f" VM {params.vmid} shutdown initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -209,7 +209,7 @@ data:
         """Gracefully reboot a VM via ACPI."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/qemu/{params.vmid}/status/reboot", "POST")
-            return f"✅ VM {params.vmid} reboot initiated on {params.node}. Task: {result}"
+            return f" VM {params.vmid} reboot initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -242,7 +242,7 @@ data:
 
             lines = ["# LXC Containers", "", f"Found {len(containers)} container(s)", ""]
             for ct in sorted(containers, key=lambda x: x.get("vmid", 0)):
-                status_icon = "🟢" if ct.get("status") == "running" else "⚫"
+                status_icon = "[OK]" if ct.get("status") == "running" else "[ ]"
                 mem_gb = ct.get("maxmem", 0) / (1024**3)
                 lines.append(f"## {ct.get('name', 'unnamed')} (ID: {ct.get('vmid')}) {status_icon}")
                 lines.append(f"- **Node**: {ct.get('node')}")
@@ -274,7 +274,7 @@ data:
         """Start a stopped LXC container."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/start", "POST")
-            return f"✅ Container {params.vmid} start initiated on {params.node}. Task: {result}"
+            return f" Container {params.vmid} start initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -286,7 +286,7 @@ data:
         """Stop a running LXC container (hard stop)."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/stop", "POST")
-            return f"⚠️ Container {params.vmid} stop initiated on {params.node}. Task: {result}"
+            return f"[!] Container {params.vmid} stop initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -298,7 +298,7 @@ data:
         """Gracefully shutdown an LXC container."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/shutdown", "POST")
-            return f"✅ Container {params.vmid} shutdown initiated on {params.node}. Task: {result}"
+            return f" Container {params.vmid} shutdown initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -310,7 +310,7 @@ data:
         """Reboot an LXC container."""
         try:
             result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/status/reboot", "POST")
-            return f"✅ Container {params.vmid} reboot initiated on {params.node}. Task: {result}"
+            return f" Container {params.vmid} reboot initiated on {params.node}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -331,7 +331,7 @@ data:
 
             lines = ["# Storage Pools", "", f"Found {len(storage)} storage pool(s)", ""]
             for s in storage:
-                enabled = "🟢" if s.get("disable") != 1 else "🔴"
+                enabled = "[OK]" if s.get("disable") != 1 else "[ERR]"
                 lines.append(f"## {s.get('storage')} {enabled}")
                 lines.append(f"- **Type**: {s.get('type')}")
                 lines.append(f"- **Content**: {s.get('content', 'N/A')}")
@@ -438,7 +438,7 @@ data:
             except:
                 result = await _proxmox_api(f"/nodes/{params.node}/lxc/{params.vmid}/snapshot", "POST", data)
 
-            return f"✅ Snapshot '{params.snapname}' created for {params.vmid}. Task: {result}"
+            return f" Snapshot '{params.snapname}' created for {params.vmid}. Task: {result}"
         except Exception as e:
             return _handle_error(e)
 
@@ -483,7 +483,7 @@ data:
 
             lines = ["# Recent Tasks", ""]
             for t in sorted(all_tasks, key=lambda x: x.get("starttime", 0), reverse=True)[:15]:
-                status_icon = "✅" if t.get("status") == "OK" else "🔄" if t.get("status") is None else "❌"
+                status_icon = "" if t.get("status") == "OK" else "[SYNC]" if t.get("status") is None else "[ERR]"
                 lines.append(f"- {status_icon} **{t.get('type')}** on {t.get('node')}")
                 lines.append(f"  - ID: {t.get('id', 'N/A')} | Status: {t.get('status', 'running')}")
             return "\n".join(lines)
@@ -513,7 +513,7 @@ data:
                     lines.append(f"- **Nodes**: {item.get('nodes')}")
                     lines.append("")
                 elif item.get("type") == "node":
-                    online = "🟢" if item.get("online") else "🔴"
+                    online = "[OK]" if item.get("online") else "[ERR]"
                     lines.append(f"- {online} **{item.get('name')}** (ID: {item.get('nodeid')})")
 
             return "\n".join(lines)
