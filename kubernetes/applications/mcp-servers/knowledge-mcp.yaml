@@ -8,11 +8,14 @@ metadata:
 data:
   main.py: |
     #!/usr/bin/env python3
-    """Knowledge MCP server for Qdrant vector database operations."""
+    """Knowledge MCP server for comprehensive Qdrant vector database operations.
+    Provides unified knowledge access: runbooks, documentation, entities, decisions.
+    """
     import os
     import logging
     import httpx
-    from typing import List, Optional
+    import uuid
+    from typing import List, Optional, Dict, Any
     from datetime import datetime, timezone
     from fastmcp import FastMCP
     from pydantic import BaseModel
@@ -29,13 +32,16 @@ data:
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
 
-    mcp = FastMCP(name="knowledge-mcp", instructions="MCP server for knowledge base operations.")
+    mcp = FastMCP(
+        name="knowledge-mcp",
+        instructions="""MCP server for comprehensive knowledge base operations.
+        Collections: runbooks, documentation, entities, decisions, agent_events.
+        Use for semantic search, entity lookup, runbook management, and decision tracking."""
+    )
 
-    class SearchResult(BaseModel):
-        id: str
-        score: float
-        title: str
-        content: str
+    # ============================================================================
+    # HELPERS
+    # ============================================================================
 
     async def get_embedding(text: str) -> List[float]:
         """Get embeddings via LiteLLM (Gemini text-embedding-004)."""
@@ -47,62 +53,451 @@ data:
             response.raise_for_status()
             return response.json()["data"][0]["embedding"]
 
-    async def qdrant_search(collection: str, vector: List[float], limit: int = 5) -> List[dict]:
+    async def qdrant_search(collection: str, vector: List[float], limit: int = 5, filter_: Optional[dict] = None) -> List[dict]:
+        """Search Qdrant collection with optional filter."""
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(f"{QDRANT_URL}/collections/{collection}/points/search", json={"vector": vector, "limit": limit, "with_payload": True})
+            payload = {"vector": vector, "limit": limit, "with_payload": True}
+            if filter_:
+                payload["filter"] = filter_
+            response = await client.post(
+                f"{QDRANT_URL}/collections/{collection}/points/search",
+                json=payload
+            )
+            if response.status_code == 404:
+                return []
             response.raise_for_status()
             return response.json().get("result", [])
 
     async def qdrant_upsert(collection: str, points: List[dict]) -> bool:
+        """Upsert points to Qdrant collection."""
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.put(f"{QDRANT_URL}/collections/{collection}/points", json={"points": points})
+            response = await client.put(
+                f"{QDRANT_URL}/collections/{collection}/points",
+                json={"points": points}
+            )
             return response.status_code == 200
 
+    async def qdrant_delete(collection: str, point_ids: List[str]) -> bool:
+        """Delete points from Qdrant collection."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{QDRANT_URL}/collections/{collection}/points/delete",
+                json={"points": point_ids}
+            )
+            return response.status_code == 200
+
+    async def qdrant_scroll(collection: str, filter_: Optional[dict] = None, limit: int = 100) -> List[dict]:
+        """Scroll through collection with optional filter (no vector needed)."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {"limit": limit, "with_payload": True}
+            if filter_:
+                payload["filter"] = filter_
+            response = await client.post(
+                f"{QDRANT_URL}/collections/{collection}/points/scroll",
+                json=payload
+            )
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            return response.json().get("result", {}).get("points", [])
+
+    async def qdrant_get_point(collection: str, point_id: str) -> Optional[dict]:
+        """Get a single point by ID."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{QDRANT_URL}/collections/{collection}/points/{point_id}")
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json().get("result")
+
+    # ============================================================================
+    # COLLECTION MANAGEMENT
+    # ============================================================================
+
     @mcp.tool()
-    async def search_runbooks(query: str, limit: int = 5) -> List[SearchResult]:
-        """Search runbooks for solutions to issues."""
+    async def list_collections() -> List[dict]:
+        """List all available Qdrant collections with point counts."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(f"{QDRANT_URL}/collections")
+                response.raise_for_status()
+                collections = response.json().get("result", {}).get("collections", [])
+                result = []
+                for c in collections:
+                    name = c.get("name")
+                    info_resp = await client.get(f"{QDRANT_URL}/collections/{name}")
+                    if info_resp.status_code == 200:
+                        info = info_resp.json().get("result", {})
+                        result.append({
+                            "name": name,
+                            "points_count": info.get("points_count", 0),
+                            "vectors_count": info.get("vectors_count", 0)
+                        })
+                return result
+        except Exception as e:
+            logger.error(f"list_collections failed: {e}")
+            return []
+
+    @mcp.tool()
+    async def get_collection_info(collection: str) -> dict:
+        """Get detailed info about a collection."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(f"{QDRANT_URL}/collections/{collection}")
+                if response.status_code == 404:
+                    return {"error": f"Collection '{collection}' not found"}
+                response.raise_for_status()
+                return response.json().get("result", {})
+        except Exception as e:
+            return {"error": str(e)}
+
+    # ============================================================================
+    # RUNBOOK TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def search_runbooks(query: str, limit: int = 5, min_score: float = 0.6) -> List[dict]:
+        """Search runbooks for solutions to issues. Returns title, solution, and path."""
         try:
             vector = await get_embedding(query)
             results = await qdrant_search("runbooks", vector, limit)
-            return [SearchResult(id=str(r.get("id")), score=r.get("score", 0), title=r.get("payload", {}).get("title", ""), content=r.get("payload", {}).get("solution", "")) for r in results if r.get("score", 0) >= 0.7]
+            return [{
+                "id": str(r.get("id")),
+                "score": round(r.get("score", 0), 3),
+                "title": r.get("payload", {}).get("title", ""),
+                "solution": r.get("payload", {}).get("solution", "")[:500],
+                "path": r.get("payload", {}).get("path", "")
+            } for r in results if r.get("score", 0) >= min_score]
         except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
+            logger.error(f"search_runbooks failed: {e}")
+            return [{"error": str(e)}]
 
     @mcp.tool()
-    async def search_documentation(query: str, limit: int = 5) -> List[SearchResult]:
-        """Search documentation for information."""
+    async def get_runbook(runbook_id: str) -> dict:
+        """Get full runbook content by ID."""
         try:
-            vector = await get_embedding(query)
-            results = await qdrant_search("documentation", vector, limit)
-            return [SearchResult(id=str(r.get("id")), score=r.get("score", 0), title=r.get("payload", {}).get("title", ""), content=r.get("payload", {}).get("content", "")) for r in results]
+            result = await qdrant_get_point("runbooks", runbook_id)
+            if not result:
+                return {"error": "Runbook not found"}
+            return result.get("payload", {})
         except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
+            return {"error": str(e)}
 
     @mcp.tool()
-    async def add_runbook(title: str, trigger_pattern: str, solution: str) -> dict:
+    async def add_runbook(title: str, trigger_pattern: str, solution: str, path: Optional[str] = None) -> dict:
         """Add a new runbook to the knowledge base."""
         try:
-            import uuid
             point_id = str(uuid.uuid4())
-            vector = await get_embedding(f"{title}\n{solution}")
-            point = {"id": point_id, "vector": vector, "payload": {"title": title, "trigger_pattern": trigger_pattern, "solution": solution, "created_at": datetime.now(timezone.utc).isoformat()}}
+            vector = await get_embedding(f"{title}\n{trigger_pattern}\n{solution[:1000]}")
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "title": title,
+                    "trigger_pattern": trigger_pattern,
+                    "solution": solution,
+                    "path": path or "",
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+            }
             success = await qdrant_upsert("runbooks", [point])
             return {"success": success, "id": point_id}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    async def get_similar_events(event_description: str, limit: int = 5) -> List[SearchResult]:
-        """Find similar historical events."""
+    async def list_runbooks(limit: int = 50) -> List[dict]:
+        """List all runbooks (titles and IDs)."""
+        try:
+            results = await qdrant_scroll("runbooks", limit=limit)
+            return [{
+                "id": str(r.get("id")),
+                "title": r.get("payload", {}).get("title", ""),
+                "path": r.get("payload", {}).get("path", "")
+            } for r in results]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    # ============================================================================
+    # DOCUMENTATION TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def search_documentation(query: str, limit: int = 5, min_score: float = 0.5) -> List[dict]:
+        """Search documentation for information."""
+        try:
+            vector = await get_embedding(query)
+            results = await qdrant_search("documentation", vector, limit)
+            return [{
+                "id": str(r.get("id")),
+                "score": round(r.get("score", 0), 3),
+                "title": r.get("payload", {}).get("title", ""),
+                "content": r.get("payload", {}).get("content", "")[:500],
+                "path": r.get("payload", {}).get("path", "")
+            } for r in results if r.get("score", 0) >= min_score]
+        except Exception as e:
+            logger.error(f"search_documentation failed: {e}")
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def add_documentation(title: str, content: str, path: Optional[str] = None, tags: Optional[List[str]] = None) -> dict:
+        """Add documentation to the knowledge base."""
+        try:
+            point_id = str(uuid.uuid4())
+            vector = await get_embedding(f"{title}\n{content[:2000]}")
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "title": title,
+                    "content": content,
+                    "path": path or "",
+                    "tags": tags or [],
+                    "indexed_at": datetime.now(timezone.utc).isoformat()
+                }
+            }
+            success = await qdrant_upsert("documentation", [point])
+            return {"success": success, "id": point_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ============================================================================
+    # ENTITY INTELLIGENCE TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def search_entities(query: str, limit: int = 10) -> List[dict]:
+        """Semantic search for network entities. Examples: 'Chromecast devices', 'IoT on guest VLAN'."""
+        try:
+            vector = await get_embedding(query)
+            results = await qdrant_search("entities", vector, limit)
+            return [{
+                "id": str(r.get("id")),
+                "score": round(r.get("score", 0), 3),
+                "hostname": r.get("payload", {}).get("hostname", ""),
+                "ip": r.get("payload", {}).get("ip", ""),
+                "mac": r.get("payload", {}).get("mac", ""),
+                "type": r.get("payload", {}).get("type", ""),
+                "network": r.get("payload", {}).get("network", ""),
+                "location": r.get("payload", {}).get("location", "")
+            } for r in results]
+        except Exception as e:
+            logger.error(f"search_entities failed: {e}")
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def get_entity(identifier: str) -> dict:
+        """Get entity by IP, MAC, or hostname."""
+        try:
+            # Try each identifier type
+            for field in ["ip", "mac", "hostname"]:
+                filter_ = {"must": [{"key": field, "match": {"value": identifier}}]}
+                results = await qdrant_scroll("entities", filter_=filter_, limit=1)
+                if results:
+                    return results[0].get("payload", {})
+            return {"error": f"Entity not found: {identifier}"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def get_entities_by_type(entity_type: str, limit: int = 50) -> List[dict]:
+        """Get entities by type: sonoff, chromecast, nas, printer, switch, etc."""
+        try:
+            filter_ = {"must": [{"key": "type", "match": {"value": entity_type}}]}
+            results = await qdrant_scroll("entities", filter_=filter_, limit=limit)
+            return [{
+                "id": str(r.get("id")),
+                "hostname": r.get("payload", {}).get("hostname", ""),
+                "ip": r.get("payload", {}).get("ip", ""),
+                "network": r.get("payload", {}).get("network", ""),
+                "location": r.get("payload", {}).get("location", "")
+            } for r in results]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def get_entities_by_network(network: str, limit: int = 100) -> List[dict]:
+        """Get entities by network: prod, iot-vlan, guest, management, etc."""
+        try:
+            filter_ = {"must": [{"key": "network", "match": {"value": network}}]}
+            results = await qdrant_scroll("entities", filter_=filter_, limit=limit)
+            return [{
+                "id": str(r.get("id")),
+                "hostname": r.get("payload", {}).get("hostname", ""),
+                "ip": r.get("payload", {}).get("ip", ""),
+                "type": r.get("payload", {}).get("type", ""),
+                "location": r.get("payload", {}).get("location", "")
+            } for r in results]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def add_entity(
+        hostname: str,
+        ip: str,
+        mac: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        network: Optional[str] = None,
+        location: Optional[str] = None,
+        manufacturer: Optional[str] = None,
+        model: Optional[str] = None,
+        capabilities: Optional[List[str]] = None,
+        notes: Optional[str] = None
+    ) -> dict:
+        """Add a new entity to the knowledge base."""
+        try:
+            point_id = str(uuid.uuid4())
+            embed_text = f"{hostname} {entity_type or ''} {manufacturer or ''} {location or ''}"
+            vector = await get_embedding(embed_text)
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "hostname": hostname,
+                    "ip": ip,
+                    "mac": mac or "",
+                    "type": entity_type or "unknown",
+                    "network": network or "unknown",
+                    "location": location or "",
+                    "manufacturer": manufacturer or "",
+                    "model": model or "",
+                    "capabilities": capabilities or [],
+                    "notes": notes or "",
+                    "discovered_at": datetime.now(timezone.utc).isoformat()
+                }
+            }
+            success = await qdrant_upsert("entities", [point])
+            return {"success": success, "id": point_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def list_entity_types() -> List[dict]:
+        """List all unique entity types with counts."""
+        try:
+            results = await qdrant_scroll("entities", limit=500)
+            type_counts: Dict[str, int] = {}
+            for r in results:
+                t = r.get("payload", {}).get("type", "unknown")
+                type_counts[t] = type_counts.get(t, 0) + 1
+            return [{"type": k, "count": v} for k, v in sorted(type_counts.items(), key=lambda x: -x[1])]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    # ============================================================================
+    # DECISION TRACKING TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def search_decisions(query: str, limit: int = 5) -> List[dict]:
+        """Search architectural decisions and past solutions."""
+        try:
+            vector = await get_embedding(query)
+            results = await qdrant_search("decisions", vector, limit)
+            return [{
+                "id": str(r.get("id")),
+                "score": round(r.get("score", 0), 3),
+                "title": r.get("payload", {}).get("title", ""),
+                "decision": r.get("payload", {}).get("decision", ""),
+                "rationale": r.get("payload", {}).get("rationale", "")[:300],
+                "date": r.get("payload", {}).get("date", "")
+            } for r in results]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def add_decision(title: str, decision: str, rationale: str, context: Optional[str] = None, alternatives: Optional[List[str]] = None) -> dict:
+        """Record an architectural decision."""
+        try:
+            point_id = str(uuid.uuid4())
+            vector = await get_embedding(f"{title}\n{decision}\n{rationale}")
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "title": title,
+                    "decision": decision,
+                    "rationale": rationale,
+                    "context": context or "",
+                    "alternatives": alternatives or [],
+                    "date": datetime.now(timezone.utc).isoformat()
+                }
+            }
+            success = await qdrant_upsert("decisions", [point])
+            return {"success": success, "id": point_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ============================================================================
+    # EVENT HISTORY TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def get_similar_events(event_description: str, limit: int = 5, min_score: float = 0.7) -> List[dict]:
+        """Find similar historical events for pattern matching."""
         try:
             vector = await get_embedding(event_description)
             results = await qdrant_search("agent_events", vector, limit)
-            return [SearchResult(id=str(r.get("id")), score=r.get("score", 0), title=r.get("payload", {}).get("event_type", ""), content=r.get("payload", {}).get("description", "")) for r in results if r.get("score", 0) >= 0.75]
+            return [{
+                "id": str(r.get("id")),
+                "score": round(r.get("score", 0), 3),
+                "event_type": r.get("payload", {}).get("event_type", ""),
+                "description": r.get("payload", {}).get("description", ""),
+                "resolution": r.get("payload", {}).get("resolution", ""),
+                "timestamp": r.get("payload", {}).get("timestamp", "")
+            } for r in results if r.get("score", 0) >= min_score]
         except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return []
+            return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def log_event(event_type: str, description: str, resolution: Optional[str] = None, metadata: Optional[dict] = None) -> dict:
+        """Log an event for future pattern matching."""
+        try:
+            point_id = str(uuid.uuid4())
+            vector = await get_embedding(f"{event_type}: {description}")
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "event_type": event_type,
+                    "description": description,
+                    "resolution": resolution or "",
+                    "metadata": metadata or {},
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }
+            success = await qdrant_upsert("agent_events", [point])
+            return {"success": success, "id": point_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ============================================================================
+    # UNIFIED SEARCH
+    # ============================================================================
+
+    @mcp.tool()
+    async def search_all(query: str, limit: int = 3) -> dict:
+        """Search across all collections (runbooks, docs, entities, decisions)."""
+        try:
+            vector = await get_embedding(query)
+            results = {}
+
+            # Search each collection
+            for collection in ["runbooks", "documentation", "entities", "decisions"]:
+                try:
+                    items = await qdrant_search(collection, vector, limit)
+                    results[collection] = [{
+                        "id": str(r.get("id")),
+                        "score": round(r.get("score", 0), 3),
+                        "title": r.get("payload", {}).get("title") or r.get("payload", {}).get("hostname", ""),
+                        "preview": (r.get("payload", {}).get("content") or r.get("payload", {}).get("solution") or r.get("payload", {}).get("decision", ""))[:200]
+                    } for r in items]
+                except:
+                    results[collection] = []
+
+            return results
+        except Exception as e:
+            return {"error": str(e)}
 
     # ============================================================================
     # REST API (for langgraph context building)
@@ -110,7 +505,18 @@ data:
 
     async def rest_health(request: Request):
         """Health check endpoint."""
-        return JSONResponse({"status": "healthy"})
+        try:
+            # Verify Qdrant connectivity
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{QDRANT_URL}/collections")
+                qdrant_ok = resp.status_code == 200
+        except:
+            qdrant_ok = False
+
+        return JSONResponse({
+            "status": "healthy" if qdrant_ok else "degraded",
+            "qdrant": "connected" if qdrant_ok else "unreachable"
+        })
 
     async def rest_api_search(request: Request):
         """Search knowledge base for langgraph context."""
@@ -127,6 +533,36 @@ data:
             logger.error(f"REST api_search error: {e}")
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
+    async def rest_api_collections(request: Request):
+        """List all collections."""
+        try:
+            collections = await list_collections()
+            return JSONResponse({"status": "ok", "data": collections})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_entity(request: Request):
+        """Get entity by identifier."""
+        try:
+            identifier = request.query_params.get("id", "")
+            if not identifier:
+                return JSONResponse({"status": "error", "error": "Missing 'id' parameter"}, status_code=400)
+            entity = await get_entity(identifier)
+            return JSONResponse({"status": "ok", "data": entity})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_runbook(request: Request):
+        """Get runbook by ID."""
+        try:
+            runbook_id = request.query_params.get("id", "")
+            if not runbook_id:
+                return JSONResponse({"status": "error", "error": "Missing 'id' parameter"}, status_code=400)
+            runbook = await get_runbook(runbook_id)
+            return JSONResponse({"status": "ok", "data": runbook})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
     # ============================================================================
     # MAIN
     # ============================================================================
@@ -134,10 +570,16 @@ data:
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting knowledge MCP on port {port}")
+        logger.info("Collections: runbooks, documentation, entities, decisions, agent_events")
+        logger.info(f"Qdrant URL: {QDRANT_URL}")
+        logger.info(f"LiteLLM URL: {LITELLM_URL}")
 
         rest_routes = [
             Route("/health", rest_health, methods=["GET"]),
             Route("/api/search", rest_api_search, methods=["GET"]),
+            Route("/api/collections", rest_api_collections, methods=["GET"]),
+            Route("/api/entity", rest_api_entity, methods=["GET"]),
+            Route("/api/runbook", rest_api_runbook, methods=["GET"]),
         ]
 
         mcp_app = mcp.http_app()

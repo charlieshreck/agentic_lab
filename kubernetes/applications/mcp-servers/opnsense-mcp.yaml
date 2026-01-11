@@ -1,15 +1,7 @@
 ---
-# AdGuard Home credentials secret
-# Created from Infisical: /infrastructure/adguard
-apiVersion: v1
-kind: Secret
-metadata:
-  name: mcp-adguard
-  namespace: ai-platform
-type: Opaque
-stringData:
-  username: "chaz"
-  password: "H4ckwh1z"
+# AdGuard Home credentials - managed by InfisicalSecret in infisical-secrets.yaml
+# Path: /infrastructure/adguard (keys: username, password)
+# DO NOT hardcode credentials here
 ---
 apiVersion: v1
 kind: ConfigMap

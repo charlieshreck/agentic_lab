@@ -14,17 +14,36 @@ metadata:
   labels:
     app: infrastructure-mcp
 rules:
+  # Core resources (read-only)
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "configmaps", "events", "namespaces", "nodes"]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets", "events", "namespaces", "nodes", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get", "list", "watch"]
+  # Pod management (delete for force restart)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  # Workload resources
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
     verbs: ["get", "list", "watch"]
+  # Deployment management
   - apiGroups: ["apps"]
-    resources: ["deployments"]
+    resources: ["deployments", "statefulsets"]
     verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["patch", "update"]
+  # Batch workloads
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create"]
+  # ArgoCD applications
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Ingress and networking
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -52,7 +71,7 @@ metadata:
 data:
   main.py: |
     #!/usr/bin/env python3
-    """Infrastructure MCP server for Kubernetes and Talos management."""
+    """Infrastructure MCP server for comprehensive Kubernetes cluster management."""
     import os
     import subprocess
     import json
@@ -72,18 +91,13 @@ data:
 
     mcp = FastMCP(
         name="infrastructure-mcp",
-        instructions="MCP server for Kubernetes cluster operations. Provides tools to get pods, logs, events, and restart deployments."
+        instructions="""MCP server for comprehensive Kubernetes cluster operations.
+        Provides tools for pods, deployments, services, jobs, events, ArgoCD apps, and more.
+        Currently manages the agentic cluster. Use namespace parameter to target specific namespaces."""
     )
 
-    class PodInfo(BaseModel):
-        name: str
-        namespace: str
-        status: str
-        ready: bool
-        restarts: int
-
     # ============================================================================
-    # INTERNAL HELPERS (shared by MCP tools and REST API)
+    # INTERNAL HELPERS
     # ============================================================================
 
     def run_kubectl(args: List[str], timeout: int = 30) -> tuple[str, str, int]:
@@ -93,108 +107,444 @@ data:
         except Exception as e:
             return "", str(e), 1
 
-    async def _get_pods_internal(namespace: str = "default", label_selector: Optional[str] = None) -> List[dict]:
-        """Internal function to get pods - used by both MCP and REST."""
-        args = ["get", "pods", "-n", namespace, "-o", "json"]
+    def parse_json_output(stdout: str) -> dict:
+        try:
+            return json.loads(stdout)
+        except:
+            return {}
+
+    # ============================================================================
+    # POD TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_pods(namespace: str = "default", label_selector: Optional[str] = None, all_namespaces: bool = False) -> List[dict]:
+        """Get pods with status, readiness, and restart count.
+        Use all_namespaces=True to get pods across all namespaces."""
+        args = ["get", "pods", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
         if label_selector:
             args.extend(["-l", label_selector])
         stdout, stderr, rc = run_kubectl(args)
         if rc != 0:
-            return []
-        try:
-            data = json.loads(stdout)
-            return [{
-                "name": pod["metadata"]["name"],
-                "namespace": pod["metadata"]["namespace"],
-                "status": pod["status"]["phase"],
-                "ready": all(c.get("ready", False) for c in pod["status"].get("containerStatuses", [])),
-                "restarts": sum(c.get("restartCount", 0) for c in pod["status"].get("containerStatuses", []))
-            } for pod in data.get("items", [])]
-        except:
-            return []
-
-    async def _get_events_internal(namespace: str = "default", limit: int = 20) -> List[dict]:
-        """Internal function to get events - used by both MCP and REST."""
-        stdout, stderr, rc = run_kubectl(["get", "events", "-n", namespace, "-o", "json", "--sort-by=.lastTimestamp"])
-        if rc != 0:
-            return []
-        try:
-            data = json.loads(stdout)
-            return [{"type": e.get("type"), "reason": e.get("reason"), "message": e.get("message", "")[:100], "object": e.get("involvedObject", {}).get("name")} for e in data.get("items", [])[-limit:]]
-        except:
-            return []
-
-    async def _get_deployments_internal(namespace: str = "default") -> List[dict]:
-        """Get deployments in a namespace."""
-        stdout, stderr, rc = run_kubectl(["get", "deployments", "-n", namespace, "-o", "json"])
-        if rc != 0:
-            return []
-        try:
-            data = json.loads(stdout)
-            return [{
-                "name": d["metadata"]["name"],
-                "replicas": d["spec"].get("replicas", 0),
-                "ready": d["status"].get("readyReplicas", 0),
-                "available": d["status"].get("availableReplicas", 0)
-            } for d in data.get("items", [])]
-        except:
-            return []
-
-    async def _get_nodes_internal() -> List[dict]:
-        """Get cluster nodes."""
-        stdout, stderr, rc = run_kubectl(["get", "nodes", "-o", "json"])
-        if rc != 0:
-            return []
-        try:
-            data = json.loads(stdout)
-            nodes = []
-            for n in data.get("items", []):
-                conditions = {c["type"]: c["status"] for c in n["status"].get("conditions", [])}
-                nodes.append({
-                    "name": n["metadata"]["name"],
-                    "ready": conditions.get("Ready") == "True",
-                    "version": n["status"].get("nodeInfo", {}).get("kubeletVersion", "unknown")
-                })
-            return nodes
-        except:
-            return []
-
-    # ============================================================================
-    # MCP TOOLS
-    # ============================================================================
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": pod["metadata"]["name"],
+            "namespace": pod["metadata"]["namespace"],
+            "status": pod["status"]["phase"],
+            "ready": all(c.get("ready", False) for c in pod["status"].get("containerStatuses", [])),
+            "restarts": sum(c.get("restartCount", 0) for c in pod["status"].get("containerStatuses", []))
+        } for pod in data.get("items", [])]
 
     @mcp.tool()
-    async def kubectl_get_pods(namespace: str = "default", label_selector: Optional[str] = None) -> List[PodInfo]:
-        """Get pods in a Kubernetes namespace."""
-        pods = await _get_pods_internal(namespace, label_selector)
-        return [PodInfo(**p) for p in pods]
-
-    @mcp.tool()
-    async def kubectl_logs(pod_name: str, namespace: str = "default", tail_lines: int = 50) -> str:
-        """Get logs from a Kubernetes pod."""
-        stdout, stderr, rc = run_kubectl(["logs", pod_name, "-n", namespace, f"--tail={tail_lines}"])
+    async def kubectl_logs(pod_name: str, namespace: str = "default", tail_lines: int = 100, container: Optional[str] = None, previous: bool = False) -> str:
+        """Get logs from a Kubernetes pod. Use previous=True for crashed container logs."""
+        args = ["logs", pod_name, "-n", namespace, f"--tail={tail_lines}"]
+        if container:
+            args.extend(["-c", container])
+        if previous:
+            args.append("--previous")
+        stdout, stderr, rc = run_kubectl(args)
         return stdout if rc == 0 else f"Error: {stderr}"
 
     @mcp.tool()
+    async def kubectl_delete_pod(pod_name: str, namespace: str = "default") -> str:
+        """Delete a pod (useful for forcing restart of a specific pod)."""
+        stdout, stderr, rc = run_kubectl(["delete", "pod", pod_name, "-n", namespace])
+        return f"Deleted pod {pod_name}" if rc == 0 else f"Error: {stderr}"
+
+    # ============================================================================
+    # DEPLOYMENT TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_deployments(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get deployments with replica status."""
+        args = ["get", "deployments", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": d["metadata"]["name"],
+            "namespace": d["metadata"]["namespace"],
+            "replicas": d["spec"].get("replicas", 0),
+            "ready": d["status"].get("readyReplicas", 0),
+            "available": d["status"].get("availableReplicas", 0),
+            "updated": d["status"].get("updatedReplicas", 0)
+        } for d in data.get("items", [])]
+
+    @mcp.tool()
     async def kubectl_restart_deployment(deployment_name: str, namespace: str = "default") -> str:
-        """Restart a Kubernetes deployment."""
+        """Restart a deployment by triggering a rolling restart."""
         stdout, stderr, rc = run_kubectl(["rollout", "restart", "deployment", deployment_name, "-n", namespace])
         return f"Restarted {deployment_name}" if rc == 0 else f"Error: {stderr}"
 
     @mcp.tool()
-    async def kubectl_get_events(namespace: str = "default", limit: int = 20) -> List[dict]:
-        """Get Kubernetes events in a namespace."""
-        return await _get_events_internal(namespace, limit)
+    async def kubectl_scale_deployment(deployment_name: str, replicas: int, namespace: str = "default") -> str:
+        """Scale a deployment to specified number of replicas."""
+        stdout, stderr, rc = run_kubectl(["scale", "deployment", deployment_name, f"--replicas={replicas}", "-n", namespace])
+        return f"Scaled {deployment_name} to {replicas} replicas" if rc == 0 else f"Error: {stderr}"
 
     @mcp.tool()
-    async def kubectl_get_deployments(namespace: str = "default") -> List[dict]:
-        """Get deployments in a Kubernetes namespace."""
-        return await _get_deployments_internal(namespace)
+    async def kubectl_rollout_status(deployment_name: str, namespace: str = "default") -> str:
+        """Get rollout status of a deployment."""
+        stdout, stderr, rc = run_kubectl(["rollout", "status", "deployment", deployment_name, "-n", namespace, "--timeout=5s"])
+        return stdout if rc == 0 else stderr
+
+    # ============================================================================
+    # SERVICE TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_services(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get services with type, cluster IP, and ports."""
+        args = ["get", "services", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": s["metadata"]["name"],
+            "namespace": s["metadata"]["namespace"],
+            "type": s["spec"].get("type", "ClusterIP"),
+            "cluster_ip": s["spec"].get("clusterIP"),
+            "ports": [{"port": p.get("port"), "target": p.get("targetPort"), "nodePort": p.get("nodePort")} for p in s["spec"].get("ports", [])]
+        } for s in data.get("items", [])]
+
+    # ============================================================================
+    # STATEFULSET TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_statefulsets(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get statefulsets with replica status."""
+        args = ["get", "statefulsets", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": s["metadata"]["name"],
+            "namespace": s["metadata"]["namespace"],
+            "replicas": s["spec"].get("replicas", 0),
+            "ready": s["status"].get("readyReplicas", 0)
+        } for s in data.get("items", [])]
+
+    @mcp.tool()
+    async def kubectl_restart_statefulset(statefulset_name: str, namespace: str = "default") -> str:
+        """Restart a statefulset."""
+        stdout, stderr, rc = run_kubectl(["rollout", "restart", "statefulset", statefulset_name, "-n", namespace])
+        return f"Restarted {statefulset_name}" if rc == 0 else f"Error: {stderr}"
+
+    # ============================================================================
+    # DAEMONSET TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_daemonsets(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get daemonsets with scheduling status."""
+        args = ["get", "daemonsets", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": d["metadata"]["name"],
+            "namespace": d["metadata"]["namespace"],
+            "desired": d["status"].get("desiredNumberScheduled", 0),
+            "ready": d["status"].get("numberReady", 0),
+            "available": d["status"].get("numberAvailable", 0)
+        } for d in data.get("items", [])]
+
+    # ============================================================================
+    # JOB/CRONJOB TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_jobs(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get jobs with completion status."""
+        args = ["get", "jobs", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": j["metadata"]["name"],
+            "namespace": j["metadata"]["namespace"],
+            "completions": j["spec"].get("completions", 1),
+            "succeeded": j["status"].get("succeeded", 0),
+            "failed": j["status"].get("failed", 0),
+            "active": j["status"].get("active", 0)
+        } for j in data.get("items", [])]
+
+    @mcp.tool()
+    async def kubectl_get_cronjobs(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get cronjobs with schedule and last run info."""
+        args = ["get", "cronjobs", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": c["metadata"]["name"],
+            "namespace": c["metadata"]["namespace"],
+            "schedule": c["spec"].get("schedule"),
+            "suspended": c["spec"].get("suspend", False),
+            "last_schedule": c["status"].get("lastScheduleTime")
+        } for c in data.get("items", [])]
+
+    @mcp.tool()
+    async def kubectl_create_job_from_cronjob(cronjob_name: str, job_name: str, namespace: str = "default") -> str:
+        """Manually trigger a cronjob by creating a job from it."""
+        stdout, stderr, rc = run_kubectl(["create", "job", job_name, f"--from=cronjob/{cronjob_name}", "-n", namespace])
+        return f"Created job {job_name} from cronjob {cronjob_name}" if rc == 0 else f"Error: {stderr}"
+
+    # ============================================================================
+    # CONFIGMAP/SECRET TOOLS (metadata only for secrets)
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_configmaps(namespace: str = "default") -> List[dict]:
+        """Get configmap names and data keys."""
+        stdout, stderr, rc = run_kubectl(["get", "configmaps", "-n", namespace, "-o", "json"])
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": c["metadata"]["name"],
+            "keys": list(c.get("data", {}).keys())
+        } for c in data.get("items", [])]
+
+    @mcp.tool()
+    async def kubectl_get_secrets(namespace: str = "default") -> List[dict]:
+        """Get secret names and types (values NOT exposed for security)."""
+        stdout, stderr, rc = run_kubectl(["get", "secrets", "-n", namespace, "-o", "json"])
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": s["metadata"]["name"],
+            "type": s.get("type"),
+            "keys": list(s.get("data", {}).keys())
+        } for s in data.get("items", [])]
+
+    # ============================================================================
+    # STORAGE TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_pvcs(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get persistent volume claims with status and capacity."""
+        args = ["get", "pvc", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": p["metadata"]["name"],
+            "namespace": p["metadata"]["namespace"],
+            "status": p["status"].get("phase"),
+            "capacity": p["status"].get("capacity", {}).get("storage"),
+            "storage_class": p["spec"].get("storageClassName"),
+            "volume_name": p["spec"].get("volumeName")
+        } for p in data.get("items", [])]
+
+    # ============================================================================
+    # NODE TOOLS
+    # ============================================================================
 
     @mcp.tool()
     async def kubectl_get_nodes() -> List[dict]:
-        """Get all cluster nodes with status."""
-        return await _get_nodes_internal()
+        """Get all cluster nodes with status, version, and conditions."""
+        stdout, stderr, rc = run_kubectl(["get", "nodes", "-o", "json"])
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        nodes = []
+        for n in data.get("items", []):
+            conditions = {c["type"]: c["status"] for c in n["status"].get("conditions", [])}
+            nodes.append({
+                "name": n["metadata"]["name"],
+                "ready": conditions.get("Ready") == "True",
+                "version": n["status"].get("nodeInfo", {}).get("kubeletVersion", "unknown"),
+                "os": n["status"].get("nodeInfo", {}).get("osImage", "unknown"),
+                "conditions": conditions
+            })
+        return nodes
+
+    # ============================================================================
+    # NAMESPACE TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_namespaces() -> List[dict]:
+        """Get all namespaces in the cluster."""
+        stdout, stderr, rc = run_kubectl(["get", "namespaces", "-o", "json"])
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": ns["metadata"]["name"],
+            "status": ns["status"].get("phase")
+        } for ns in data.get("items", [])]
+
+    # ============================================================================
+    # EVENT TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_events(namespace: str = "default", limit: int = 20, warning_only: bool = False) -> List[dict]:
+        """Get Kubernetes events. Use warning_only=True to filter warnings."""
+        stdout, stderr, rc = run_kubectl(["get", "events", "-n", namespace, "-o", "json", "--sort-by=.lastTimestamp"])
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        events = data.get("items", [])[-limit:]
+        if warning_only:
+            events = [e for e in events if e.get("type") == "Warning"]
+        return [{
+            "type": e.get("type"),
+            "reason": e.get("reason"),
+            "message": e.get("message", "")[:200],
+            "object": f"{e.get('involvedObject', {}).get('kind', '')}/{e.get('involvedObject', {}).get('name', '')}",
+            "count": e.get("count", 1),
+            "last_seen": e.get("lastTimestamp")
+        } for e in events]
+
+    # ============================================================================
+    # INGRESS TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_get_ingresses(namespace: str = "default", all_namespaces: bool = False) -> List[dict]:
+        """Get ingresses with hosts and paths."""
+        args = ["get", "ingress", "-o", "json"]
+        if all_namespaces:
+            args.append("-A")
+        else:
+            args.extend(["-n", namespace])
+        stdout, stderr, rc = run_kubectl(args)
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        result = []
+        for i in data.get("items", []):
+            hosts = []
+            for rule in i["spec"].get("rules", []):
+                host = rule.get("host", "*")
+                paths = [p.get("path", "/") for p in rule.get("http", {}).get("paths", [])]
+                hosts.append({"host": host, "paths": paths})
+            result.append({
+                "name": i["metadata"]["name"],
+                "namespace": i["metadata"]["namespace"],
+                "class": i["spec"].get("ingressClassName"),
+                "hosts": hosts
+            })
+        return result
+
+    # ============================================================================
+    # ARGOCD TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def argocd_get_applications(namespace: str = "argocd") -> List[dict]:
+        """Get ArgoCD applications with sync status."""
+        stdout, stderr, rc = run_kubectl(["get", "applications.argoproj.io", "-n", namespace, "-o", "json"])
+        if rc != 0:
+            return [{"error": stderr}]
+        data = parse_json_output(stdout)
+        return [{
+            "name": a["metadata"]["name"],
+            "project": a["spec"].get("project", "default"),
+            "sync_status": a["status"].get("sync", {}).get("status"),
+            "health": a["status"].get("health", {}).get("status"),
+            "repo": a["spec"].get("source", {}).get("repoURL"),
+            "path": a["spec"].get("source", {}).get("path")
+        } for a in data.get("items", [])]
+
+    @mcp.tool()
+    async def argocd_sync_application(app_name: str, namespace: str = "argocd") -> str:
+        """Trigger sync for an ArgoCD application."""
+        patch = '{"operation": {"initiatedBy": {"username": "infrastructure-mcp"}, "sync": {"prune": true}}}'
+        stdout, stderr, rc = run_kubectl(["patch", "application", app_name, "-n", namespace, "--type", "merge", "-p", patch])
+        return f"Triggered sync for {app_name}" if rc == 0 else f"Error: {stderr}"
+
+    # ============================================================================
+    # RESOURCE DESCRIBE/YAML TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def kubectl_describe(resource_type: str, name: str, namespace: str = "default") -> str:
+        """Get detailed description of a Kubernetes resource.
+        resource_type: pod, deployment, service, statefulset, etc."""
+        stdout, stderr, rc = run_kubectl(["describe", resource_type, name, "-n", namespace])
+        return stdout[:5000] if rc == 0 else f"Error: {stderr}"
+
+    @mcp.tool()
+    async def kubectl_get_yaml(resource_type: str, name: str, namespace: str = "default") -> str:
+        """Get YAML manifest of a Kubernetes resource."""
+        stdout, stderr, rc = run_kubectl(["get", resource_type, name, "-n", namespace, "-o", "yaml"])
+        return stdout[:8000] if rc == 0 else f"Error: {stderr}"
+
+    # ============================================================================
+    # CLUSTER OVERVIEW
+    # ============================================================================
+
+    @mcp.tool()
+    async def get_cluster_health() -> dict:
+        """Get overall cluster health summary."""
+        nodes = await kubectl_get_nodes()
+        pods = await kubectl_get_pods(namespace="", all_namespaces=True)
+        events = await kubectl_get_events(namespace="", limit=10, warning_only=True)
+
+        unhealthy_pods = [p for p in pods if not p.get("ready") or p.get("status") != "Running"]
+
+        return {
+            "nodes": {
+                "total": len(nodes),
+                "ready": sum(1 for n in nodes if n.get("ready"))
+            },
+            "pods": {
+                "total": len(pods),
+                "running": len([p for p in pods if p.get("status") == "Running"]),
+                "unhealthy": len(unhealthy_pods)
+            },
+            "recent_warnings": len(events),
+            "healthy": len(unhealthy_pods) == 0 and all(n.get("ready") for n in nodes)
+        }
 
     # ============================================================================
     # REST API (for langgraph context building and runbook executor)
@@ -208,18 +558,20 @@ data:
         """Get cluster status for langgraph context."""
         try:
             namespace = request.query_params.get("namespace", "ai-platform")
-            pods = await _get_pods_internal(namespace)
-            events = await _get_events_internal(namespace, limit=10)
-            deployments = await _get_deployments_internal(namespace)
-            nodes = await _get_nodes_internal()
+            all_ns = request.query_params.get("all", "false").lower() == "true"
 
-            unhealthy_pods = [p for p in pods if not p["ready"] or p["status"] != "Running"]
-            warning_events = [e for e in events if e["type"] == "Warning"]
+            pods = await kubectl_get_pods(namespace=namespace, all_namespaces=all_ns)
+            deployments = await kubectl_get_deployments(namespace=namespace, all_namespaces=all_ns)
+            nodes = await kubectl_get_nodes()
+            events = await kubectl_get_events(namespace=namespace, limit=10)
+
+            unhealthy_pods = [p for p in pods if not p.get("ready") or p.get("status") != "Running"]
+            warning_events = [e for e in events if e.get("type") == "Warning"]
 
             return JSONResponse({
                 "status": "ok",
                 "data": {
-                    "namespace": namespace,
+                    "namespace": namespace if not all_ns else "all",
                     "pods": pods,
                     "deployments": deployments,
                     "nodes": nodes,
@@ -229,13 +581,22 @@ data:
                         "healthy_pods": len(pods) - len(unhealthy_pods),
                         "unhealthy_pods": len(unhealthy_pods),
                         "warning_events": len(warning_events),
-                        "nodes_ready": sum(1 for n in nodes if n["ready"])
+                        "nodes_ready": sum(1 for n in nodes if n.get("ready"))
                     },
-                    "healthy": len(unhealthy_pods) == 0 and all(n["ready"] for n in nodes)
+                    "healthy": len(unhealthy_pods) == 0 and all(n.get("ready") for n in nodes)
                 }
             })
         except Exception as e:
             logger.error(f"REST api_cluster error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_cluster_health(request: Request):
+        """Get quick cluster health summary."""
+        try:
+            health = await get_cluster_health()
+            return JSONResponse({"status": "ok", "data": health})
+        except Exception as e:
+            logger.error(f"REST cluster_health error: {e}")
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
     async def rest_execute(request: Request):
@@ -268,10 +629,12 @@ data:
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting infrastructure MCP on port {port}")
+        logger.info("Tools available: pods, deployments, services, statefulsets, daemonsets, jobs, cronjobs, configmaps, secrets, pvcs, nodes, namespaces, events, ingresses, argocd")
 
         rest_routes = [
             Route("/health", rest_health, methods=["GET"]),
             Route("/api/cluster", rest_api_cluster, methods=["GET"]),
+            Route("/api/health", rest_cluster_health, methods=["GET"]),
             Route("/execute", rest_execute, methods=["POST"]),
         ]
 

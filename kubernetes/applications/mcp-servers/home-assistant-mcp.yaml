@@ -8,13 +8,15 @@ metadata:
 data:
   main.py: |
     #!/usr/bin/env python3
-    """Home Assistant MCP server for smart home control."""
+    """Comprehensive Home Assistant MCP server for smart home control.
+    Supports: lights, switches, climate, covers, fans, locks, scenes, scripts,
+    media players, notifications, and general entity management.
+    """
     import os
     import logging
     import httpx
-    from typing import List, Optional
+    from typing import List, Optional, Dict, Any
     from fastmcp import FastMCP
-    from pydantic import BaseModel
     from starlette.applications import Starlette
     from starlette.routing import Route, Mount
     from starlette.responses import JSONResponse
@@ -27,88 +29,423 @@ data:
     HA_URL = os.environ.get("HA_URL", "http://homeassistant.local:8123")
     HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
-    mcp = FastMCP(name="home-assistant-mcp", instructions="MCP server for Home Assistant smart home control.")
+    mcp = FastMCP(
+        name="home-assistant-mcp",
+        instructions="""Comprehensive Home Assistant MCP server.
+        Supports: lights, switches, climate, covers, fans, locks, scenes, scripts,
+        media players, automations, and notifications.
+        Use list_entities(domain) to discover available devices."""
+    )
 
-    class LightState(BaseModel):
-        entity_id: str
-        friendly_name: str
-        state: str
-        brightness: Optional[int] = None
+    # ============================================================================
+    # HELPERS
+    # ============================================================================
 
-    async def ha_request(method: str, endpoint: str, data: dict = None) -> dict:
+    async def ha_request(method: str, endpoint: str, data: dict = None) -> Any:
         if not HA_TOKEN:
             return {"error": "HA_TOKEN not configured"}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.request(method, f"{HA_URL}/api/{endpoint}", headers={"Authorization": f"Bearer {HA_TOKEN}"}, json=data)
-            response.raise_for_status()
-            return response.json() if response.content else {}
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                response = await client.request(
+                    method,
+                    f"{HA_URL}/api/{endpoint}",
+                    headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                    json=data
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HA request failed: {e}")
+            return {"error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
+        except Exception as e:
+            logger.error(f"HA request error: {e}")
+            return {"error": str(e)}
+
+    async def call_service(domain: str, service: str, data: dict) -> dict:
+        """Call a Home Assistant service."""
+        result = await ha_request("POST", f"services/{domain}/{service}", data)
+        if isinstance(result, dict) and "error" in result:
+            return result
+        return {"success": True, "service": f"{domain}.{service}"}
+
+    # ============================================================================
+    # GENERAL ENTITY TOOLS
+    # ============================================================================
 
     @mcp.tool()
-    async def list_lights() -> List[LightState]:
-        """List all light entities and their current state."""
+    async def list_entities(domain: str = "all", area: Optional[str] = None) -> List[dict]:
+        """List entities by domain (light, switch, climate, cover, fan, lock, media_player, scene, script, automation, sensor, binary_sensor) or 'all'."""
         try:
             states = await ha_request("GET", "states")
-            return [LightState(entity_id=s["entity_id"], friendly_name=s.get("attributes", {}).get("friendly_name", s["entity_id"]), state=s["state"], brightness=s.get("attributes", {}).get("brightness")) for s in states if s["entity_id"].startswith("light.")]
+            if isinstance(states, dict) and "error" in states:
+                return [states]
+            entities = []
+            for s in states:
+                if domain != "all" and not s["entity_id"].startswith(f"{domain}."):
+                    continue
+                entity = {
+                    "entity_id": s["entity_id"],
+                    "state": s["state"],
+                    "name": s.get("attributes", {}).get("friendly_name", s["entity_id"]),
+                    "area": s.get("attributes", {}).get("area_id", "")
+                }
+                if area and entity.get("area") != area:
+                    continue
+                entities.append(entity)
+            return entities
         except Exception as e:
-            logger.error(f"Failed: {e}")
-            return []
+            return [{"error": str(e)}]
 
     @mcp.tool()
-    async def turn_on_light(entity_id: str, brightness: Optional[int] = None) -> str:
-        """Turn on a light with optional brightness."""
-        try:
-            data = {"entity_id": entity_id}
-            if brightness:
-                data["brightness"] = min(255, max(0, brightness))
-            await ha_request("POST", "services/light/turn_on", data)
-            return f"Turned on {entity_id}"
-        except Exception as e:
-            return f"Error: {e}"
-
-    @mcp.tool()
-    async def turn_off_light(entity_id: str) -> str:
-        """Turn off a light."""
-        try:
-            await ha_request("POST", "services/light/turn_off", {"entity_id": entity_id})
-            return f"Turned off {entity_id}"
-        except Exception as e:
-            return f"Error: {e}"
-
-    @mcp.tool()
-    async def get_sensor_state(entity_id: str) -> dict:
-        """Get the current state of any sensor or entity."""
+    async def get_entity_state(entity_id: str) -> dict:
+        """Get the current state and attributes of any entity."""
         try:
             state = await ha_request("GET", f"states/{entity_id}")
-            return {"entity_id": state["entity_id"], "state": state["state"], "attributes": state.get("attributes", {})}
+            if isinstance(state, dict) and "error" in state:
+                return state
+            return {
+                "entity_id": state["entity_id"],
+                "state": state["state"],
+                "name": state.get("attributes", {}).get("friendly_name", state["entity_id"]),
+                "attributes": state.get("attributes", {}),
+                "last_changed": state.get("last_changed"),
+                "last_updated": state.get("last_updated")
+            }
         except Exception as e:
             return {"error": str(e)}
 
     @mcp.tool()
-    async def run_automation(automation_id: str) -> str:
-        """Trigger a Home Assistant automation."""
+    async def get_home_overview() -> dict:
+        """Get an overview of home state: lights on, climate status, open covers, etc."""
         try:
-            await ha_request("POST", "services/automation/trigger", {"entity_id": automation_id})
-            return f"Triggered {automation_id}"
+            states = await ha_request("GET", "states")
+            if isinstance(states, dict) and "error" in states:
+                return states
+
+            overview = {
+                "lights": {"on": 0, "off": 0, "entities_on": []},
+                "switches": {"on": 0, "off": 0},
+                "climate": [],
+                "covers": {"open": 0, "closed": 0},
+                "locks": {"locked": 0, "unlocked": 0},
+                "media_players": {"playing": 0, "idle": 0}
+            }
+
+            for s in states:
+                eid = s["entity_id"]
+                state = s["state"]
+                name = s.get("attributes", {}).get("friendly_name", eid)
+
+                if eid.startswith("light."):
+                    if state == "on":
+                        overview["lights"]["on"] += 1
+                        overview["lights"]["entities_on"].append(name)
+                    else:
+                        overview["lights"]["off"] += 1
+                elif eid.startswith("switch."):
+                    if state == "on":
+                        overview["switches"]["on"] += 1
+                    else:
+                        overview["switches"]["off"] += 1
+                elif eid.startswith("climate."):
+                    overview["climate"].append({
+                        "name": name,
+                        "state": state,
+                        "current_temp": s.get("attributes", {}).get("current_temperature"),
+                        "target_temp": s.get("attributes", {}).get("temperature")
+                    })
+                elif eid.startswith("cover."):
+                    if state == "open":
+                        overview["covers"]["open"] += 1
+                    else:
+                        overview["covers"]["closed"] += 1
+                elif eid.startswith("lock."):
+                    if state == "locked":
+                        overview["locks"]["locked"] += 1
+                    else:
+                        overview["locks"]["unlocked"] += 1
+                elif eid.startswith("media_player."):
+                    if state == "playing":
+                        overview["media_players"]["playing"] += 1
+                    else:
+                        overview["media_players"]["idle"] += 1
+
+            return overview
         except Exception as e:
-            return f"Error: {e}"
+            return {"error": str(e)}
+
+    # ============================================================================
+    # LIGHT TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def turn_on_light(entity_id: str, brightness: Optional[int] = None, color_temp: Optional[int] = None, rgb_color: Optional[List[int]] = None) -> dict:
+        """Turn on a light with optional brightness (0-255), color_temp (mireds), or rgb_color ([r,g,b])."""
+        data = {"entity_id": entity_id}
+        if brightness is not None:
+            data["brightness"] = min(255, max(0, brightness))
+        if color_temp is not None:
+            data["color_temp"] = color_temp
+        if rgb_color is not None:
+            data["rgb_color"] = rgb_color
+        return await call_service("light", "turn_on", data)
+
+    @mcp.tool()
+    async def turn_off_light(entity_id: str) -> dict:
+        """Turn off a light."""
+        return await call_service("light", "turn_off", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def toggle_light(entity_id: str) -> dict:
+        """Toggle a light on/off."""
+        return await call_service("light", "toggle", {"entity_id": entity_id})
+
+    # ============================================================================
+    # SWITCH TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def turn_on_switch(entity_id: str) -> dict:
+        """Turn on a switch."""
+        return await call_service("switch", "turn_on", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def turn_off_switch(entity_id: str) -> dict:
+        """Turn off a switch."""
+        return await call_service("switch", "turn_off", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def toggle_switch(entity_id: str) -> dict:
+        """Toggle a switch on/off."""
+        return await call_service("switch", "toggle", {"entity_id": entity_id})
+
+    # ============================================================================
+    # CLIMATE/HVAC TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def set_climate_temperature(entity_id: str, temperature: float, hvac_mode: Optional[str] = None) -> dict:
+        """Set climate/thermostat temperature. hvac_mode: heat, cool, auto, off."""
+        data = {"entity_id": entity_id, "temperature": temperature}
+        if hvac_mode:
+            data["hvac_mode"] = hvac_mode
+        return await call_service("climate", "set_temperature", data)
+
+    @mcp.tool()
+    async def set_climate_hvac_mode(entity_id: str, hvac_mode: str) -> dict:
+        """Set HVAC mode: heat, cool, heat_cool, auto, dry, fan_only, off."""
+        return await call_service("climate", "set_hvac_mode", {"entity_id": entity_id, "hvac_mode": hvac_mode})
+
+    @mcp.tool()
+    async def turn_off_climate(entity_id: str) -> dict:
+        """Turn off climate/HVAC."""
+        return await call_service("climate", "turn_off", {"entity_id": entity_id})
+
+    # ============================================================================
+    # COVER/BLIND TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def open_cover(entity_id: str) -> dict:
+        """Open a cover/blind."""
+        return await call_service("cover", "open_cover", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def close_cover(entity_id: str) -> dict:
+        """Close a cover/blind."""
+        return await call_service("cover", "close_cover", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def set_cover_position(entity_id: str, position: int) -> dict:
+        """Set cover position (0=closed, 100=open)."""
+        return await call_service("cover", "set_cover_position", {"entity_id": entity_id, "position": min(100, max(0, position))})
+
+    @mcp.tool()
+    async def stop_cover(entity_id: str) -> dict:
+        """Stop cover movement."""
+        return await call_service("cover", "stop_cover", {"entity_id": entity_id})
+
+    # ============================================================================
+    # FAN TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def turn_on_fan(entity_id: str, speed: Optional[str] = None) -> dict:
+        """Turn on a fan with optional speed (low, medium, high)."""
+        data = {"entity_id": entity_id}
+        if speed:
+            data["speed"] = speed
+        return await call_service("fan", "turn_on", data)
+
+    @mcp.tool()
+    async def turn_off_fan(entity_id: str) -> dict:
+        """Turn off a fan."""
+        return await call_service("fan", "turn_off", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def set_fan_percentage(entity_id: str, percentage: int) -> dict:
+        """Set fan speed percentage (0-100)."""
+        return await call_service("fan", "set_percentage", {"entity_id": entity_id, "percentage": min(100, max(0, percentage))})
+
+    # ============================================================================
+    # LOCK TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def lock_lock(entity_id: str) -> dict:
+        """Lock a lock."""
+        return await call_service("lock", "lock", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def unlock_lock(entity_id: str) -> dict:
+        """Unlock a lock."""
+        return await call_service("lock", "unlock", {"entity_id": entity_id})
+
+    # ============================================================================
+    # MEDIA PLAYER TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def media_play(entity_id: str) -> dict:
+        """Start/resume media playback."""
+        return await call_service("media_player", "media_play", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def media_pause(entity_id: str) -> dict:
+        """Pause media playback."""
+        return await call_service("media_player", "media_pause", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def media_stop(entity_id: str) -> dict:
+        """Stop media playback."""
+        return await call_service("media_player", "media_stop", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def media_next_track(entity_id: str) -> dict:
+        """Skip to next track."""
+        return await call_service("media_player", "media_next_track", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def media_previous_track(entity_id: str) -> dict:
+        """Go to previous track."""
+        return await call_service("media_player", "media_previous_track", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def set_media_volume(entity_id: str, volume_level: float) -> dict:
+        """Set volume level (0.0 to 1.0)."""
+        return await call_service("media_player", "volume_set", {"entity_id": entity_id, "volume_level": min(1.0, max(0.0, volume_level))})
+
+    @mcp.tool()
+    async def media_mute(entity_id: str, mute: bool = True) -> dict:
+        """Mute or unmute media player."""
+        return await call_service("media_player", "volume_mute", {"entity_id": entity_id, "is_volume_muted": mute})
+
+    # ============================================================================
+    # SCENE/SCRIPT/AUTOMATION TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def activate_scene(entity_id: str) -> dict:
+        """Activate a scene."""
+        return await call_service("scene", "turn_on", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def run_script(entity_id: str) -> dict:
+        """Run a script."""
+        return await call_service("script", "turn_on", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def trigger_automation(entity_id: str) -> dict:
+        """Manually trigger an automation."""
+        return await call_service("automation", "trigger", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def turn_on_automation(entity_id: str) -> dict:
+        """Enable an automation."""
+        return await call_service("automation", "turn_on", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def turn_off_automation(entity_id: str) -> dict:
+        """Disable an automation."""
+        return await call_service("automation", "turn_off", {"entity_id": entity_id})
+
+    # ============================================================================
+    # NOTIFICATION TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def send_notification(message: str, title: Optional[str] = None, target: str = "notify.notify") -> dict:
+        """Send a notification via Home Assistant. target: notify service entity (e.g., notify.mobile_app_phone)."""
+        data = {"message": message}
+        if title:
+            data["title"] = title
+        # Extract service name from target
+        service = target.replace("notify.", "") if target.startswith("notify.") else target
+        return await call_service("notify", service, data)
+
+    # ============================================================================
+    # VACUUM TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def start_vacuum(entity_id: str) -> dict:
+        """Start vacuum cleaning."""
+        return await call_service("vacuum", "start", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def stop_vacuum(entity_id: str) -> dict:
+        """Stop vacuum."""
+        return await call_service("vacuum", "stop", {"entity_id": entity_id})
+
+    @mcp.tool()
+    async def return_vacuum_to_base(entity_id: str) -> dict:
+        """Return vacuum to charging base."""
+        return await call_service("vacuum", "return_to_base", {"entity_id": entity_id})
 
     # ============================================================================
     # REST API (for langgraph context building)
     # ============================================================================
 
     async def rest_health(request: Request):
-        """Health check endpoint."""
-        return JSONResponse({"status": "healthy"})
+        """Health check endpoint with HA connectivity status."""
+        try:
+            result = await ha_request("GET", "")
+            ha_ok = not (isinstance(result, dict) and "error" in result)
+        except:
+            ha_ok = False
+
+        return JSONResponse({
+            "status": "healthy" if ha_ok else "degraded",
+            "home_assistant": "connected" if ha_ok else "unreachable"
+        })
 
     async def rest_api_entities(request: Request):
         """Get entities for langgraph context."""
         try:
-            domain = request.query_params.get("domain", "light")
-            states = await ha_request("GET", "states")
-            filtered = [{"entity_id": s["entity_id"], "state": s["state"], "name": s.get("attributes", {}).get("friendly_name", s["entity_id"])} for s in states if s["entity_id"].startswith(f"{domain}.")]
-            return JSONResponse({"status": "ok", "data": filtered, "count": len(filtered)})
+            domain = request.query_params.get("domain", "all")
+            entities = await list_entities(domain=domain)
+            return JSONResponse({"status": "ok", "data": entities, "count": len(entities)})
         except Exception as e:
             logger.error(f"REST api_entities error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_overview(request: Request):
+        """Get home overview for langgraph context."""
+        try:
+            overview = await get_home_overview()
+            return JSONResponse({"status": "ok", "data": overview})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_state(request: Request):
+        """Get entity state."""
+        try:
+            entity_id = request.query_params.get("entity_id", "")
+            if not entity_id:
+                return JSONResponse({"status": "error", "error": "Missing entity_id"}, status_code=400)
+            state = await get_entity_state(entity_id)
+            return JSONResponse({"status": "ok", "data": state})
+        except Exception as e:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
     # ============================================================================
@@ -118,10 +455,14 @@ data:
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting home-assistant MCP on port {port}")
+        logger.info(f"Home Assistant URL: {HA_URL}")
+        logger.info("Domains: light, switch, climate, cover, fan, lock, media_player, scene, script, automation, vacuum")
 
         rest_routes = [
             Route("/health", rest_health, methods=["GET"]),
             Route("/api/entities", rest_api_entities, methods=["GET"]),
+            Route("/api/overview", rest_api_overview, methods=["GET"]),
+            Route("/api/state", rest_api_state, methods=["GET"]),
         ]
 
         mcp_app = mcp.http_app()
