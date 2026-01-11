@@ -1,54 +1,86 @@
 {
   "mcpServers": {
     "infisical": {
-      "url": "http://10.30.0.20:31080",
-      "description": "Infisical secrets management MCP server (from monitoring cluster)"
+      "url": "http://10.20.0.40:31080",
+      "description": "Infisical secrets management - list/get secrets (read-only)"
     },
     "coroot": {
-      "url": "http://10.30.0.20:31081",
-      "description": "Coroot observability MCP server (from monitoring cluster)"
+      "url": "http://10.20.0.40:31081",
+      "description": "Coroot observability - metrics, anomalies, alerts, service health"
     },
-    "proxmox-ruapehu": {
-      "url": "http://10.30.0.20:31082",
-      "description": "Proxmox MCP for production host Ruapehu"
+    "proxmox": {
+      "url": "http://10.20.0.40:31082",
+      "description": "Proxmox VE - VMs, containers, storage, snapshots, tasks"
     },
-    "kubernetes-prod": {
-      "url": "http://10.30.0.20:31084",
-      "description": "Kubernetes MCP for production Talos cluster"
+    "infrastructure": {
+      "url": "http://10.20.0.40:31083",
+      "description": "Kubernetes/Talos - kubectl, talosctl, logs, deployments, pods"
     },
-    "kubernetes-monitoring": {
-      "url": "http://10.30.0.20:31085",
-      "description": "Kubernetes MCP for monitoring K3s cluster"
+    "knowledge": {
+      "url": "http://10.20.0.40:31084",
+      "description": "Qdrant knowledge base - search runbooks, docs, entities, decisions"
     },
-    "talos-prod": {
-      "url": "http://10.30.0.20:31086",
-      "description": "Talos MCP for production cluster management"
+    "opnsense": {
+      "url": "http://10.20.0.40:31085",
+      "description": "OPNsense firewall - DHCP, firewall rules, gateways, Unbound DNS"
     },
-    "web-search": {
-      "url": "http://web-search-mcp.ai-platform.svc.cluster.local:8000",
-      "description": "Web search using self-hosted SearXNG. Tools: web_search, get_page_content, search_news, search_images, search_and_fetch"
+    "adguard": {
+      "url": "http://10.20.0.40:31086",
+      "description": "AdGuard Home - DNS rewrites, filtering, query logs, stats"
     },
-    "browser-automation": {
-      "url": "http://browser-automation-mcp.ai-platform.svc.cluster.local:8000",
-      "description": "Browser automation using Playwright. Tools: navigate, screenshot, click, type_text, evaluate_js, fill_form, get_page_content"
+    "cloudflare": {
+      "url": "http://10.20.0.40:31087",
+      "description": "Cloudflare - DNS records, tunnels, zones, WAF rules"
     },
     "unifi": {
       "url": "http://10.20.0.40:31088",
-      "description": "UniFi network management. Tools: clients, devices, WLANs, events, networks, rogue APs, DPI, create/update/delete SSIDs, restart/locate devices, block/unblock/name clients, RF optimization"
+      "description": "UniFi Network - clients, devices, WLANs, RF optimization"
+    },
+    "truenas": {
+      "url": "http://10.20.0.40:31089",
+      "description": "TrueNAS - pools, datasets, shares, disk status, snapshots"
+    },
+    "home-assistant": {
+      "url": "http://10.20.0.40:31090",
+      "description": "Home Assistant - lights, climate, covers, locks, sensors, scenes"
+    },
+    "arr-suite": {
+      "url": "http://10.20.0.40:31091",
+      "description": "Arr Suite - Sonarr, Radarr, Prowlarr, Overseerr, media management"
+    },
+    "homepage": {
+      "url": "http://10.20.0.40:31092",
+      "description": "Homepage dashboard - service discovery, widgets"
+    },
+    "web-search": {
+      "url": "http://10.20.0.40:31093",
+      "description": "Web search via SearXNG - search, fetch pages, news"
+    },
+    "browser-automation": {
+      "url": "http://10.20.0.40:31094",
+      "description": "Browser automation via Playwright - navigate, screenshot, click, forms"
     }
   },
-  "comments": {
-    "note": "MCP servers from monitoring cluster (10.30.0.20) + agentic cluster (ai-platform namespace)",
-    "agentic_cluster_servers": [
-      "web-search: Aggregates Google/Bing/DuckDuckGo via SearXNG, fetches page content",
-      "browser-automation: Headless Chromium browser control for web app automation"
-    ],
-    "planned_additions": [
-      "kubernetes-agentic: For managing the agentic platform cluster itself",
-      "talos-agentic: For Talos management of the UM690L cluster",
-      "home-assistant: For smart home integrations",
-      "arr-suite: For media management (Sonarr, Radarr, etc.)",
-      "knowledge: For direct Qdrant vector DB access"
-    ]
+  "nodePortAllocation": {
+    "31080": "infisical-mcp",
+    "31081": "coroot-mcp",
+    "31082": "proxmox-mcp",
+    "31083": "infrastructure-mcp",
+    "31084": "knowledge-mcp",
+    "31085": "opnsense-mcp",
+    "31086": "adguard-mcp",
+    "31087": "cloudflare-mcp",
+    "31088": "unifi-mcp",
+    "31089": "truenas-mcp",
+    "31090": "home-assistant-mcp",
+    "31091": "arr-suite-mcp",
+    "31092": "homepage-mcp",
+    "31093": "web-search-mcp",
+    "31094": "browser-automation-mcp"
+  },
+  "cluster": {
+    "name": "agentic",
+    "nodeIP": "10.20.0.40",
+    "namespace": "ai-platform"
   }
 }

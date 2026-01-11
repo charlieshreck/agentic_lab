@@ -598,8 +598,10 @@ metadata:
   name: proxmox-mcp
   namespace: ai-platform
 spec:
+  type: NodePort
   selector:
     app: proxmox-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31082

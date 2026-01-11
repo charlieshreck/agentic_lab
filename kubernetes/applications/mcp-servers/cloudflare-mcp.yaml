@@ -506,8 +506,10 @@ metadata:
   name: cloudflare-mcp
   namespace: ai-platform
 spec:
+  type: NodePort
   selector:
     app: cloudflare-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31087

@@ -564,9 +564,11 @@ metadata:
     app: home-assistant-mcp
     component: mcp
 spec:
+  type: NodePort
   selector:
     app: home-assistant-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31090
       name: http

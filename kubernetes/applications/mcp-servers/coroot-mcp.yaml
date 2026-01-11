@@ -303,9 +303,11 @@ metadata:
     app: coroot-mcp
     component: mcp
 spec:
+  type: NodePort
   selector:
     app: coroot-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31081
       name: http

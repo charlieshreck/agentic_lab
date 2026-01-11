@@ -405,9 +405,11 @@ metadata:
     app: browser-automation-mcp
     component: mcp
 spec:
+  type: NodePort
   selector:
     app: browser-automation-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31094
       name: http

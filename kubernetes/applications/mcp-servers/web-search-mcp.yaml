@@ -316,9 +316,11 @@ metadata:
     app: web-search-mcp
     component: mcp
 spec:
+  type: NodePort
   selector:
     app: web-search-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31093
       name: http

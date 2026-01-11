@@ -304,8 +304,10 @@ metadata:
   name: adguard-mcp
   namespace: ai-platform
 spec:
+  type: NodePort
   selector:
     app: adguard-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31086

@@ -360,8 +360,10 @@ metadata:
   name: truenas-mcp
   namespace: ai-platform
 spec:
+  type: NodePort
   selector:
     app: truenas-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31089

@@ -884,9 +884,11 @@ metadata:
     app: arr-suite-mcp
     component: mcp
 spec:
+  type: NodePort
   selector:
     app: arr-suite-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31091
       name: http

@@ -730,9 +730,11 @@ metadata:
     app: infrastructure-mcp
     component: mcp
 spec:
+  type: NodePort
   selector:
     app: infrastructure-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31083
       name: http

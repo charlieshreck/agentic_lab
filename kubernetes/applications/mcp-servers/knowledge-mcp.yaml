@@ -680,9 +680,11 @@ metadata:
     app: knowledge-mcp
     component: mcp
 spec:
+  type: NodePort
   selector:
     app: knowledge-mcp
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 31084
       name: http
