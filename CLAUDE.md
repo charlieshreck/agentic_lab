@@ -64,6 +64,28 @@ This repository contains the infrastructure and application code for a **self-im
 
 **Usage**: MCP servers are configured in `.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
 
+**Access**: All MCP servers run in the agentic cluster (ai-platform namespace) with NodePort exposure on `10.20.0.40`:
+
+| Server | NodePort | Health Check |
+|--------|----------|--------------|
+| infisical-mcp | 31080 | `curl http://10.20.0.40:31080/health` |
+| coroot-mcp | 31081 | `curl http://10.20.0.40:31081/health` |
+| proxmox-mcp | 31082 | `curl http://10.20.0.40:31082/health` |
+| infrastructure-mcp | 31083 | `curl http://10.20.0.40:31083/health` |
+| knowledge-mcp | 31084 | `curl http://10.20.0.40:31084/health` |
+| opnsense-mcp | 31085 | `curl http://10.20.0.40:31085/health` |
+| adguard-mcp | 31086 | `curl http://10.20.0.40:31086/health` |
+| cloudflare-mcp | 31087 | `curl http://10.20.0.40:31087/health` |
+| unifi-mcp | 31088 | `curl http://10.20.0.40:31088/health` |
+| truenas-mcp | 31089 | `curl http://10.20.0.40:31089/health` |
+| home-assistant-mcp | 31090 | `curl http://10.20.0.40:31090/health` |
+| arr-suite-mcp | 31091 | `curl http://10.20.0.40:31091/health` |
+| homepage-mcp | 31092 | `curl http://10.20.0.40:31092/health` |
+| web-search-mcp | 31093 | `curl http://10.20.0.40:31093/health` |
+| browser-automation-mcp | 31094 | `curl http://10.20.0.40:31094/health` |
+
+**IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
+
 #### 3b. Network Entity Intelligence (via knowledge-mcp)
 
 The knowledge MCP includes **complete visibility into every device on the network**:
