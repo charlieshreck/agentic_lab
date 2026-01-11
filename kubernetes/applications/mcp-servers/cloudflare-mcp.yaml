@@ -88,7 +88,7 @@ data:
 
             lines = ["# Cloudflare DNS Zones", "", f"Found {len(zones)} zone(s)", ""]
             for z in zones:
-                status = "🟢 Active" if z.get("status") == "active" else f"⚠️ {z.get('status')}"
+                status = "[OK] Active" if z.get("status") == "active" else f"[!] {z.get('status')}"
                 lines.append(f"## {z.get('name')} ({status})")
                 lines.append(f"- **ID**: `{z.get('id')}`")
                 lines.append(f"- **Plan**: {z.get('plan', {}).get('name', 'Unknown')}")
@@ -132,7 +132,7 @@ data:
 
             lines = ["# Cloudflare Tunnels", "", f"Found {len(tunnels)} tunnel(s)", ""]
             for t in tunnels:
-                status = "🟢" if t.get("status") == "healthy" else "🔴"
+                status = "[OK]" if t.get("status") == "healthy" else "[ERR]"
                 conns = len(t.get("connections", []))
                 lines.append(f"## {t.get('name')} {status}")
                 lines.append(f"- **ID**: `{t.get('id')}`")
@@ -247,7 +247,7 @@ data:
             result = await _cf_api(f"/zones/{params.zone_id}/dns_records", "POST", data)
             record = result.get("result", {})
 
-            return f"""# DNS Record Created ✅
+            return f"""# DNS Record Created
 
 - **Type**: {record.get('type')}
 - **Name**: {record.get('name')}
@@ -282,7 +282,7 @@ Record is now active."""
             result = await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}", "PUT", data)
             updated = result.get("result", {})
 
-            return f"""# DNS Record Updated ✅
+            return f"""# DNS Record Updated
 
 - **Type**: {updated.get('type')}
 - **Name**: {updated.get('name')}
@@ -303,7 +303,7 @@ Record is now active."""
                 # Get record info for preview
                 current = await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}")
                 record = current.get("result", {})
-                return f"""# ⚠️ DNS Record Deletion Warning
+                return f"""# WARNING: DNS Record Deletion
 
 **This is a DESTRUCTIVE operation. Set confirmation=true to proceed.**
 
@@ -319,7 +319,7 @@ To delete this record, call again with `confirmation=true`"""
 
         try:
             await _cf_api(f"/zones/{params.zone_id}/dns_records/{params.record_id}", "DELETE")
-            return f"# DNS Record Deleted ✅\n\n- **ID**: `{params.record_id}`\n\nThe record has been removed."
+            return f"# DNS Record Deleted\n\n- **ID**: `{params.record_id}`\n\nThe record has been removed."
         except Exception as e:
             return _handle_error(e)
 
@@ -343,7 +343,7 @@ To delete this record, call again with `confirmation=true`"""
         """Purge Cloudflare cache. Requires confirmation=true."""
         if not params.confirmation:
             action = "EVERYTHING" if params.purge_everything else f"{len(params.files or [])} files"
-            return f"""# ⚠️ Cache Purge Warning
+            return f"""# WARNING: Cache Purge
 
 **Set confirmation=true to proceed.**
 
@@ -365,7 +365,7 @@ To purge, call again with `confirmation=true`"""
                 return "Error: Specify purge_everything, files, or tags"
 
             await _cf_api(f"/zones/{params.zone_id}/purge_cache", "POST", data)
-            return "# Cache Purged ✅\n\nCache has been purged. Changes may take a few seconds to propagate."
+            return "# Cache Purged\n\nCache has been purged. Changes may take a few seconds to propagate."
         except Exception as e:
             return _handle_error(e)
 

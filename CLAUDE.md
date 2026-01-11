@@ -125,7 +125,7 @@ Related Networks:
 
 1. Terraform provisions Talos VM on Proxmox (or bare metal)
 2. Talos cluster bootstrapped via talosctl
-3. ArgoCD deployed for GitOps workflow
+3. ArgoCD Applications created in prod cluster (ArgoCD manages agentic remotely)
 4. Infisical deployed for secrets management
 5. Storage provisioner configured
 
@@ -168,13 +168,13 @@ kubectl get nodes
 
 ### ArgoCD Operations
 
-ArgoCD runs in the agentic cluster. Use kubectl to interact:
+**IMPORTANT**: ArgoCD runs ONLY in the **prod cluster** (10.10.0.0/24) and manages all three clusters remotely via app-of-apps pattern. The agentic cluster has NO local ArgoCD.
 
 ```bash
-# Set kubeconfig for agentic cluster
-export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/generated/kubeconfig
+# Set kubeconfig for PROD cluster (where ArgoCD lives)
+export KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig
 
-# List all ArgoCD applications
+# List all ArgoCD applications (includes agentic cluster apps)
 kubectl get applications -n argocd
 
 # Get application status
@@ -192,6 +192,37 @@ kubectl describe application <app-name> -n argocd
 # Check ArgoCD server logs
 kubectl logs -n argocd -l app.kubernetes.io/name=argocd-server --tail=50
 ```
+
+### Deploying to Agentic Cluster
+
+1. Create manifests in `/home/agentic_lab/kubernetes/applications/<app>/`
+2. Create ArgoCD Application in `/home/agentic_lab/kubernetes/argocd-apps/<app>.yaml`:
+   ```yaml
+   apiVersion: argoproj.io/v1alpha1
+   kind: Application
+   metadata:
+     name: <app>
+     namespace: argocd
+   spec:
+     project: default
+     source:
+       repoURL: https://github.com/charlieshreck/agentic_lab.git
+       targetRevision: main
+       path: kubernetes/applications/<app>
+     destination:
+       server: https://10.20.0.40:6443  # Agentic cluster API
+       namespace: ai-platform
+     syncPolicy:
+       automated:
+         prune: true
+         selfHeal: true
+   ```
+3. Commit and push to git
+4. Apply ArgoCD Application to **PROD cluster**:
+   ```bash
+   KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig \
+     kubectl apply -f /home/agentic_lab/kubernetes/argocd-apps/<app>.yaml
+   ```
 
 ### Common Operations
 
@@ -224,7 +255,7 @@ agentic_lab/
 │   ├── ansible/            # Post-Talos configuration (future)
 │   └── scripts/            # Utility scripts
 ├── kubernetes/             # K8s manifests (GitOps)
-│   ├── bootstrap/          # ArgoCD installation
+│   ├── argocd-apps/        # ArgoCD Application manifests (applied to prod cluster)
 │   ├── platform/           # Core services (cert-manager, infisical, storage)
 │   └── applications/       # AI workloads (matrix, qdrant, langgraph, etc.)
 ├── mcp-servers/            # Custom MCP server implementations
@@ -288,7 +319,7 @@ agentic_lab/
    kubectl get nodes
    ```
 
-5. **Deploy ArgoCD** (see `kubernetes/bootstrap/README.md`)
+5. **Create ArgoCD Applications** in prod cluster (see `kubernetes/argocd-apps/README.md`)
 
 ---
 

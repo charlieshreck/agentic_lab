@@ -9,13 +9,22 @@ This repository uses GitOps principles. ALL infrastructure changes MUST be:
 2. Committed to git
 3. Deployed via automation (Terraform, ArgoCD)
 
+## ArgoCD Architecture (CRITICAL)
+
+**ArgoCD runs ONLY in the prod cluster (10.10.0.0/24)** and manages all three clusters remotely:
+- prod (10.10.0.0/24) - local deployments
+- agentic (10.20.0.0/24) - remote deployments via cluster destination
+- monit (10.30.0.0/24) - remote deployments via cluster destination
+
+The agentic cluster has **NO local ArgoCD**. All deployments are managed remotely from prod.
+
 ## Deployment Methods by Component
 
 | Component | Tool | Workflow |
 |-----------|------|----------|
 | **Talos VM** | Terraform | `terraform plan` → `terraform apply` |
 | **Talos Configuration** | Talosctl + Git | Update .tf → commit → apply → talosctl apply-config |
-| **Kubernetes Resources** | ArgoCD | Commit to git → ArgoCD auto-sync |
+| **Kubernetes Resources** | ArgoCD (in prod) | Commit to git → ArgoCD auto-sync from prod cluster |
 | **Secrets** | Infisical | Add to Infisical UI → InfisicalSecret CR in K8s |
 
 ## The ONLY Correct Workflow
@@ -81,12 +90,58 @@ git add .
 git commit -m "Description of change"
 git push
 
-# 3. ArgoCD automatically syncs within 3 minutes
-# OR force sync:
-argocd app sync litellm
+# 3. ArgoCD (in PROD cluster) automatically syncs within 3 minutes
+# OR force sync from prod cluster:
+KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig \
+  kubectl patch application litellm -n argocd --type merge \
+  -p '{"operation": {"initiatedBy": {"username": "claude"}, "sync": {"prune": true}}}'
 
-# 4. Verify
-kubectl get pods -n ai-platform
+# 4. Verify (in agentic cluster)
+KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/generated/kubeconfig \
+  kubectl get pods -n ai-platform
+```
+
+### Creating New ArgoCD Applications for Agentic Cluster
+
+For new applications, you must create an ArgoCD Application manifest:
+
+```bash
+# 1. Create the application manifests
+mkdir -p kubernetes/applications/my-app
+vim kubernetes/applications/my-app/deployment.yaml
+
+# 2. Create ArgoCD Application (points to agentic cluster)
+cat > kubernetes/argocd-apps/my-app.yaml << 'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/applications/my-app
+  destination:
+    server: https://10.20.0.40:6443  # Agentic cluster
+    namespace: ai-platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+EOF
+
+# 3. Commit and push
+git add .
+git commit -m "Add my-app to agentic cluster"
+git push
+
+# 4. Apply ArgoCD Application to PROD cluster (one-time)
+KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig \
+  kubectl apply -f kubernetes/argocd-apps/my-app.yaml
+
+# 5. ArgoCD now manages the app automatically
 ```
 
 ### For Secrets
@@ -318,11 +373,12 @@ When working with Claude Code (or any AI assistant):
    - ArgoCD syncs every 3 minutes automatically
    - Use `argocd app sync <app>` for immediate sync
 
-4. **If ArgoCD is not yet deployed:**
-   - Still commit to git first
-   - Then use `kubectl apply -f <file>` as temporary measure
-   - Note: This is only acceptable during bootstrap phase
+4. **If ArgoCD Application doesn't exist yet:**
+   - Still commit manifests to git first
+   - Create ArgoCD Application manifest in `kubernetes/argocd-apps/`
+   - Apply the ArgoCD Application to **prod cluster** (one-time bootstrap)
+   - ArgoCD then manages it automatically going forward
 
-**The workflow is: Edit → Commit → Push → Sync → Verify**
+**The workflow is: Edit → Commit → Push → (Create ArgoCD App if new) → Sync → Verify**
 
 Never skip the commit step, even if you're debugging or iterating quickly.

@@ -55,12 +55,15 @@ terraform destroy
 
 ## Phase 2: Core Services (Week 1-2)
 
-**Goal**: Deploy foundational platform services via ArgoCD
+**Goal**: Deploy foundational platform services via ArgoCD (managed from prod cluster)
+
+**Note**: ArgoCD runs ONLY in the prod cluster (10.10.0.0/24) and manages agentic cluster remotely.
 
 ### Tasks
 
-- [ ] Bootstrap ArgoCD (`kubectl apply -k kubernetes/bootstrap/`)
-- [ ] Access ArgoCD UI and verify
+- [ ] Register agentic cluster in ArgoCD (prod cluster)
+- [ ] Create ArgoCD Application manifests in `kubernetes/argocd-apps/`
+- [ ] Apply ArgoCD Applications to prod cluster
 - [ ] Deploy Infisical Operator for secrets management
 - [ ] Create Infisical universal auth credentials
 - [ ] Deploy cert-manager for certificate automation
@@ -70,16 +73,17 @@ terraform destroy
 ### Success Criteria
 
 ```bash
-# ArgoCD accessible and healthy
-kubectl -n argocd get applications
-# All platform apps synced
+# Check ArgoCD applications in PROD cluster
+KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig \
+  kubectl get applications -n argocd | grep agentic
+# All agentic apps synced
 
-# Infisical operator running
-kubectl -n infisical-operator-system get pods
+# Infisical operator running (check in agentic cluster)
+KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/generated/kubeconfig \
+  kubectl -n infisical-operator-system get pods
 
 # Test secret sync
-kubectl apply -f test-infisical-secret.yaml
-kubectl get secret test-secret  # Should exist
+kubectl get secret test-secret -n ai-platform  # Should exist
 
 # cert-manager issuing certificates
 kubectl get certificaterequests -A
@@ -91,7 +95,7 @@ kubectl get certificaterequests -A
 # ArgoCD manages everything, rollback via git:
 git revert <commit-hash>
 git push
-# ArgoCD auto-syncs the revert
+# ArgoCD (in prod) auto-syncs the revert to agentic cluster
 ```
 
 ---
@@ -443,7 +447,7 @@ Review automation decisions, success rates, and adjust policies:
 ### Phase 1-2 (Infrastructure)
 
 - ✅ Cluster provisioned and accessible
-- ✅ ArgoCD deploying applications
+- ✅ ArgoCD (from prod) deploying applications to agentic
 - ✅ Secrets management working
 
 ### Phase 3-5 (AI Platform)
