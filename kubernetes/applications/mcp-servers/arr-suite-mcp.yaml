@@ -85,10 +85,19 @@ data:
 
     async def arr_request(base_url: str, api_key: str, endpoint: str,
                           method: str = "GET", data: dict = None) -> dict:
-        """Make request to *arr API (Sonarr, Radarr, Prowlarr)."""
+        """Make request to *arr API (Sonarr, Radarr) using v3 API."""
         async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             headers = {"X-Api-Key": api_key}
             url = f"{base_url}/api/v3/{endpoint}"
+            response = await client.request(method, url, headers=headers, json=data)
+            response.raise_for_status()
+            return response.json() if response.content else {}
+
+    async def prowlarr_request(endpoint: str, method: str = "GET", data: dict = None) -> dict:
+        """Make request to Prowlarr API (uses v1, not v3)."""
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            headers = {"X-Api-Key": PROWLARR_API_KEY}
+            url = f"{PROWLARR_URL}/api/v1/{endpoint}"
             response = await client.request(method, url, headers=headers, json=data)
             response.raise_for_status()
             return response.json() if response.content else {}
@@ -320,7 +329,7 @@ data:
     async def prowlarr_list_indexers() -> List[dict]:
         """List all configured indexers and their status."""
         try:
-            indexers = await arr_request(PROWLARR_URL, PROWLARR_API_KEY, "indexer")
+            indexers = await prowlarr_request("indexer")
             return [{
                 "id": idx["id"],
                 "name": idx["name"],
@@ -336,7 +345,7 @@ data:
     async def prowlarr_get_health() -> List[dict]:
         """Get Prowlarr health/status checks."""
         try:
-            health = await arr_request(PROWLARR_URL, PROWLARR_API_KEY, "health")
+            health = await prowlarr_request("health")
             return [{"source": h.get("source"), "type": h.get("type"),
                      "message": h.get("message")} for h in health]
         except Exception as e:
@@ -346,7 +355,7 @@ data:
     async def prowlarr_test_indexer(indexer_id: int) -> dict:
         """Test an indexer connection."""
         try:
-            await arr_request(PROWLARR_URL, PROWLARR_API_KEY, f"indexer/{indexer_id}/test", "POST")
+            await prowlarr_request(f"indexer/{indexer_id}/test", "POST")
             return {"success": True, "message": f"Indexer {indexer_id} test passed"}
         except Exception as e:
             return {"error": str(e)}
@@ -358,7 +367,7 @@ data:
             params = f"query={query}"
             if indexer_ids:
                 params += "&" + "&".join([f"indexerIds={i}" for i in indexer_ids])
-            results = await arr_request(PROWLARR_URL, PROWLARR_API_KEY, f"search?{params}")
+            results = await prowlarr_request(f"search?{params}")
             return [{
                 "title": r.get("title"),
                 "indexer": r.get("indexer"),
@@ -666,10 +675,10 @@ data:
         """Internal implementation for system status (callable by both MCP tool and REST API)."""
         status = {}
 
+        # Sonarr and Radarr use v3 API
         services = [
             ("sonarr", SONARR_URL, SONARR_API_KEY, "system/status"),
             ("radarr", RADARR_URL, RADARR_API_KEY, "system/status"),
-            ("prowlarr", PROWLARR_URL, PROWLARR_API_KEY, "system/status"),
         ]
 
         for name, url, key, endpoint in services:
@@ -678,6 +687,13 @@ data:
                 status[name] = {"version": info.get("version"), "status": "online"}
             except Exception as e:
                 status[name] = {"status": "offline", "error": str(e)[:50]}
+
+        # Prowlarr uses v1 API
+        try:
+            info = await prowlarr_request("system/status")
+            status["prowlarr"] = {"version": info.get("version"), "status": "online"}
+        except Exception as e:
+            status["prowlarr"] = {"status": "offline", "error": str(e)[:50]}
 
         # Overseerr
         try:
