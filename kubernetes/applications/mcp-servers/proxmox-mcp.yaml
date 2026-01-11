@@ -53,7 +53,8 @@ data:
     # Shared utilities
     async def _proxmox_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
         """Make authenticated request to Proxmox API."""
-        headers = {"Authorization": f"PVEAPIToken={PROXMOX_USER}!{PROXMOX_TOKEN_ID}={PROXMOX_TOKEN_SECRET}"}
+        # TOKEN_ID format is already USER@REALM!TOKENNAME, so don't prepend PROXMOX_USER
+        headers = {"Authorization": f"PVEAPIToken={PROXMOX_TOKEN_ID}={PROXMOX_TOKEN_SECRET}"}
         url = f"{PROXMOX_HOST}/api2/json{endpoint}"
         async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
             if method == "GET":
