@@ -181,11 +181,16 @@ def main():
         # Route("/api/example", rest_api_example, methods=["GET"]),
     ]
 
-    # Mount MCP protocol at /mcp
+    # Get MCP app with HTTP transport
     mcp_app = mcp.http_app()
 
     # Combine REST routes + MCP into single Starlette app
-    app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+    # IMPORTANT: Mount at "/" so FastMCP's /mcp endpoint is accessible
+    # IMPORTANT: Pass lifespan to initialize FastMCP's task group
+    app = Starlette(
+        routes=rest_routes + [Mount("/", app=mcp_app)],
+        lifespan=mcp_app.lifespan
+    )
 
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=port)

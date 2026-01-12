@@ -159,10 +159,21 @@ After deploying MCP server, add to .mcp.json:
 ```json
 {
   "<name>": {
-    "url": "http://10.20.0.40:31xxx",
+    "url": "http://10.20.0.40:31xxx/mcp",
     "description": "Description of MCP server"
   }
 }
+```
+
+**IMPORTANT**: URLs must include `/mcp` path. FastMCP 2.x serves the protocol at this endpoint.
+
+### FastMCP Starlette Pattern (REQUIRED)
+```python
+mcp_app = mcp.http_app()
+app = Starlette(
+    routes=rest_routes + [Mount("/", app=mcp_app)],
+    lifespan=mcp_app.lifespan  # REQUIRED for FastMCP 2.x
+)
 ```
 
 ## Current MCP Servers

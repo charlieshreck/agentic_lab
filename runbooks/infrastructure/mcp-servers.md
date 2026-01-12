@@ -41,6 +41,8 @@ Claude Code / Agents
 | homepage-mcp | 31092 | Service discovery |
 | web-search-mcp | 31093 | SearXNG web search |
 | browser-automation-mcp | 31094 | Playwright browser automation |
+| plex-mcp | 31096 | Plex Media Server (31095 reserved) |
+| vikunja-mcp | 31097 | Vikunja task management |
 
 ## Health Checks
 
@@ -60,12 +62,14 @@ MCP servers are configured in `.mcp.json`:
 {
   "mcpServers": {
     "proxmox": {
-      "url": "http://10.20.0.40:31082",
+      "url": "http://10.20.0.40:31082/mcp",
       "description": "Proxmox VE - VMs, containers, storage"
     }
   }
 }
 ```
+
+**IMPORTANT**: All MCP URLs must include the `/mcp` path suffix. FastMCP 2.x serves the MCP protocol at the `/mcp` endpoint.
 
 ## Troubleshooting
 

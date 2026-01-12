@@ -83,6 +83,8 @@ This repository contains the infrastructure and application code for a **self-im
 | homepage-mcp | 31092 | `curl http://10.20.0.40:31092/health` |
 | web-search-mcp | 31093 | `curl http://10.20.0.40:31093/health` |
 | browser-automation-mcp | 31094 | `curl http://10.20.0.40:31094/health` |
+| plex-mcp | 31096 | `curl http://10.20.0.40:31096/health` |
+| vikunja-mcp | 31097 | `curl http://10.20.0.40:31097/health` |
 
 **IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
 
