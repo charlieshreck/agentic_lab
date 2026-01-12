@@ -69,9 +69,8 @@ data:
     # READ-ONLY TOOLS
     # ============================================================================
 
-    @mcp.tool()
-    async def get_server_status() -> dict:
-        """Get Plex server identity, version, and claim status."""
+    async def _get_server_status() -> dict:
+        """Internal: Get Plex server identity, version, and claim status."""
         try:
             data = await plex_request("/identity")
             if "error" in data:
@@ -85,6 +84,11 @@ data:
             }
         except Exception as e:
             return {"error": str(e)}
+
+    @mcp.tool()
+    async def get_server_status() -> dict:
+        """Get Plex server identity, version, and claim status."""
+        return await _get_server_status()
 
     @mcp.tool()
     async def list_libraries() -> list:
@@ -121,9 +125,8 @@ data:
         except Exception as e:
             return {"error": str(e)}
 
-    @mcp.tool()
-    async def get_active_sessions() -> list:
-        """Get currently active playback sessions."""
+    async def _get_active_sessions() -> list:
+        """Internal: Get currently active playback sessions."""
         try:
             data = await plex_request("/status/sessions")
             if "error" in data:
@@ -143,6 +146,11 @@ data:
             } for s in sessions]
         except Exception as e:
             return [{"error": str(e)}]
+
+    @mcp.tool()
+    async def get_active_sessions() -> list:
+        """Get currently active playback sessions."""
+        return await _get_active_sessions()
 
     @mcp.tool()
     async def get_transcode_sessions() -> list:
@@ -224,9 +232,8 @@ data:
     # GPU MONITORING (via SSH)
     # ============================================================================
 
-    @mcp.tool()
-    async def get_gpu_status() -> dict:
-        """Get GPU status from Plex VM via nvidia-smi."""
+    async def _get_gpu_status() -> dict:
+        """Internal: Get GPU status from Plex VM via nvidia-smi."""
         try:
             result = subprocess.run(
                 ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
@@ -251,6 +258,11 @@ data:
             return {"error": "SSH timeout connecting to Plex VM"}
         except Exception as e:
             return {"error": str(e)}
+
+    @mcp.tool()
+    async def get_gpu_status() -> dict:
+        """Get GPU status from Plex VM via nvidia-smi."""
+        return await _get_gpu_status()
 
     @mcp.tool()
     async def get_gpu_processes() -> list:
@@ -339,7 +351,7 @@ data:
     async def rest_api_status(request: Request):
         """Get server status for LangGraph context."""
         try:
-            status = await get_server_status()
+            status = await _get_server_status()
             return JSONResponse({"status": "ok", "data": status})
         except Exception as e:
             logger.error(f"REST api_status error: {e}")
@@ -348,7 +360,7 @@ data:
     async def rest_api_sessions(request: Request):
         """Get active sessions for LangGraph context."""
         try:
-            sessions = await get_active_sessions()
+            sessions = await _get_active_sessions()
             return JSONResponse({"status": "ok", "data": sessions, "count": len(sessions)})
         except Exception as e:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
@@ -356,7 +368,7 @@ data:
     async def rest_api_gpu(request: Request):
         """Get GPU status for LangGraph context."""
         try:
-            gpu = await get_gpu_status()
+            gpu = await _get_gpu_status()
             return JSONResponse({"status": "ok", "data": gpu})
         except Exception as e:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
