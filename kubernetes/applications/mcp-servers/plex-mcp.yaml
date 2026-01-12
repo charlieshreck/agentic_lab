@@ -506,9 +506,9 @@ spec:
         secretName: universal-auth-credentials
         secretNamespace: infisical-operator-system
       secretsScope:
-        projectSlug: agentic-platform-z-nbs
+        projectSlug: prod-homelab-y-nij
         envSlug: prod
-        secretsPath: /plex
+        secretsPath: /agentic-platform/plex
   managedSecretReference:
     secretName: plex-mcp-ssh
     secretNamespace: ai-platform
