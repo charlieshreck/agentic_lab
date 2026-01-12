@@ -379,7 +379,11 @@ data:
 
         mcp_app = mcp.http_app()
         # Mount MCP at root so Claude Code can find /sse and /message endpoints
-        app = Starlette(routes=rest_routes + [Mount("/", app=mcp_app)])
+        # Pass lifespan to initialize FastMCP's task group
+        app = Starlette(
+            routes=rest_routes + [Mount("/", app=mcp_app)],
+            lifespan=mcp_app.lifespan
+        )
         uvicorn.run(app, host="0.0.0.0", port=port)
 
     if __name__ == "__main__":
