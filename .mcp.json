@@ -61,7 +61,7 @@
       "description": "Browser automation via Playwright - navigate, screenshot, click, forms"
     },
     "plex": {
-      "url": "http://10.20.0.40:31096",
+      "url": "http://10.20.0.40:31096/mcp",
       "description": "Plex Media Server - libraries, sessions, transcoding, GPU status"
     }
   },
