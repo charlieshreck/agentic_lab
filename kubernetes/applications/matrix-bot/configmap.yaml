@@ -103,13 +103,19 @@ data:
                 logger.info(f"=== MESSAGE RECEIVED from {event.sender} ===")
                 logger.info(f"Body: {event.body}")
 
+                # Debug: log full event source to understand structure
+                content = event.source.get("content", {})
+                logger.info(f"Content keys: {list(content.keys())}")
+                if "m.relates_to" in content:
+                    logger.info(f"m.relates_to: {content.get('m.relates_to')}")
+
                 # Ignore our own messages
                 if event.sender == self.client.user_id:
                     logger.info("Ignoring own message")
                     return
 
                 # Check if this is a reply to another message (user clicked "reply")
-                relates_to = event.source.get("content", {}).get("m.relates_to", {})
+                relates_to = content.get("m.relates_to", {})
                 reply_to = relates_to.get("m.in_reply_to", {}).get("event_id")
 
                 if reply_to:
