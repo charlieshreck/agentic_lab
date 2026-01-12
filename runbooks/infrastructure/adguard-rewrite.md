@@ -137,11 +137,50 @@ Tool: list_dns_rewrites
 - No AdGuard rewrite needed for prod apps
 - AdGuard rewrites override for specific internal services
 
+## Direct API Access
+
+When adguard-mcp is unavailable or for automation scripts, use the AdGuard API directly.
+
+### Credentials
+```bash
+# Get from Infisical
+ADGUARD_USER=$(/root/.config/infisical/secrets.sh get /infrastructure/adguard username)
+ADGUARD_PASS=$(/root/.config/infisical/secrets.sh get /infrastructure/adguard password)
+```
+
+### List Rewrites
+```bash
+curl -s -u "${ADGUARD_USER}:${ADGUARD_PASS}" \
+  "http://10.10.0.1:3000/control/rewrite/list" | jq '.'
+```
+
+### Add Rewrite
+```bash
+curl -s -X POST "http://10.10.0.1:3000/control/rewrite/add" \
+  -u "${ADGUARD_USER}:${ADGUARD_PASS}" \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"app.kernow.io","answer":"10.10.0.1"}'
+```
+
+### Delete Rewrite
+```bash
+curl -s -X POST "http://10.10.0.1:3000/control/rewrite/delete" \
+  -u "${ADGUARD_USER}:${ADGUARD_PASS}" \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"app.kernow.io","answer":"10.10.0.1"}'
+```
+
+### Via adguard-mcp REST API
+```bash
+# List rewrites (no auth needed - MCP handles it)
+curl -s http://10.20.0.40:31086/api/rewrites | jq '.'
+```
+
 ## Automation Considerations
 
 When deploying new internal services:
 1. Add rewrite via adguard-mcp (preferred)
-2. Or use AdGuard API directly
+2. Or use AdGuard API directly (see above)
 3. Document the rewrite in service deployment notes
 
 ## Security Notes
