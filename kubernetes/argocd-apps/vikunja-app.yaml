@@ -7,19 +7,10 @@ metadata:
     argocd.argoproj.io/sync-wave: "5"
 spec:
   project: default
-  sources:
-    # Helm chart for Vikunja
-    - repoURL: ghcr.io/go-vikunja/helm-chart
-      chart: vikunja
-      targetRevision: 0.2.6
-      helm:
-        valueFiles:
-          - $values/kubernetes/applications/vikunja/values.yaml
-    # Values and additional manifests from git
-    - repoURL: https://github.com/charlieshreck/agentic_lab.git
-      targetRevision: main
-      ref: values
-      path: kubernetes/applications/vikunja
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/applications/vikunja
   destination:
     server: https://10.20.0.40:6443
     namespace: vikunja

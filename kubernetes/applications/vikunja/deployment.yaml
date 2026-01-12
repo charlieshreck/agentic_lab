@@ -1,0 +1,107 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vikunja
+  namespace: vikunja
+  labels:
+    app: vikunja
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vikunja
+  template:
+    metadata:
+      labels:
+        app: vikunja
+    spec:
+      containers:
+        - name: vikunja
+          image: vikunja/vikunja:0.24.6
+          ports:
+            - containerPort: 3456
+              name: http
+          env:
+            - name: VIKUNJA_SERVICE_FRONTENDURL
+              value: "https://vikunja.kernow.io"
+            - name: VIKUNJA_SERVICE_ENABLEREGISTRATION
+              value: "true"
+            - name: VIKUNJA_DATABASE_TYPE
+              value: "sqlite"
+            - name: VIKUNJA_DATABASE_PATH
+              value: "/db/vikunja.db"
+            - name: VIKUNJA_FILES_BASEPATH
+              value: "/files"
+          volumeMounts:
+            - name: db
+              mountPath: /db
+            - name: files
+              mountPath: /files
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3456
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3456
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: db
+          persistentVolumeClaim:
+            claimName: vikunja-db
+        - name: files
+          persistentVolumeClaim:
+            claimName: vikunja-files
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vikunja-db
+  namespace: vikunja
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vikunja-files
+  namespace: vikunja
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vikunja
+  namespace: vikunja
+spec:
+  type: NodePort
+  selector:
+    app: vikunja
+  ports:
+    - port: 8080
+      targetPort: 3456
+      nodePort: 31095
+      name: http
