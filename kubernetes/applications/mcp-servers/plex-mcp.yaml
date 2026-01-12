@@ -378,7 +378,8 @@ data:
         ]
 
         mcp_app = mcp.http_app()
-        app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+        # Mount MCP at root so Claude Code can find /sse and /message endpoints
+        app = Starlette(routes=rest_routes + [Mount("/", app=mcp_app)])
         uvicorn.run(app, host="0.0.0.0", port=port)
 
     if __name__ == "__main__":
@@ -484,5 +485,5 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 31095
+      nodePort: 31096
       name: http

@@ -61,7 +61,7 @@
       "description": "Browser automation via Playwright - navigate, screenshot, click, forms"
     },
     "plex": {
-      "url": "http://10.20.0.40:31095",
+      "url": "http://10.20.0.40:31096",
       "description": "Plex Media Server - libraries, sessions, transcoding, GPU status"
     }
   },
@@ -81,7 +81,8 @@
     "31092": "homepage-mcp",
     "31093": "web-search-mcp",
     "31094": "browser-automation-mcp",
-    "31095": "plex-mcp"
+    "31095": "vikunja (conflict)",
+    "31096": "plex-mcp"
   },
   "cluster": {
     "name": "agentic",
