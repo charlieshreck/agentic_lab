@@ -249,7 +249,7 @@ data:
         ]
         mcp_app = mcp.http_app()
         app = Starlette(
-            routes=rest_routes + [Mount("/mcp", app=mcp_app)],
+            routes=rest_routes + [Mount("/", app=mcp_app)],
             lifespan=mcp_app.lifespan
         )
         uvicorn.run(app, host="0.0.0.0", port=8000)
