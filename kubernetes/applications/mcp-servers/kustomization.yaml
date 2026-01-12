@@ -26,3 +26,5 @@ resources:
   - browser-automation-mcp.yaml
   # Task management
   - vikunja-mcp.yaml
+  # Media management
+  - plex-mcp.yaml

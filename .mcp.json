@@ -59,6 +59,10 @@
     "browser-automation": {
       "url": "http://10.20.0.40:31094",
       "description": "Browser automation via Playwright - navigate, screenshot, click, forms"
+    },
+    "plex": {
+      "url": "http://10.20.0.40:31095",
+      "description": "Plex Media Server - libraries, sessions, transcoding, GPU status"
     }
   },
   "nodePortAllocation": {
@@ -76,7 +80,8 @@
     "31091": "arr-suite-mcp",
     "31092": "homepage-mcp",
     "31093": "web-search-mcp",
-    "31094": "browser-automation-mcp"
+    "31094": "browser-automation-mcp",
+    "31095": "plex-mcp"
   },
   "cluster": {
     "name": "agentic",
