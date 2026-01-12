@@ -1,0 +1,48 @@
+# Vikunja Helm Values
+# Chart: oci://ghcr.io/go-vikunja/helm-chart/vikunja
+
+vikunja:
+  config:
+    service:
+      frontendurl: https://vikunja.kernow.io
+      enableregistration: false
+    cors:
+      enable: true
+      origins:
+        - "*"
+    api:
+      enabled: true
+
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: local-path
+
+postgresql:
+  enabled: true
+  auth:
+    database: vikunja
+    username: vikunja
+    existingSecret: vikunja-secrets
+    secretKeys:
+      adminPasswordKey: POSTGRES_PASSWORD
+      userPasswordKey: POSTGRES_PASSWORD
+  primary:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: local-path
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+
+service:
+  type: NodePort
+  port: 8080
+  nodePort: 31095
+
+ingress:
+  enabled: false

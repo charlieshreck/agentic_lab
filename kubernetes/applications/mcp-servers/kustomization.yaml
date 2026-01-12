@@ -24,3 +24,5 @@ resources:
   - searxng.yaml
   - web-search-mcp.yaml
   - browser-automation-mcp.yaml
+  # Task management
+  - vikunja-mcp.yaml
