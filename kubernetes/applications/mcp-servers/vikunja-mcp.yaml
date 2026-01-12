@@ -65,7 +65,7 @@ data:
     @mcp.tool()
     async def create_project(title: str, description: str = "") -> dict:
         """Create a new project/list."""
-        return await vikunja_api("/projects", "POST", {
+        return await vikunja_api("/projects", "PUT", {
             "title": title,
             "description": description
         })
@@ -100,7 +100,7 @@ data:
         }
         if bucket_id:
             data["bucket_id"] = bucket_id
-        return await vikunja_api(f"/projects/{project_id}/tasks", "POST", data)
+        return await vikunja_api(f"/projects/{project_id}/tasks", "PUT", data)
 
     @mcp.tool()
     async def update_task(
@@ -142,7 +142,7 @@ data:
     @mcp.tool()
     async def create_bucket(project_id: int, title: str) -> dict:
         """Create a new kanban bucket/column."""
-        return await vikunja_api(f"/projects/{project_id}/buckets", "POST", {
+        return await vikunja_api(f"/projects/{project_id}/buckets", "PUT", {
             "title": title
         })
 
@@ -166,13 +166,13 @@ data:
         ideas_project = next((p for p in projects if p["title"] == project_name), None)
 
         if not ideas_project:
-            ideas_project = await vikunja_api("/projects", "POST", {
+            ideas_project = await vikunja_api("/projects", "PUT", {
                 "title": project_name,
                 "description": "Quick ideas and thoughts captured by Claude"
             })
 
         # Create task with idea
-        return await vikunja_api(f"/projects/{ideas_project['id']}/tasks", "POST", {
+        return await vikunja_api(f"/projects/{ideas_project['id']}/tasks", "PUT", {
             "title": idea,
             "description": f"Captured: {datetime.utcnow().isoformat()}"
         })
@@ -206,8 +206,8 @@ data:
         if not buckets:
             buckets = ["Todo", "In Progress", "Done"]
 
-        # Create project
-        project = await vikunja_api("/projects", "POST", {
+        # Create project (Vikunja uses PUT for create)
+        project = await vikunja_api("/projects", "PUT", {
             "title": f"Plan: {plan_name}",
             "description": f"Created by Claude at {datetime.utcnow().isoformat()}"
         })
@@ -215,7 +215,7 @@ data:
         # Create buckets
         bucket_ids = {}
         for bucket_name in buckets:
-            bucket = await vikunja_api(f"/projects/{project['id']}/buckets", "POST", {
+            bucket = await vikunja_api(f"/projects/{project['id']}/buckets", "PUT", {
                 "title": bucket_name
             })
             bucket_ids[bucket_name] = bucket["id"]
@@ -223,7 +223,7 @@ data:
         # Create tasks in first bucket
         tasks = []
         for i, step in enumerate(steps):
-            task = await vikunja_api(f"/projects/{project['id']}/tasks", "POST", {
+            task = await vikunja_api(f"/projects/{project['id']}/tasks", "PUT", {
                 "title": step,
                 "bucket_id": bucket_ids[buckets[0]],
                 "position": i
