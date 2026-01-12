@@ -433,7 +433,10 @@ data:
             Route("/health", rest_health, methods=["GET"]),
         ]
         mcp_app = mcp.http_app()
-        app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+        app = Starlette(
+            routes=rest_routes + [Mount("/mcp", app=mcp_app)],
+            lifespan=mcp_app.lifespan
+        )
         logger.info(f"Starting OPNsense MCP server")
         logger.info(f"OPNsense: {OPNSENSE_HOST}")
         logger.info(f"AdGuard: {ADGUARD_HOST}")

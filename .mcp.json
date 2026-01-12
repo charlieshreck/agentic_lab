@@ -1,68 +1,72 @@
 {
   "mcpServers": {
     "infisical": {
-      "url": "http://10.20.0.40:31080",
+      "url": "http://10.20.0.40:31080/mcp",
       "description": "Infisical secrets management - list/get secrets (read-only)"
     },
     "coroot": {
-      "url": "http://10.20.0.40:31081",
+      "url": "http://10.20.0.40:31081/mcp",
       "description": "Coroot observability - metrics, anomalies, alerts, service health"
     },
     "proxmox": {
-      "url": "http://10.20.0.40:31082",
+      "url": "http://10.20.0.40:31082/mcp",
       "description": "Proxmox VE - VMs, containers, storage, snapshots, tasks"
     },
     "infrastructure": {
-      "url": "http://10.20.0.40:31083",
+      "url": "http://10.20.0.40:31083/mcp",
       "description": "Kubernetes/Talos - kubectl, talosctl, logs, deployments, pods"
     },
     "knowledge": {
-      "url": "http://10.20.0.40:31084",
+      "url": "http://10.20.0.40:31084/mcp",
       "description": "Qdrant knowledge base - search runbooks, docs, entities, decisions"
     },
     "opnsense": {
-      "url": "http://10.20.0.40:31085",
+      "url": "http://10.20.0.40:31085/mcp",
       "description": "OPNsense firewall - DHCP, firewall rules, gateways, Unbound DNS"
     },
     "adguard": {
-      "url": "http://10.20.0.40:31086",
+      "url": "http://10.20.0.40:31086/mcp",
       "description": "AdGuard Home - DNS rewrites, filtering, query logs, stats"
     },
     "cloudflare": {
-      "url": "http://10.20.0.40:31087",
+      "url": "http://10.20.0.40:31087/mcp",
       "description": "Cloudflare - DNS records, tunnels, zones, WAF rules"
     },
     "unifi": {
-      "url": "http://10.20.0.40:31088",
+      "url": "http://10.20.0.40:31088/mcp",
       "description": "UniFi Network - clients, devices, WLANs, RF optimization"
     },
     "truenas": {
-      "url": "http://10.20.0.40:31089",
+      "url": "http://10.20.0.40:31089/mcp",
       "description": "TrueNAS - pools, datasets, shares, disk status, snapshots"
     },
     "home-assistant": {
-      "url": "http://10.20.0.40:31090",
+      "url": "http://10.20.0.40:31090/mcp",
       "description": "Home Assistant - lights, climate, covers, locks, sensors, scenes"
     },
     "arr-suite": {
-      "url": "http://10.20.0.40:31091",
+      "url": "http://10.20.0.40:31091/mcp",
       "description": "Arr Suite - Sonarr, Radarr, Prowlarr, Overseerr, media management"
     },
     "homepage": {
-      "url": "http://10.20.0.40:31092",
+      "url": "http://10.20.0.40:31092/mcp",
       "description": "Homepage dashboard - service discovery, widgets"
     },
     "web-search": {
-      "url": "http://10.20.0.40:31093",
+      "url": "http://10.20.0.40:31093/mcp",
       "description": "Web search via SearXNG - search, fetch pages, news"
     },
     "browser-automation": {
-      "url": "http://10.20.0.40:31094",
+      "url": "http://10.20.0.40:31094/mcp",
       "description": "Browser automation via Playwright - navigate, screenshot, click, forms"
     },
     "plex": {
       "url": "http://10.20.0.40:31096/mcp",
       "description": "Plex Media Server - libraries, sessions, transcoding, GPU status"
+    },
+    "vikunja": {
+      "url": "http://10.20.0.40:31097/mcp",
+      "description": "Vikunja task management - projects, tasks, labels, teams"
     }
   },
   "nodePortAllocation": {
@@ -81,8 +85,9 @@
     "31092": "homepage-mcp",
     "31093": "web-search-mcp",
     "31094": "browser-automation-mcp",
-    "31095": "vikunja (conflict)",
-    "31096": "plex-mcp"
+    "31095": "vikunja (app - conflict)",
+    "31096": "plex-mcp",
+    "31097": "vikunja-mcp"
   },
   "cluster": {
     "name": "agentic",

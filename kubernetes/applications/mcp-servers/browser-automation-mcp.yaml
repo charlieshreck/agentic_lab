@@ -281,11 +281,6 @@ data:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    @asynccontextmanager
-    async def lifespan(app):
-        yield
-        await browser_manager.close()
-
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting Browser Automation MCP on port {port}")
@@ -295,7 +290,14 @@ data:
             Route("/api/page", rest_api_page_info, methods=["GET"]),
         ]
         mcp_app = mcp.http_app()
-        app = Starlette(routes=routes + [Mount("/mcp", app=mcp_app)], lifespan=lifespan)
+
+        @asynccontextmanager
+        async def combined_lifespan(app):
+            async with mcp_app.lifespan(app):
+                yield
+            await browser_manager.close()
+
+        app = Starlette(routes=routes + [Mount("/mcp", app=mcp_app)], lifespan=combined_lifespan)
         uvicorn.run(app, host="0.0.0.0", port=port)
 
     if __name__ == "__main__":
