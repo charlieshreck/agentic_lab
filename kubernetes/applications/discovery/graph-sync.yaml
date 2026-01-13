@@ -407,82 +407,97 @@ spec:
                   return count
 
               def sync_kubernetes_services():
-                  """Sync Kubernetes services to Neo4j."""
+                  """Sync Kubernetes services to Neo4j from multiple clusters."""
                   logger.info("Syncing Kubernetes services...")
 
-                  # Get services via REST API (bypasses MCP session protocol)
-                  services_response = call_rest_api(MCP_SERVERS["infrastructure"], "/api/services")
-                  services = services_response.get("services", [])
+                  # Clusters to sync (agentic default, prod via mounted kubeconfig)
+                  CLUSTERS = ["agentic", "prod"]
+                  total_services = 0
+                  total_pods = 0
 
-                  count = 0
-                  for svc in services:
-                      name = svc.get("name")
-                      namespace = svc.get("namespace")
+                  for cluster in CLUSTERS:
+                      logger.info(f"Syncing from {cluster} cluster...")
 
-                      if not name or not namespace:
-                          continue
+                      # Get services via REST API with cluster parameter
+                      services_response = call_rest_api(MCP_SERVERS["infrastructure"], f"/api/services?cluster={cluster}")
+                      services = services_response.get("services", [])
 
-                      svc_type = svc.get("type", "ClusterIP")
-                      cluster_ip = svc.get("cluster_ip", "")
+                      count = 0
+                      for svc in services:
+                          name = svc.get("name")
+                          namespace = svc.get("namespace")
 
-                      cypher = """
-                      MERGE (s:Service {name: $name, namespace: $namespace})
-                      SET s.type = $type,
-                          s.cluster_ip = $cluster_ip,
-                          s.last_seen = datetime(),
-                          s.source = 'kubernetes'
-                      RETURN s.name
-                      """
+                          if not name or not namespace:
+                              continue
 
-                      result = neo4j_query(cypher, {
-                          "name": name,
-                          "namespace": namespace,
-                          "type": svc_type,
-                          "cluster_ip": cluster_ip
-                      })
+                          svc_type = svc.get("type", "ClusterIP")
+                          cluster_ip = svc.get("cluster_ip", "")
 
-                      if not result.get("errors"):
-                          count += 1
+                          cypher = """
+                          MERGE (s:Service {name: $name, namespace: $namespace, cluster: $cluster})
+                          SET s.type = $type,
+                              s.cluster_ip = $cluster_ip,
+                              s.last_seen = datetime(),
+                              s.source = 'kubernetes'
+                          RETURN s.name
+                          """
 
-                  # Get pods via REST API
-                  pods_response = call_rest_api(MCP_SERVERS["infrastructure"], "/api/pods")
-                  pods = pods_response.get("pods", [])
+                          result = neo4j_query(cypher, {
+                              "name": name,
+                              "namespace": namespace,
+                              "cluster": cluster,
+                              "type": svc_type,
+                              "cluster_ip": cluster_ip
+                          })
 
-                  pod_count = 0
-                  for pod in pods:
-                      name = pod.get("name")
-                      namespace = pod.get("namespace")
+                          if not result.get("errors"):
+                              count += 1
 
-                      if not name or not namespace:
-                          continue
+                      total_services += count
 
-                      node_name = pod.get("node", "unknown")
-                      phase = pod.get("status", "unknown")
+                      # Get pods via REST API with cluster parameter
+                      pods_response = call_rest_api(MCP_SERVERS["infrastructure"], f"/api/pods?cluster={cluster}")
+                      pods = pods_response.get("pods", [])
 
-                      cypher = """
-                      MERGE (p:Pod {name: $name, namespace: $namespace})
-                      SET p.node = $node,
-                          p.phase = $phase,
-                          p.last_seen = datetime(),
-                          p.source = 'kubernetes'
-                      WITH p
-                      MERGE (h:Host {hostname: $node})
-                      MERGE (p)-[:SCHEDULED_ON]->(h)
-                      RETURN p.name
-                      """
+                      pod_count = 0
+                      for pod in pods:
+                          name = pod.get("name")
+                          namespace = pod.get("namespace")
 
-                      result = neo4j_query(cypher, {
-                          "name": name,
-                          "namespace": namespace,
-                          "node": node_name,
-                          "phase": phase
-                      })
+                          if not name or not namespace:
+                              continue
 
-                      if not result.get("errors"):
-                          pod_count += 1
+                          node_name = pod.get("node", "unknown")
+                          phase = pod.get("status", "unknown")
 
-                  logger.info(f"Synced {count} services, {pod_count} pods")
-                  return count
+                          cypher = """
+                          MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
+                          SET p.node = $node,
+                              p.phase = $phase,
+                              p.last_seen = datetime(),
+                              p.source = 'kubernetes'
+                          WITH p
+                          MERGE (h:Host {hostname: $node})
+                          MERGE (p)-[:SCHEDULED_ON]->(h)
+                          RETURN p.name
+                          """
+
+                          result = neo4j_query(cypher, {
+                              "name": name,
+                              "namespace": namespace,
+                              "cluster": cluster,
+                              "node": node_name,
+                              "phase": phase
+                          })
+
+                          if not result.get("errors"):
+                              pod_count += 1
+
+                      total_pods += pod_count
+                      logger.info(f"  {cluster}: {count} services, {pod_count} pods")
+
+                  logger.info(f"Synced total: {total_services} services, {total_pods} pods from {len(CLUSTERS)} clusters")
+                  return total_services
 
               def sync_runbooks():
                   """Link runbooks to alerts in Neo4j."""
