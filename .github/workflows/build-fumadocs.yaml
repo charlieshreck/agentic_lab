@@ -66,13 +66,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: fumadocs/package-lock.json
 
       - name: Install dependencies
         run: |
           cd fumadocs
-          npm ci
+          npm install --legacy-peer-deps
 
       - name: Run linter
         run: |
