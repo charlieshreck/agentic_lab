@@ -85,6 +85,7 @@ This repository contains the infrastructure and application code for a **self-im
 | browser-automation-mcp | 31094 | `curl http://10.20.0.40:31094/health` |
 | plex-mcp | 31096 | `curl http://10.20.0.40:31096/health` |
 | vikunja-mcp | 31097 | `curl http://10.20.0.40:31097/health` |
+| neo4j-mcp | 31098 | `curl http://10.20.0.40:31098/health` |
 
 **IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
 
@@ -103,6 +104,36 @@ The knowledge MCP includes **complete visibility into every device on the networ
 | `add_entity(...)` | Add newly discovered device |
 
 **Coverage**: Every device on the network - hardware and software, physical and virtual, managed and unmanaged. Entities include IP, MAC, hostname, manufacturer, model, location, capabilities, and control interfaces.
+
+#### 3c. Neo4j Knowledge Graph (via neo4j-mcp)
+
+The neo4j-mcp provides **relationship-aware queries** complementing Qdrant's semantic search:
+
+| Tool | Purpose |
+|------|---------|
+| `query_graph(cypher)` | Execute read-only Cypher queries |
+| `get_entity_context(id)` | Get entity with all relationships |
+| `find_dependencies(service, depth)` | Find upstream/downstream dependencies |
+| `get_impact_analysis(type, id)` | What breaks if entity X fails? |
+| `find_path(from, to)` | Network/dependency path between entities |
+| `get_runbook_for_alert(name)` | Find runbooks that resolve an alert |
+| `get_infrastructure_overview()` | High-level cluster status |
+| `get_hosts_on_network(network)` | List hosts on a network (prod/agentic/monitoring) |
+| `find_orphan_entities()` | Find entities with no relationships |
+
+**When to use Neo4j vs Qdrant:**
+- **Neo4j**: Relationships, dependencies, "what connects to X?", impact analysis
+- **Qdrant**: Semantic similarity, "find things like X", text search
+
+**REST API endpoints:**
+- `GET /health` - Health check
+- `GET /api/overview` - Infrastructure overview
+- `GET /api/query?q=<cypher>` - Execute Cypher query
+- `GET /api/entity?id=<id>&type=<type>` - Get entity context
+
+**Data sync:**
+- network-discovery (every 15 min) - Hosts, Networks, CONNECTED_TO
+- graph-sync (every 5 min) - VMs, Services, Pods, lifecycle management
 
 #### 4. Human-in-the-Loop
 - **Interface**: Matrix/Element (self-hosted Conduit server)
