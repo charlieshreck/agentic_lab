@@ -18,9 +18,23 @@ export interface Relationship {
   properties?: Record<string, unknown>;
 }
 
+// Frontend expected format
 export interface EntityContext {
   entity: Entity;
   relationships: Relationship[];
+}
+
+// Raw response from Neo4j MCP
+export interface Neo4jEntityResponse {
+  id: string;
+  type: string;
+  found: boolean;
+  properties: Record<string, unknown>;
+  relationships: Array<{
+    type: string;
+    target: string;
+    target_type: string;
+  }>;
 }
 
 export async function queryGraph(cypher: string): Promise<any> {
@@ -51,7 +65,7 @@ export async function getInfrastructureOverview(): Promise<any> {
   }
 }
 
-export async function getEntityContext(id: string, type?: string): Promise<EntityContext | null> {
+export async function getEntityContext(id: string, type?: string): Promise<Neo4jEntityResponse | null> {
   try {
     const params = new URLSearchParams({ id });
     if (type) params.append('type', type);
