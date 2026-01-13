@@ -417,7 +417,7 @@ data:
 
 
     # =============================================================================
-    # REST API for health checks
+    # REST API for health checks and CronJob access
     # =============================================================================
 
     from starlette.applications import Starlette
@@ -427,10 +427,53 @@ data:
     async def rest_health(request):
         return JSONResponse({"status": "healthy", "service": "opnsense-mcp"})
 
+    async def rest_dhcp_leases(request):
+        """REST endpoint for DHCP leases - used by network-discovery CronJob."""
+        result = await get_dhcp_leases()
+        return JSONResponse(result)
+
+    async def rest_interfaces(request):
+        """REST endpoint for interface statistics."""
+        result = await get_interfaces()
+        return JSONResponse(result)
+
+    async def rest_gateway_status(request):
+        """REST endpoint for gateway status."""
+        result = await get_gateway_status()
+        return JSONResponse(result)
+
+    async def rest_system_status(request):
+        """REST endpoint for system status."""
+        result = await get_system_status()
+        return JSONResponse(result)
+
+    async def rest_adguard_rewrites(request):
+        """REST endpoint for AdGuard DNS rewrites."""
+        result = await get_adguard_rewrites()
+        return JSONResponse(result)
+
+    async def rest_adguard_stats(request):
+        """REST endpoint for AdGuard statistics."""
+        result = await get_adguard_stats()
+        return JSONResponse(result)
+
+    async def rest_unbound_overrides(request):
+        """REST endpoint for Unbound DNS overrides."""
+        result = await get_unbound_overrides()
+        return JSONResponse(result)
+
     if __name__ == "__main__":
         import uvicorn
         rest_routes = [
             Route("/health", rest_health, methods=["GET"]),
+            # REST API endpoints for CronJobs (bypass MCP protocol)
+            Route("/api/dhcp_leases", rest_dhcp_leases, methods=["GET"]),
+            Route("/api/interfaces", rest_interfaces, methods=["GET"]),
+            Route("/api/gateway_status", rest_gateway_status, methods=["GET"]),
+            Route("/api/system_status", rest_system_status, methods=["GET"]),
+            Route("/api/adguard/rewrites", rest_adguard_rewrites, methods=["GET"]),
+            Route("/api/adguard/stats", rest_adguard_stats, methods=["GET"]),
+            Route("/api/unbound/overrides", rest_unbound_overrides, methods=["GET"]),
         ]
         mcp_app = mcp.http_app()
         app = Starlette(

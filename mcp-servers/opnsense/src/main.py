@@ -404,13 +404,55 @@ async def get_dns_summary() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+# =============================================================================
+# REST API Endpoints (for CronJobs - bypass MCP protocol)
+# =============================================================================
+
+app = mcp.get_app()
+
+@app.get("/api/dhcp_leases")
+async def rest_dhcp_leases():
+    """REST endpoint for DHCP leases - used by network-discovery CronJob."""
+    return await get_dhcp_leases()
+
+@app.get("/api/interfaces")
+async def rest_interfaces():
+    """REST endpoint for interface statistics."""
+    return await get_interfaces()
+
+@app.get("/api/gateway_status")
+async def rest_gateway_status():
+    """REST endpoint for gateway status."""
+    return await get_gateway_status()
+
+@app.get("/api/system_status")
+async def rest_system_status():
+    """REST endpoint for system status."""
+    return await get_system_status()
+
+@app.get("/api/adguard/rewrites")
+async def rest_adguard_rewrites():
+    """REST endpoint for AdGuard DNS rewrites."""
+    return await get_adguard_rewrites()
+
+@app.get("/api/adguard/stats")
+async def rest_adguard_stats():
+    """REST endpoint for AdGuard statistics."""
+    return await get_adguard_stats()
+
+@app.get("/api/unbound/overrides")
+async def rest_unbound_overrides():
+    """REST endpoint for Unbound DNS overrides."""
+    return await get_unbound_overrides()
+
+
 def main():
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
     logger.info(f"Starting OPNsense MCP server on port {port}")
     logger.info(f"OPNsense: {OPNSENSE_HOST}")
     logger.info(f"AdGuard: {ADGUARD_HOST}")
-    uvicorn.run(mcp.get_app(), host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
