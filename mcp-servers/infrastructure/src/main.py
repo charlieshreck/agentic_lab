@@ -37,6 +37,14 @@ class DeploymentInfo(BaseModel):
     ready: bool
 
 
+class ServiceInfo(BaseModel):
+    name: str
+    namespace: str
+    type: str
+    cluster_ip: str
+    ports: List[str]
+
+
 class EventInfo(BaseModel):
     type: str
     reason: str
@@ -165,6 +173,55 @@ async def kubectl_get_deployments(
                 ready=status.get("availableReplicas", 0) == spec.get("replicas", 0)
             ))
         return deployments
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse kubectl output: {e}")
+        return []
+
+
+@mcp.tool()
+async def kubectl_get_services(
+    namespace: str = None
+) -> List[ServiceInfo]:
+    """
+    Get services in a Kubernetes namespace or all namespaces.
+
+    Args:
+        namespace: Kubernetes namespace (default: all namespaces)
+
+    Returns:
+        List of service information objects
+    """
+    args = ["get", "services", "-o", "json"]
+    if namespace:
+        args.extend(["-n", namespace])
+    else:
+        args.append("-A")
+
+    stdout, stderr, returncode = run_kubectl(args)
+
+    if returncode != 0:
+        logger.error(f"kubectl get services failed: {stderr}")
+        return []
+
+    try:
+        data = json.loads(stdout)
+        services = []
+        for svc in data.get("items", []):
+            spec = svc.get("spec", {})
+            ports = []
+            for port in spec.get("ports", []):
+                port_str = f"{port.get('port', 0)}/{port.get('protocol', 'TCP')}"
+                if port.get("nodePort"):
+                    port_str += f":{port['nodePort']}"
+                ports.append(port_str)
+            services.append(ServiceInfo(
+                name=svc["metadata"]["name"],
+                namespace=svc["metadata"]["namespace"],
+                type=spec.get("type", "ClusterIP"),
+                cluster_ip=spec.get("clusterIP", "None"),
+                ports=ports
+            ))
+        return services
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse kubectl output: {e}")
         return []
@@ -363,6 +420,82 @@ async def execute_command(request: ExecuteRequest):
         output=stdout,
         error=stderr if returncode != 0 else None
     )
+
+
+# =============================================================================
+# REST API Endpoints (for CronJobs - bypass MCP session protocol)
+# =============================================================================
+
+@http_app.get("/api/pods")
+async def rest_list_pods(namespace: str = None):
+    """REST endpoint for listing all pods - used by graph-sync CronJob."""
+    try:
+        args = ["get", "pods", "-o", "json"]
+        if namespace:
+            args.extend(["-n", namespace])
+        else:
+            args.append("-A")
+
+        stdout, stderr, returncode = run_kubectl(args)
+
+        if returncode != 0:
+            logger.error(f"REST list_pods failed: {stderr}")
+            return {"error": stderr, "pods": []}
+
+        data = json.loads(stdout)
+        pods = []
+        for pod in data.get("items", []):
+            container_statuses = pod.get("status", {}).get("containerStatuses", [])
+            pods.append({
+                "name": pod["metadata"]["name"],
+                "namespace": pod["metadata"]["namespace"],
+                "status": pod["status"]["phase"],
+                "ready": all(c.get("ready", False) for c in container_statuses),
+                "restarts": sum(c.get("restartCount", 0) for c in container_statuses),
+                "node": pod.get("spec", {}).get("nodeName", ""),
+                "ip": pod.get("status", {}).get("podIP", "")
+            })
+        return {"pods": pods}
+    except Exception as e:
+        logger.error(f"REST list_pods error: {e}")
+        return {"error": str(e), "pods": []}
+
+
+@http_app.get("/api/services")
+async def rest_list_services(namespace: str = None):
+    """REST endpoint for listing all services - used by graph-sync CronJob."""
+    try:
+        services = await kubectl_get_services(namespace)
+        return {"services": [s.model_dump() for s in services]}
+    except Exception as e:
+        logger.error(f"REST list_services error: {e}")
+        return {"error": str(e), "services": []}
+
+
+@http_app.get("/api/nodes")
+async def rest_list_nodes():
+    """REST endpoint for listing all nodes."""
+    try:
+        stdout, stderr, returncode = run_kubectl(["get", "nodes", "-o", "json"])
+
+        if returncode != 0:
+            return {"error": stderr, "nodes": []}
+
+        data = json.loads(stdout)
+        nodes = []
+        for node in data.get("items", []):
+            conditions = {c["type"]: c["status"] for c in node.get("status", {}).get("conditions", [])}
+            nodes.append({
+                "name": node["metadata"]["name"],
+                "ready": conditions.get("Ready") == "True",
+                "roles": [k.replace("node-role.kubernetes.io/", "") for k in node["metadata"].get("labels", {}) if k.startswith("node-role.kubernetes.io/")],
+                "version": node.get("status", {}).get("nodeInfo", {}).get("kubeletVersion", ""),
+                "internal_ip": next((addr["address"] for addr in node.get("status", {}).get("addresses", []) if addr["type"] == "InternalIP"), "")
+            })
+        return {"nodes": nodes}
+    except Exception as e:
+        logger.error(f"REST list_nodes error: {e}")
+        return {"error": str(e), "nodes": []}
 
 
 def main():

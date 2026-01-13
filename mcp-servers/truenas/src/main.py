@@ -116,11 +116,72 @@ async def get_alerts() -> List[Dict[str, Any]]:
         return []
 
 
+# =============================================================================
+# REST API Endpoints (for CronJobs - bypass MCP session protocol)
+# =============================================================================
+
+app = mcp.get_app()
+
+
+@app.get("/api/pools")
+async def rest_list_pools():
+    """REST endpoint for ZFS pools - used by graph-sync CronJob."""
+    try:
+        pools = await list_pools()
+        return {"pools": pools}
+    except Exception as e:
+        logger.error(f"REST list_pools error: {e}")
+        return {"error": str(e), "pools": []}
+
+
+@app.get("/api/datasets")
+async def rest_list_datasets():
+    """REST endpoint for datasets - used by graph-sync CronJob."""
+    try:
+        datasets = await list_datasets()
+        return {"datasets": datasets}
+    except Exception as e:
+        logger.error(f"REST list_datasets error: {e}")
+        return {"error": str(e), "datasets": []}
+
+
+@app.get("/api/shares")
+async def rest_list_shares():
+    """REST endpoint for shares - used by graph-sync CronJob."""
+    try:
+        return await list_shares()
+    except Exception as e:
+        logger.error(f"REST list_shares error: {e}")
+        return {"error": str(e), "nfs": [], "smb": []}
+
+
+@app.get("/api/disks")
+async def rest_disk_status():
+    """REST endpoint for disk status."""
+    try:
+        disks = await get_disk_status()
+        return {"disks": disks}
+    except Exception as e:
+        logger.error(f"REST disk_status error: {e}")
+        return {"error": str(e), "disks": []}
+
+
+@app.get("/api/alerts")
+async def rest_alerts():
+    """REST endpoint for alerts."""
+    try:
+        alerts = await get_alerts()
+        return {"alerts": alerts}
+    except Exception as e:
+        logger.error(f"REST alerts error: {e}")
+        return {"error": str(e), "alerts": []}
+
+
 def main():
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
     logger.info(f"Starting TrueNAS MCP server on port {port}")
-    uvicorn.run(mcp.get_app(), host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":

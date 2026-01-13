@@ -193,8 +193,8 @@ spec:
                   """Sync VMs from Proxmox to Neo4j."""
                   logger.info("Syncing Proxmox VMs...")
 
-                  # Get VMs list
-                  vms_response = call_mcp_tool("proxmox", "list_vms")
+                  # Get VMs list via REST API (bypasses MCP session protocol)
+                  vms_response = call_rest_api(MCP_SERVERS["proxmox"], "/api/vms")
                   vms = vms_response.get("vms", [])
 
                   if not vms:
@@ -316,8 +316,8 @@ spec:
                   """Sync TrueNAS storage to Neo4j."""
                   logger.info("Syncing TrueNAS storage...")
 
-                  # Get pools
-                  pools_response = call_mcp_tool("truenas", "list_pools")
+                  # Get pools via REST API (bypasses MCP session protocol)
+                  pools_response = call_rest_api(MCP_SERVERS["truenas"], "/api/pools")
                   pools = pools_response.get("pools", [])
 
                   count = 0
@@ -346,8 +346,8 @@ spec:
                       if not result.get("errors"):
                           count += 1
 
-                  # Get datasets
-                  datasets_response = call_mcp_tool("truenas", "list_datasets")
+                  # Get datasets via REST API
+                  datasets_response = call_rest_api(MCP_SERVERS["truenas"], "/api/datasets")
                   datasets = datasets_response.get("datasets", [])
 
                   for dataset in datasets:
@@ -375,9 +375,12 @@ spec:
                           "available": dataset.get("available", 0)
                       })
 
-                  # Get shares
-                  shares_response = call_mcp_tool("truenas", "list_shares")
-                  shares = shares_response.get("shares", [])
+                  # Get shares via REST API
+                  shares_response = call_rest_api(MCP_SERVERS["truenas"], "/api/shares")
+                  # Shares returns {nfs: [], smb: []} format
+                  nfs_shares = shares_response.get("nfs", [])
+                  smb_shares = shares_response.get("smb", [])
+                  shares = nfs_shares + smb_shares
 
                   for share in shares:
                       path = share.get("path", "")
@@ -407,29 +410,20 @@ spec:
                   """Sync Kubernetes services to Neo4j."""
                   logger.info("Syncing Kubernetes services...")
 
-                  # Get services from infrastructure MCP
-                  services_response = call_mcp_tool("infrastructure", "kubectl_get", {
-                      "resource": "services",
-                      "namespace": "",  # All namespaces
-                      "output": "json"
-                  })
-
-                  services = []
-                  if isinstance(services_response, dict) and "items" in services_response:
-                      services = services_response["items"]
+                  # Get services via REST API (bypasses MCP session protocol)
+                  services_response = call_rest_api(MCP_SERVERS["infrastructure"], "/api/services")
+                  services = services_response.get("services", [])
 
                   count = 0
                   for svc in services:
-                      metadata = svc.get("metadata", {})
-                      name = metadata.get("name")
-                      namespace = metadata.get("namespace")
+                      name = svc.get("name")
+                      namespace = svc.get("namespace")
 
                       if not name or not namespace:
                           continue
 
-                      spec = svc.get("spec", {})
-                      svc_type = spec.get("type", "ClusterIP")
-                      cluster_ip = spec.get("clusterIP", "")
+                      svc_type = svc.get("type", "ClusterIP")
+                      cluster_ip = svc.get("cluster_ip", "")
 
                       cypher = """
                       MERGE (s:Service {name: $name, namespace: $namespace})
@@ -450,30 +444,20 @@ spec:
                       if not result.get("errors"):
                           count += 1
 
-                  # Get pods
-                  pods_response = call_mcp_tool("infrastructure", "kubectl_get", {
-                      "resource": "pods",
-                      "namespace": "",
-                      "output": "json"
-                  })
-
-                  pods = []
-                  if isinstance(pods_response, dict) and "items" in pods_response:
-                      pods = pods_response["items"]
+                  # Get pods via REST API
+                  pods_response = call_rest_api(MCP_SERVERS["infrastructure"], "/api/pods")
+                  pods = pods_response.get("pods", [])
 
                   pod_count = 0
                   for pod in pods:
-                      metadata = pod.get("metadata", {})
-                      name = metadata.get("name")
-                      namespace = metadata.get("namespace")
+                      name = pod.get("name")
+                      namespace = pod.get("namespace")
 
                       if not name or not namespace:
                           continue
 
-                      spec = pod.get("spec", {})
-                      status = pod.get("status", {})
-                      node_name = spec.get("nodeName", "unknown")
-                      phase = status.get("phase", "unknown")
+                      node_name = pod.get("node", "unknown")
+                      phase = pod.get("status", "unknown")
 
                       cypher = """
                       MERGE (p:Pod {name: $name, namespace: $namespace})

@@ -175,11 +175,61 @@ async def get_storage(node: str = None) -> List[Dict[str, Any]]:
         return []
 
 
+# =============================================================================
+# REST API Endpoints (for CronJobs - bypass MCP session protocol)
+# =============================================================================
+
+app = mcp.get_app()
+
+
+@app.get("/api/vms")
+async def rest_list_vms():
+    """REST endpoint for listing all VMs - used by graph-sync CronJob."""
+    try:
+        vms = await list_vms()
+        return {"vms": [vm.model_dump() for vm in vms]}
+    except Exception as e:
+        logger.error(f"REST list_vms error: {e}")
+        return {"error": str(e), "vms": []}
+
+
+@app.get("/api/nodes")
+async def rest_list_nodes():
+    """REST endpoint for listing all nodes - used by graph-sync CronJob."""
+    try:
+        nodes = await list_nodes()
+        return {"nodes": [n.model_dump() for n in nodes]}
+    except Exception as e:
+        logger.error(f"REST list_nodes error: {e}")
+        return {"error": str(e), "nodes": []}
+
+
+@app.get("/api/cluster")
+async def rest_cluster_status():
+    """REST endpoint for cluster status."""
+    try:
+        return await get_cluster_status()
+    except Exception as e:
+        logger.error(f"REST cluster_status error: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/storage")
+async def rest_list_storage():
+    """REST endpoint for storage pools."""
+    try:
+        storage = await get_storage()
+        return {"storage": storage}
+    except Exception as e:
+        logger.error(f"REST list_storage error: {e}")
+        return {"error": str(e), "storage": []}
+
+
 def main():
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
     logger.info(f"Starting Proxmox MCP server on port {port}")
-    uvicorn.run(mcp.get_app(), host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
