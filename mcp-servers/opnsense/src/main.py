@@ -413,37 +413,65 @@ app = mcp.get_app()
 @app.get("/api/dhcp_leases")
 async def rest_dhcp_leases():
     """REST endpoint for DHCP leases - used by network-discovery CronJob."""
-    return await get_dhcp_leases()
+    try:
+        return await opnsense_api("/dhcpv4/leases/searchLease", "POST")
+    except Exception as e:
+        logger.error(f"REST dhcp_leases error: {e}")
+        return {"error": str(e)}
 
 @app.get("/api/interfaces")
 async def rest_interfaces():
     """REST endpoint for interface statistics."""
-    return await get_interfaces()
+    try:
+        return await opnsense_api("/diagnostics/interface/getInterfaceStatistics")
+    except Exception as e:
+        logger.error(f"REST interfaces error: {e}")
+        return {"error": str(e)}
 
 @app.get("/api/gateway_status")
 async def rest_gateway_status():
     """REST endpoint for gateway status."""
-    return await get_gateway_status()
+    try:
+        return await opnsense_api("/routes/gateway/status")
+    except Exception as e:
+        logger.error(f"REST gateway_status error: {e}")
+        return {"error": str(e)}
 
 @app.get("/api/system_status")
 async def rest_system_status():
     """REST endpoint for system status."""
-    return await get_system_status()
+    try:
+        return await opnsense_api("/core/system/status")
+    except Exception as e:
+        logger.error(f"REST system_status error: {e}")
+        return {"error": str(e)}
 
 @app.get("/api/adguard/rewrites")
 async def rest_adguard_rewrites():
     """REST endpoint for AdGuard DNS rewrites."""
-    return await get_adguard_rewrites()
+    try:
+        return await adguard_api("/control/rewrite/list")
+    except Exception as e:
+        logger.error(f"REST adguard_rewrites error: {e}")
+        return {"error": str(e)}
 
 @app.get("/api/adguard/stats")
 async def rest_adguard_stats():
     """REST endpoint for AdGuard statistics."""
-    return await get_adguard_stats()
+    try:
+        return await adguard_api("/control/stats")
+    except Exception as e:
+        logger.error(f"REST adguard_stats error: {e}")
+        return {"error": str(e)}
 
 @app.get("/api/unbound/overrides")
 async def rest_unbound_overrides():
     """REST endpoint for Unbound DNS overrides."""
-    return await get_unbound_overrides()
+    try:
+        return await opnsense_api("/unbound/settings/searchHostOverride", "POST")
+    except Exception as e:
+        logger.error(f"REST unbound_overrides error: {e}")
+        return {"error": str(e)}
 
 
 def main():

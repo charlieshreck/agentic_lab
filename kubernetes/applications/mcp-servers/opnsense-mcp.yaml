@@ -429,38 +429,66 @@ data:
 
     async def rest_dhcp_leases(request):
         """REST endpoint for DHCP leases - used by network-discovery CronJob."""
-        result = await get_dhcp_leases()
-        return JSONResponse(result)
+        try:
+            result = await opnsense_api("/dhcpv4/leases/searchLease", "POST")
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"REST dhcp_leases error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     async def rest_interfaces(request):
         """REST endpoint for interface statistics."""
-        result = await get_interfaces()
-        return JSONResponse(result)
+        try:
+            result = await opnsense_api("/diagnostics/interface/getInterfaceStatistics")
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"REST interfaces error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     async def rest_gateway_status(request):
         """REST endpoint for gateway status."""
-        result = await get_gateway_status()
-        return JSONResponse(result)
+        try:
+            result = await opnsense_api("/routes/gateway/status")
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"REST gateway_status error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     async def rest_system_status(request):
         """REST endpoint for system status."""
-        result = await get_system_status()
-        return JSONResponse(result)
+        try:
+            result = await opnsense_api("/core/system/status")
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"REST system_status error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     async def rest_adguard_rewrites(request):
         """REST endpoint for AdGuard DNS rewrites."""
-        result = await get_adguard_rewrites()
-        return JSONResponse(result)
+        try:
+            result = await adguard_api("/control/rewrite/list")
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"REST adguard_rewrites error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     async def rest_adguard_stats(request):
         """REST endpoint for AdGuard statistics."""
-        result = await get_adguard_stats()
-        return JSONResponse(result)
+        try:
+            result = await adguard_api("/control/stats")
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"REST adguard_stats error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     async def rest_unbound_overrides(request):
         """REST endpoint for Unbound DNS overrides."""
-        result = await get_unbound_overrides()
-        return JSONResponse(result)
+        try:
+            result = await opnsense_api("/unbound/settings/searchHostOverride", "POST")
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"REST unbound_overrides error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     if __name__ == "__main__":
         import uvicorn
