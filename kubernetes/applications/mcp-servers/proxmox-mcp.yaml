@@ -521,7 +521,7 @@ data:
             return _handle_error(e)
 
     # ============================================================================
-    # REST API
+    # REST API for CronJobs (bypass MCP protocol)
     # ============================================================================
 
     from starlette.applications import Starlette
@@ -532,9 +532,75 @@ data:
         """Health check endpoint."""
         return JSONResponse({"status": "healthy"})
 
+    async def rest_vms(request):
+        """REST endpoint for VMs - used by network-discovery CronJob."""
+        try:
+            nodes = await _proxmox_api("/nodes")
+            all_vms = []
+            for n in nodes:
+                node_name = n.get("node", "")
+                try:
+                    node_vms = await _proxmox_api(f"/nodes/{node_name}/qemu")
+                    for vm in node_vms:
+                        vm["node"] = node_name
+                        # Try to get IP from QEMU agent
+                        vmid = vm.get("vmid")
+                        if vm.get("status") == "running" and vmid:
+                            try:
+                                net_info = await _proxmox_api(f"/nodes/{node_name}/qemu/{vmid}/agent/network-get-interfaces")
+                                for iface in net_info:
+                                    for ip_info in iface.get("ip-addresses", []):
+                                        if ip_info.get("ip-address-type") == "ipv4" and not ip_info.get("ip-address", "").startswith("127."):
+                                            vm["ip"] = ip_info.get("ip-address", "")
+                                            break
+                                    if vm.get("ip"):
+                                        break
+                            except:
+                                pass
+                        all_vms.append(vm)
+                except Exception as e:
+                    logger.warning(f"Failed to get VMs from node {node_name}: {e}")
+            return JSONResponse({"status": "ok", "data": all_vms, "count": len(all_vms)})
+        except Exception as e:
+            logger.error(f"REST vms error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_containers(request):
+        """REST endpoint for LXC containers - used by network-discovery CronJob."""
+        try:
+            nodes = await _proxmox_api("/nodes")
+            all_cts = []
+            for n in nodes:
+                node_name = n.get("node", "")
+                try:
+                    node_cts = await _proxmox_api(f"/nodes/{node_name}/lxc")
+                    for ct in node_cts:
+                        ct["node"] = node_name
+                        all_cts.append(ct)
+                except Exception as e:
+                    logger.warning(f"Failed to get containers from node {node_name}: {e}")
+            return JSONResponse({"status": "ok", "data": all_cts, "count": len(all_cts)})
+        except Exception as e:
+            logger.error(f"REST containers error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_nodes(request):
+        """REST endpoint for cluster nodes."""
+        try:
+            nodes = await _proxmox_api("/nodes")
+            return JSONResponse({"status": "ok", "data": nodes, "count": len(nodes)})
+        except Exception as e:
+            logger.error(f"REST nodes error: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
     if __name__ == "__main__":
         import uvicorn
-        rest_routes = [Route("/health", rest_health, methods=["GET"])]
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/vms", rest_vms, methods=["GET"]),
+            Route("/api/containers", rest_containers, methods=["GET"]),
+            Route("/api/nodes", rest_nodes, methods=["GET"]),
+        ]
         mcp_app = mcp.http_app()
         app = Starlette(
             routes=rest_routes + [Mount("/", app=mcp_app)],
