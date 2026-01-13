@@ -31,12 +31,19 @@ export default function EntityDetailPage({ params }: { params: { id: string } })
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`/api/entities/${params.id}?diagram=true`)
+    fetch(`/api/entities/${encodeURIComponent(params.id)}?diagram=true`)
       .then((res) => {
         if (!res.ok) throw new Error('Entity not found');
         return res.json();
       })
       .then((data) => {
+        // Validate response has expected structure
+        if (data.error) {
+          throw new Error(data.error);
+        }
+        if (!data.entity) {
+          throw new Error('Invalid response: missing entity data');
+        }
         setContext(data);
         setLoading(false);
       })
