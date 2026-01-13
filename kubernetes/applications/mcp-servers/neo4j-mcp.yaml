@@ -1,0 +1,384 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neo4j-mcp-code
+  namespace: ai-platform
+  labels:
+    app: neo4j-mcp
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """Neo4j MCP server for knowledge graph operations."""
+    import os
+    import json
+    import logging
+    from typing import List, Optional, Dict, Any
+    from base64 import b64encode
+    import httpx
+    from fastmcp import FastMCP
+    from pydantic import BaseModel
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    from starlette.responses import JSONResponse
+    from starlette.requests import Request
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    NEO4J_URL = os.environ.get("NEO4J_URL", "http://neo4j:7474")
+    NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "").strip()
+
+    mcp = FastMCP(
+        name="neo4j-mcp",
+        instructions="""MCP server for Neo4j knowledge graph operations.
+        Use for relationship queries, dependency analysis, impact assessment.
+        KEY TOOLS: query_graph, get_entity_context, find_dependencies, get_impact_analysis
+        Neo4j: relationships, dependencies. Qdrant: semantic similarity, text search."""
+    )
+
+    class QueryResult(BaseModel):
+        columns: List[str]
+        data: List[List[Any]]
+        summary: str = ""
+
+    async def neo4j_query(cypher: str, params: dict = None) -> dict:
+        """Execute Cypher query via Neo4j HTTP API."""
+        url = f"{NEO4J_URL}/db/neo4j/tx/commit"
+        auth = b64encode(f"{NEO4J_USER}:{NEO4J_PASSWORD}".encode()).decode()
+        body = {"statements": [{"statement": cypher, "parameters": params or {}}]}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=body, headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Basic {auth}"
+            })
+            return response.json()
+
+    def format_result(result: dict) -> QueryResult:
+        if result.get("errors"):
+            return QueryResult(columns=[], data=[], summary=f"Error: {result['errors']}")
+        results = result.get("results", [])
+        if not results:
+            return QueryResult(columns=[], data=[], summary="No results")
+        first = results[0]
+        columns = first.get("columns", [])
+        data = [row.get("row", []) for row in first.get("data", [])]
+        return QueryResult(columns=columns, data=data, summary=f"Returned {len(data)} rows")
+
+    @mcp.tool()
+    async def query_graph(cypher: str) -> QueryResult:
+        """Execute read-only Cypher query. Examples: 'MATCH (h:Host) RETURN h.ip LIMIT 10'"""
+        upper = cypher.upper()
+        if any(kw in upper for kw in ["MERGE", "CREATE", "DELETE", "SET", "REMOVE", "DROP"]):
+            return QueryResult(columns=[], data=[], summary="Error: Write operations not allowed")
+        return format_result(await neo4j_query(cypher))
+
+    @mcp.tool()
+    async def get_entity_context(entity_id: str, entity_type: str = "Host") -> dict:
+        """Get entity with relationships. entity_id: IP, hostname, MAC, or name."""
+        cypher = f"""
+        MATCH (e:{entity_type})
+        WHERE e.ip = $id OR e.hostname = $id OR e.mac = $id OR e.name = $id OR e.vmid = $id
+        WITH e LIMIT 1
+        OPTIONAL MATCH (e)-[r]->(related)
+        OPTIONAL MATCH (e)<-[r2]-(related2)
+        RETURN e, collect(DISTINCT {{type: type(r), target: related.name, target_type: labels(related)[0]}}) as out,
+               collect(DISTINCT {{type: type(r2), source: related2.name, source_type: labels(related2)[0]}}) as in
+        """
+        result = await neo4j_query(cypher, {"id": entity_id})
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return {"id": entity_id, "type": entity_type, "found": False}
+        data = result["results"][0]["data"][0]["row"]
+        props = data[0] or {}
+        out = [r for r in data[1] if r.get("target")]
+        inp = [{"direction": "incoming", **r} for r in data[2] if r.get("source")]
+        return {"id": entity_id, "type": entity_type, "found": True, "properties": props, "relationships": out + inp}
+
+    @mcp.tool()
+    async def find_dependencies(service_name: str, depth: int = 2) -> dict:
+        """Find upstream/downstream dependencies for a service."""
+        up = await neo4j_query(f"MATCH (s:Service {{name: $name}})-[:DEPENDS_ON*1..{depth}]->(d) RETURN DISTINCT d.name, labels(d)[0]", {"name": service_name})
+        down = await neo4j_query(f"MATCH (s:Service {{name: $name}})<-[:DEPENDS_ON*1..{depth}]-(d) RETURN DISTINCT d.name, labels(d)[0]", {"name": service_name})
+        upstream = [f"{r['row'][1]}:{r['row'][0]}" for r in up.get("results", [{}])[0].get("data", [])]
+        downstream = [f"{r['row'][1]}:{r['row'][0]}" for r in down.get("results", [{}])[0].get("data", [])]
+        return {"entity": service_name, "upstream": upstream, "downstream": downstream, "depth": depth}
+
+    @mcp.tool()
+    async def get_impact_analysis(entity_type: str, entity_id: str) -> dict:
+        """What breaks if entity fails? Returns affected services and severity."""
+        cypher = """
+        MATCH (e) WHERE labels(e)[0] = $type AND (e.ip = $id OR e.hostname = $id OR e.name = $id OR e.vmid = $id)
+        OPTIONAL MATCH (e)<-[:SCHEDULED_ON|HOSTS|RUNS*1..3]-(a)
+        OPTIONAL MATCH (e)<-[:DEPENDS_ON*1..3]-(s:Service)
+        RETURN collect(DISTINCT {name: a.name, type: labels(a)[0]}) as affected,
+               collect(DISTINCT {name: s.name, ns: s.namespace}) as services
+        """
+        result = await neo4j_query(cypher, {"type": entity_type, "id": entity_id})
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return {"entity_type": entity_type, "entity_id": entity_id, "severity": "unknown"}
+        data = result["results"][0]["data"][0]["row"]
+        affected = [a for a in (data[0] or []) if a.get("name")]
+        services = [s for s in (data[1] or []) if s.get("name")]
+        total = len(affected) + len(services)
+        severity = "low" if total == 0 else "medium" if total < 5 else "high" if total < 15 else "critical"
+        return {"entity_type": entity_type, "entity_id": entity_id, "affected": affected, "services": services, "severity": severity}
+
+    @mcp.tool()
+    async def find_path(from_entity: str, to_entity: str, max_depth: int = 5) -> dict:
+        """Find connection path between two entities."""
+        cypher = f"""
+        MATCH (f), (t) WHERE (f.ip = $from OR f.hostname = $from OR f.name = $from)
+          AND (t.ip = $to OR t.hostname = $to OR t.name = $to)
+        MATCH path = shortestPath((f)-[*1..{max_depth}]-(t))
+        RETURN [n IN nodes(path) | {{name: n.name, type: labels(n)[0]}}] as nodes,
+               [r IN relationships(path) | type(r)] as rels LIMIT 1
+        """
+        result = await neo4j_query(cypher, {"from": from_entity, "to": to_entity})
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return {"found": False, "from": from_entity, "to": to_entity}
+        data = result["results"][0]["data"][0]["row"]
+        return {"found": True, "from": from_entity, "to": to_entity, "nodes": data[0], "relationships": data[1]}
+
+    @mcp.tool()
+    async def get_runbook_for_alert(alert_name: str) -> List[dict]:
+        """Find runbooks that resolve an alert."""
+        cypher = """
+        MATCH (r:RunbookDocument)-[:RESOLVES]->(a:Alert)
+        WHERE a.name =~ ('(?i).*' + $pattern + '.*')
+        RETURN r.title, r.path, r.automation_level, a.name LIMIT 10
+        """
+        result = await neo4j_query(cypher, {"pattern": alert_name})
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return []
+        return [{"title": r["row"][0], "path": r["row"][1], "automation": r["row"][2], "alert": r["row"][3]}
+                for r in result["results"][0]["data"]]
+
+    @mcp.tool()
+    async def get_infrastructure_overview() -> dict:
+        """High-level infrastructure overview."""
+        cypher = """
+        CALL { MATCH (h:Host) RETURN 'hosts' as l, count(h) as t, sum(CASE WHEN h.status='online' THEN 1 ELSE 0 END) as o }
+        UNION ALL CALL { MATCH (v:VM) RETURN 'vms' as l, count(v) as t, sum(CASE WHEN v.status='running' THEN 1 ELSE 0 END) as o }
+        UNION ALL CALL { MATCH (s:Service) RETURN 'services' as l, count(s) as t, count(s) as o }
+        UNION ALL CALL { MATCH (p:Pod) RETURN 'pods' as l, count(p) as t, sum(CASE WHEN p.phase='Running' THEN 1 ELSE 0 END) as o }
+        UNION ALL CALL { MATCH (n:Network) RETURN 'networks' as l, count(n) as t, count(n) as o }
+        """
+        result = await neo4j_query(cypher)
+        if result.get("errors"):
+            return {"error": str(result["errors"])}
+        overview = {}
+        for row in result.get("results", [{}])[0].get("data", []):
+            overview[row["row"][0]] = {"total": row["row"][1], "online": row["row"][2]}
+        return overview
+
+    @mcp.tool()
+    async def get_hosts_on_network(network: str) -> List[dict]:
+        """Get hosts connected to a network (prod, agentic, monitoring)."""
+        cypher = """
+        MATCH (h:Host)-[:CONNECTED_TO]->(n:Network {name: $network})
+        RETURN h.ip, h.hostname, h.mac, h.status, h.type ORDER BY h.ip
+        """
+        result = await neo4j_query(cypher, {"network": network})
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return []
+        return [{"ip": r["row"][0], "hostname": r["row"][1], "mac": r["row"][2], "status": r["row"][3], "type": r["row"][4]}
+                for r in result["results"][0]["data"]]
+
+    @mcp.tool()
+    async def get_services_on_host(host_id: str) -> List[dict]:
+        """Get services/pods running on a host."""
+        cypher = """
+        MATCH (h:Host) WHERE h.ip = $id OR h.hostname = $id
+        OPTIONAL MATCH (p:Pod)-[:SCHEDULED_ON]->(h)
+        OPTIONAL MATCH (s:Service)-[:EXPOSES]->(p)
+        RETURN p.name, p.namespace, p.phase, collect(DISTINCT s.name)
+        """
+        result = await neo4j_query(cypher, {"id": host_id})
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return []
+        return [{"pod": r["row"][0], "namespace": r["row"][1], "phase": r["row"][2], "services": r["row"][3]}
+                for r in result["results"][0]["data"] if r["row"][0]]
+
+    @mcp.tool()
+    async def find_orphan_entities(entity_type: str = None) -> List[dict]:
+        """Find entities with no relationships (potentially stale)."""
+        type_filter = f":{entity_type}" if entity_type else ""
+        cypher = f"MATCH (e{type_filter}) WHERE NOT (e)--() RETURN e.ip, e.name, labels(e)[0], e.last_seen LIMIT 50"
+        result = await neo4j_query(cypher)
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return []
+        return [{"ip": r["row"][0], "name": r["row"][1], "type": r["row"][2], "last_seen": r["row"][3]}
+                for r in result["results"][0]["data"]]
+
+    @mcp.tool()
+    async def get_stale_entities(hours: int = 24) -> List[dict]:
+        """Find entities not seen in specified hours."""
+        cypher = """
+        MATCH (h:Host) WHERE h.last_seen < datetime() - duration({hours: $hours})
+        RETURN h.ip, h.hostname, h.status, h.last_seen LIMIT 50
+        """
+        result = await neo4j_query(cypher, {"hours": hours})
+        if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            return []
+        return [{"ip": r["row"][0], "hostname": r["row"][1], "status": r["row"][2], "last_seen": r["row"][3]}
+                for r in result["results"][0]["data"]]
+
+    # REST API endpoints
+    async def rest_health(request: Request):
+        try:
+            result = await neo4j_query("RETURN 1 as test")
+            ok = not result.get("errors")
+        except:
+            ok = False
+        return JSONResponse({"status": "healthy" if ok else "degraded", "neo4j": "connected" if ok else "unreachable"})
+
+    async def rest_query(request: Request):
+        try:
+            cypher = request.query_params.get("q", "")
+            if not cypher:
+                return JSONResponse({"error": "Missing 'q' parameter"}, status_code=400)
+            result = await query_graph(cypher)
+            return JSONResponse({"status": "ok", "columns": result.columns, "data": result.data})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def rest_entity(request: Request):
+        try:
+            entity_id = request.query_params.get("id", "")
+            entity_type = request.query_params.get("type", "Host")
+            if not entity_id:
+                return JSONResponse({"error": "Missing 'id' parameter"}, status_code=400)
+            return JSONResponse(await get_entity_context(entity_id, entity_type))
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def rest_overview(request: Request):
+        try:
+            return JSONResponse(await get_infrastructure_overview())
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        logger.info(f"Starting neo4j-mcp on port {port}")
+        logger.info(f"Neo4j URL: {NEO4J_URL}")
+
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/query", rest_query, methods=["GET"]),
+            Route("/api/entity", rest_entity, methods=["GET"]),
+            Route("/api/overview", rest_overview, methods=["GET"]),
+        ]
+
+        mcp_app = mcp.http_app()
+        app = Starlette(routes=rest_routes + [Mount("/", app=mcp_app)], lifespan=mcp_app.lifespan)
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    fastmcp>=2.7.0
+    pydantic>=2.11.0
+    httpx>=0.28.0
+    uvicorn>=0.34.0
+    starlette>=0.40.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neo4j-mcp
+  namespace: ai-platform
+  labels:
+    app: neo4j-mcp
+    component: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neo4j-mcp
+  template:
+    metadata:
+      labels:
+        app: neo4j-mcp
+        component: mcp
+    spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+      containers:
+        - name: mcp-server
+          image: python:3.11-slim
+          command: ['sh', '-c', 'cd /app && PYTHONPATH=/app/deps python /code/main.py']
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: NEO4J_URL
+              value: "http://neo4j:7474"
+            - name: NEO4J_USER
+              value: "neo4j"
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: code
+          configMap:
+            name: neo4j-mcp-code
+        - name: deps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neo4j-mcp
+  namespace: ai-platform
+  labels:
+    app: neo4j-mcp
+    component: mcp
+spec:
+  type: NodePort
+  selector:
+    app: neo4j-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 31095
+      name: http

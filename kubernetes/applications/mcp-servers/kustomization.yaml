@@ -28,3 +28,5 @@ resources:
   - vikunja-mcp.yaml
   # Media management
   - plex-mcp.yaml
+  # Knowledge graph
+  - neo4j-mcp.yaml

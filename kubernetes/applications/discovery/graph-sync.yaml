@@ -1,0 +1,623 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: graph-sync
+  namespace: ai-platform
+  labels:
+    app: graph-sync
+    component: discovery
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  concurrencyPolicy: Forbid  # Prevent overlapping runs
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 240  # 4 minute timeout
+      template:
+        metadata:
+          labels:
+            app: graph-sync
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: graph-sync
+            image: python:3.11-slim
+            env:
+            - name: NEO4J_URL
+              value: "http://neo4j:7474"
+            - name: NEO4J_USER
+              value: "neo4j"
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
+            # MCP endpoints (cluster-internal)
+            - name: PROXMOX_MCP_URL
+              value: "http://proxmox-mcp:8000"
+            - name: UNIFI_MCP_URL
+              value: "http://unifi-mcp:8000"
+            - name: TRUENAS_MCP_URL
+              value: "http://truenas-mcp:8000"
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp:8000"
+            - name: KNOWLEDGE_MCP_URL
+              value: "http://knowledge-mcp:8000"
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "500m"
+            command:
+            - python
+            - -c
+            - |
+              import os
+              import json
+              import asyncio
+              import logging
+              from datetime import datetime, timedelta
+              from base64 import b64encode
+              from urllib.request import Request, urlopen
+              from urllib.error import URLError, HTTPError
+
+              logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+              logger = logging.getLogger(__name__)
+
+              # Configuration
+              NEO4J_URL = os.environ.get("NEO4J_URL", "http://neo4j:7474")
+              NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+              NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "").strip()
+
+              # MCP endpoints
+              MCP_SERVERS = {
+                  "proxmox": os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000"),
+                  "unifi": os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000"),
+                  "truenas": os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000"),
+                  "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
+                  "knowledge": os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000"),
+              }
+
+              def neo4j_query(cypher: str, params: dict = None) -> dict:
+                  """Execute Cypher query via Neo4j HTTP API."""
+                  url = f"{NEO4J_URL}/db/neo4j/tx/commit"
+                  auth = b64encode(f"{NEO4J_USER}:{NEO4J_PASSWORD}".encode()).decode()
+
+                  body = {
+                      "statements": [{
+                          "statement": cypher,
+                          "parameters": params or {}
+                      }]
+                  }
+
+                  req = Request(
+                      url,
+                      data=json.dumps(body).encode(),
+                      headers={
+                          "Content-Type": "application/json",
+                          "Authorization": f"Basic {auth}"
+                      },
+                      method="POST"
+                  )
+
+                  try:
+                      with urlopen(req, timeout=30) as resp:
+                          return json.loads(resp.read().decode())
+                  except (URLError, HTTPError) as e:
+                      logger.error(f"Neo4j query failed: {e}")
+                      return {"errors": [str(e)]}
+
+              def call_mcp_tool(server: str, tool_name: str, arguments: dict = None) -> dict:
+                  """Call MCP tool via JSON-RPC."""
+                  url = f"{MCP_SERVERS.get(server, '')}/mcp"
+
+                  body = {
+                      "jsonrpc": "2.0",
+                      "id": 1,
+                      "method": "tools/call",
+                      "params": {
+                          "name": tool_name,
+                          "arguments": arguments or {}
+                      }
+                  }
+
+                  req = Request(
+                      url,
+                      data=json.dumps(body).encode(),
+                      headers={"Content-Type": "application/json"},
+                      method="POST"
+                  )
+
+                  try:
+                      with urlopen(req, timeout=30) as resp:
+                          result = json.loads(resp.read().decode())
+                          if "result" in result and "content" in result["result"]:
+                              content = result["result"]["content"]
+                              if content and len(content) > 0:
+                                  text = content[0].get("text", "{}")
+                                  return json.loads(text) if text.startswith('{') or text.startswith('[') else {"text": text}
+                          return result.get("result", {})
+                  except (URLError, HTTPError) as e:
+                      logger.warning(f"MCP call {server}/{tool_name} failed: {e}")
+                      return {}
+                  except json.JSONDecodeError as e:
+                      logger.warning(f"MCP call {server}/{tool_name} JSON parse failed: {e}")
+                      return {}
+
+              def sync_proxmox_vms():
+                  """Sync VMs from Proxmox to Neo4j."""
+                  logger.info("Syncing Proxmox VMs...")
+
+                  # Get VMs list
+                  vms_response = call_mcp_tool("proxmox", "list_vms")
+                  vms = vms_response.get("vms", [])
+
+                  if not vms:
+                      logger.warning("No VMs returned from Proxmox MCP")
+                      return 0
+
+                  count = 0
+                  for vm in vms:
+                      vmid = vm.get("vmid")
+                      name = vm.get("name", f"vm-{vmid}")
+                      status = vm.get("status", "unknown")
+                      node = vm.get("node", "unknown")
+
+                      # Create VM node
+                      cypher = """
+                      MERGE (v:VM {vmid: $vmid})
+                      SET v.name = $name,
+                          v.status = $status,
+                          v.node = $node,
+                          v.type = $type,
+                          v.last_seen = datetime(),
+                          v.source = 'proxmox'
+                      WITH v
+                      MERGE (h:Host {hostname: $node})
+                      SET h.type = 'hypervisor'
+                      MERGE (h)-[:HOSTS]->(v)
+                      RETURN v.vmid
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "vmid": str(vmid),
+                          "name": name,
+                          "status": status,
+                          "node": node,
+                          "type": vm.get("type", "qemu")
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                  logger.info(f"Synced {count} VMs from Proxmox")
+                  return count
+
+              def sync_unifi_devices():
+                  """Sync UniFi network devices to Neo4j."""
+                  logger.info("Syncing UniFi devices...")
+
+                  # Get devices (APs, switches)
+                  devices_response = call_mcp_tool("unifi", "list_devices")
+                  devices = devices_response.get("devices", [])
+
+                  count = 0
+                  for device in devices:
+                      mac = device.get("mac", "").lower()
+                      if not mac:
+                          continue
+
+                      name = device.get("name", device.get("hostname", f"device-{mac}"))
+                      device_type = device.get("type", "unknown")
+                      model = device.get("model", "unknown")
+                      ip = device.get("ip", "")
+
+                      # Determine node label based on type
+                      label = "AccessPoint" if device_type in ["uap", "ap"] else "Switch" if device_type in ["usw", "sw"] else "NetworkDevice"
+
+                      cypher = f"""
+                      MERGE (d:{label} {{mac: $mac}})
+                      SET d.name = $name,
+                          d.model = $model,
+                          d.ip = $ip,
+                          d.status = $status,
+                          d.last_seen = datetime(),
+                          d.source = 'unifi'
+                      RETURN d.mac
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "mac": mac,
+                          "name": name,
+                          "model": model,
+                          "ip": ip,
+                          "status": device.get("state", "unknown")
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                  # Get clients and their AP connections
+                  clients_response = call_mcp_tool("unifi", "list_clients")
+                  clients = clients_response.get("clients", [])
+
+                  for client in clients:
+                      mac = client.get("mac", "").lower()
+                      ap_mac = client.get("ap_mac", "").lower()
+
+                      if mac and ap_mac:
+                          # Create CONNECTED_VIA relationship
+                          cypher = """
+                          MATCH (h:Host {mac: $mac})
+                          MATCH (ap:AccessPoint {mac: $ap_mac})
+                          MERGE (h)-[r:CONNECTED_VIA]->(ap)
+                          SET r.signal = $signal,
+                              r.channel = $channel,
+                              r.last_seen = datetime()
+                          RETURN type(r)
+                          """
+
+                          neo4j_query(cypher, {
+                              "mac": mac,
+                              "ap_mac": ap_mac,
+                              "signal": client.get("signal", 0),
+                              "channel": client.get("channel", 0)
+                          })
+
+                  logger.info(f"Synced {count} UniFi devices, processed {len(clients)} client connections")
+                  return count
+
+              def sync_truenas_storage():
+                  """Sync TrueNAS storage to Neo4j."""
+                  logger.info("Syncing TrueNAS storage...")
+
+                  # Get pools
+                  pools_response = call_mcp_tool("truenas", "list_pools")
+                  pools = pools_response.get("pools", [])
+
+                  count = 0
+                  for pool in pools:
+                      name = pool.get("name")
+                      if not name:
+                          continue
+
+                      cypher = """
+                      MERGE (p:StoragePool {name: $name})
+                      SET p.status = $status,
+                          p.size = $size,
+                          p.used = $used,
+                          p.last_seen = datetime(),
+                          p.source = 'truenas'
+                      RETURN p.name
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "status": pool.get("status", "unknown"),
+                          "size": pool.get("size", 0),
+                          "used": pool.get("used", 0)
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                  # Get datasets
+                  datasets_response = call_mcp_tool("truenas", "list_datasets")
+                  datasets = datasets_response.get("datasets", [])
+
+                  for dataset in datasets:
+                      name = dataset.get("name", "")
+                      pool_name = name.split("/")[0] if "/" in name else name
+
+                      cypher = """
+                      MERGE (d:Dataset {name: $name})
+                      SET d.mountpoint = $mountpoint,
+                          d.used = $used,
+                          d.available = $available,
+                          d.last_seen = datetime(),
+                          d.source = 'truenas'
+                      WITH d
+                      MATCH (p:StoragePool {name: $pool_name})
+                      MERGE (p)-[:CONTAINS]->(d)
+                      RETURN d.name
+                      """
+
+                      neo4j_query(cypher, {
+                          "name": name,
+                          "pool_name": pool_name,
+                          "mountpoint": dataset.get("mountpoint", ""),
+                          "used": dataset.get("used", 0),
+                          "available": dataset.get("available", 0)
+                      })
+
+                  # Get shares
+                  shares_response = call_mcp_tool("truenas", "list_shares")
+                  shares = shares_response.get("shares", [])
+
+                  for share in shares:
+                      path = share.get("path", "")
+                      name = share.get("name", path.split("/")[-1] if path else "unknown")
+
+                      cypher = """
+                      MERGE (s:Share {path: $path})
+                      SET s.name = $name,
+                          s.type = $type,
+                          s.enabled = $enabled,
+                          s.last_seen = datetime(),
+                          s.source = 'truenas'
+                      RETURN s.path
+                      """
+
+                      neo4j_query(cypher, {
+                          "path": path,
+                          "name": name,
+                          "type": share.get("type", "nfs"),
+                          "enabled": share.get("enabled", True)
+                      })
+
+                  logger.info(f"Synced {count} storage pools, {len(datasets)} datasets, {len(shares)} shares")
+                  return count
+
+              def sync_kubernetes_services():
+                  """Sync Kubernetes services to Neo4j."""
+                  logger.info("Syncing Kubernetes services...")
+
+                  # Get services from infrastructure MCP
+                  services_response = call_mcp_tool("infrastructure", "kubectl_get", {
+                      "resource": "services",
+                      "namespace": "",  # All namespaces
+                      "output": "json"
+                  })
+
+                  services = []
+                  if isinstance(services_response, dict) and "items" in services_response:
+                      services = services_response["items"]
+
+                  count = 0
+                  for svc in services:
+                      metadata = svc.get("metadata", {})
+                      name = metadata.get("name")
+                      namespace = metadata.get("namespace")
+
+                      if not name or not namespace:
+                          continue
+
+                      spec = svc.get("spec", {})
+                      svc_type = spec.get("type", "ClusterIP")
+                      cluster_ip = spec.get("clusterIP", "")
+
+                      cypher = """
+                      MERGE (s:Service {name: $name, namespace: $namespace})
+                      SET s.type = $type,
+                          s.cluster_ip = $cluster_ip,
+                          s.last_seen = datetime(),
+                          s.source = 'kubernetes'
+                      RETURN s.name
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "namespace": namespace,
+                          "type": svc_type,
+                          "cluster_ip": cluster_ip
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                  # Get pods
+                  pods_response = call_mcp_tool("infrastructure", "kubectl_get", {
+                      "resource": "pods",
+                      "namespace": "",
+                      "output": "json"
+                  })
+
+                  pods = []
+                  if isinstance(pods_response, dict) and "items" in pods_response:
+                      pods = pods_response["items"]
+
+                  pod_count = 0
+                  for pod in pods:
+                      metadata = pod.get("metadata", {})
+                      name = metadata.get("name")
+                      namespace = metadata.get("namespace")
+
+                      if not name or not namespace:
+                          continue
+
+                      spec = pod.get("spec", {})
+                      status = pod.get("status", {})
+                      node_name = spec.get("nodeName", "unknown")
+                      phase = status.get("phase", "unknown")
+
+                      cypher = """
+                      MERGE (p:Pod {name: $name, namespace: $namespace})
+                      SET p.node = $node,
+                          p.phase = $phase,
+                          p.last_seen = datetime(),
+                          p.source = 'kubernetes'
+                      WITH p
+                      MERGE (h:Host {hostname: $node})
+                      MERGE (p)-[:SCHEDULED_ON]->(h)
+                      RETURN p.name
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "namespace": namespace,
+                          "node": node_name,
+                          "phase": phase
+                      })
+
+                      if not result.get("errors"):
+                          pod_count += 1
+
+                  logger.info(f"Synced {count} services, {pod_count} pods")
+                  return count
+
+              def sync_runbooks():
+                  """Link runbooks to alerts in Neo4j."""
+                  logger.info("Syncing runbook relationships...")
+
+                  # Get runbooks from knowledge MCP
+                  runbooks_response = call_mcp_tool("knowledge", "search_runbooks", {"query": "*", "limit": 100})
+                  runbooks = runbooks_response.get("runbooks", [])
+
+                  count = 0
+                  for runbook in runbooks:
+                      title = runbook.get("title", "")
+                      qdrant_id = runbook.get("id", "")
+                      resolves_alerts = runbook.get("resolves_alerts", [])
+
+                      if not title:
+                          continue
+
+                      # Create runbook node
+                      cypher = """
+                      MERGE (r:RunbookDocument {qdrant_id: $qdrant_id})
+                      SET r.title = $title,
+                          r.path = $path,
+                          r.automation_level = $automation_level,
+                          r.last_seen = datetime(),
+                          r.source = 'knowledge'
+                      RETURN r.title
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "qdrant_id": qdrant_id,
+                          "title": title,
+                          "path": runbook.get("path", ""),
+                          "automation_level": runbook.get("automation_level", "manual")
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                      # Create RESOLVES relationships
+                      for alert_name in resolves_alerts:
+                          alert_cypher = """
+                          MATCH (r:RunbookDocument {qdrant_id: $qdrant_id})
+                          MERGE (a:Alert {name: $alert_name})
+                          MERGE (r)-[:RESOLVES]->(a)
+                          RETURN a.name
+                          """
+
+                          neo4j_query(alert_cypher, {
+                              "qdrant_id": qdrant_id,
+                              "alert_name": alert_name
+                          })
+
+                  logger.info(f"Synced {count} runbooks")
+                  return count
+
+              def run_lifecycle_management():
+                  """Update entity lifecycle status."""
+                  logger.info("Running lifecycle management...")
+
+                  # Mark entities not seen in 30 minutes as stale
+                  stale_result = neo4j_query("""
+                      MATCH (h:Host)
+                      WHERE h.last_seen < datetime() - duration('PT30M')
+                        AND h.status = 'online'
+                      SET h.status = 'stale'
+                      RETURN count(h) as stale_count
+                  """)
+
+                  stale_count = 0
+                  if stale_result.get("results"):
+                      data = stale_result["results"][0].get("data", [])
+                      if data:
+                          stale_count = data[0].get("row", [0])[0]
+
+                  # Mark entities stale for 24h as offline
+                  offline_result = neo4j_query("""
+                      MATCH (h:Host {status: 'stale'})
+                      WHERE h.last_seen < datetime() - duration('P1D')
+                      SET h.status = 'offline'
+                      RETURN count(h) as offline_count
+                  """)
+
+                  offline_count = 0
+                  if offline_result.get("results"):
+                      data = offline_result["results"][0].get("data", [])
+                      if data:
+                          offline_count = data[0].get("row", [0])[0]
+
+                  # Archive entities offline for 7 days
+                  archive_result = neo4j_query("""
+                      MATCH (h:Host {status: 'offline'})
+                      WHERE h.last_seen < datetime() - duration('P7D')
+                      SET h:ArchivedHost
+                      REMOVE h:Host
+                      RETURN count(h) as archived_count
+                  """)
+
+                  archived_count = 0
+                  if archive_result.get("results"):
+                      data = archive_result["results"][0].get("data", [])
+                      if data:
+                          archived_count = data[0].get("row", [0])[0]
+
+                  logger.info(f"Lifecycle: {stale_count} marked stale, {offline_count} marked offline, {archived_count} archived")
+
+              def main():
+                  logger.info("Starting graph-sync job")
+                  start_time = datetime.now()
+
+                  # Verify Neo4j connection
+                  test_result = neo4j_query("RETURN 1 as test")
+                  if test_result.get("errors"):
+                      logger.error(f"Neo4j connection failed: {test_result}")
+                      return 1
+
+                  logger.info("Neo4j connection verified")
+
+                  # Sync from each source
+                  results = {}
+
+                  try:
+                      results["proxmox_vms"] = sync_proxmox_vms()
+                  except Exception as e:
+                      logger.error(f"Proxmox sync failed: {e}")
+                      results["proxmox_vms"] = 0
+
+                  try:
+                      results["unifi_devices"] = sync_unifi_devices()
+                  except Exception as e:
+                      logger.error(f"UniFi sync failed: {e}")
+                      results["unifi_devices"] = 0
+
+                  try:
+                      results["truenas_storage"] = sync_truenas_storage()
+                  except Exception as e:
+                      logger.error(f"TrueNAS sync failed: {e}")
+                      results["truenas_storage"] = 0
+
+                  try:
+                      results["kubernetes"] = sync_kubernetes_services()
+                  except Exception as e:
+                      logger.error(f"Kubernetes sync failed: {e}")
+                      results["kubernetes"] = 0
+
+                  try:
+                      results["runbooks"] = sync_runbooks()
+                  except Exception as e:
+                      logger.error(f"Runbooks sync failed: {e}")
+                      results["runbooks"] = 0
+
+                  # Run lifecycle management
+                  try:
+                      run_lifecycle_management()
+                  except Exception as e:
+                      logger.error(f"Lifecycle management failed: {e}")
+
+                  elapsed = (datetime.now() - start_time).total_seconds()
+                  logger.info(f"Graph sync completed in {elapsed:.1f}s: {results}")
+                  return 0
+
+              if __name__ == "__main__":
+                  exit(main())
