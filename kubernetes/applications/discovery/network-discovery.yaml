@@ -508,16 +508,21 @@ data:
         """Get devices from OPNsense DHCP/ARP."""
         entities = []
 
-        # Get DHCP leases via REST API
-        leases = await call_rest_api(MCP_OPNSENSE_URL, "/api/dhcp/leases")
+        # Get DHCP leases via REST API (correct endpoint path)
+        leases = await call_rest_api(MCP_OPNSENSE_URL, "/api/dhcp_leases")
         if leases:
-            for lease in leases.get("data", leases.get("rows", [])):
-                entities.append({
-                    "ip": lease.get("address", lease.get("ip", "")),
-                    "mac": lease.get("mac", "").upper(),
-                    "hostname": lease.get("hostname", ""),
-                    "discovered_via": "opnsense_dhcp"
-                })
+            # Handle both formats: {"rows": [...]} and direct list
+            lease_list = leases.get("rows", leases) if isinstance(leases, dict) else leases
+            if isinstance(lease_list, list):
+                for lease in lease_list:
+                    entities.append({
+                        "ip": lease.get("address", lease.get("ip", "")),
+                        "mac": lease.get("mac", "").upper(),
+                        "hostname": lease.get("hostname", ""),
+                        "status": lease.get("status", "unknown"),
+                        "if_descr": lease.get("if_descr", ""),  # Network interface name
+                        "discovered_via": "opnsense_dhcp"
+                    })
 
         logger.info(f"OPNsense: Found {len(entities)} DHCP leases")
         return entities
