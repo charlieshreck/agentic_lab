@@ -69,6 +69,9 @@ spec:
         # Disable HTTPS (internal cluster traffic)
         - name: NEO4J_server_https_enabled
           value: "false"
+        # Disable strict config validation (K8s service discovery env vars conflict with Neo4j config parsing)
+        - name: NEO4J_server_config_strict__validation_enabled
+          value: "false"
         resources:
           requests:
             memory: "1Gi"
