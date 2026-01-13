@@ -163,19 +163,22 @@ data:
                 for r in result["results"][0]["data"]]
 
     async def _get_infrastructure_overview_impl() -> dict:
-        cypher = """
-        CALL { MATCH (h:Host) RETURN 'hosts' as l, count(h) as t, sum(CASE WHEN h.status='online' THEN 1 ELSE 0 END) as o }
-        UNION ALL CALL { MATCH (v:VM) RETURN 'vms' as l, count(v) as t, sum(CASE WHEN v.status='running' THEN 1 ELSE 0 END) as o }
-        UNION ALL CALL { MATCH (s:Service) RETURN 'services' as l, count(s) as t, count(s) as o }
-        UNION ALL CALL { MATCH (p:Pod) RETURN 'pods' as l, count(p) as t, sum(CASE WHEN p.phase='Running' THEN 1 ELSE 0 END) as o }
-        UNION ALL CALL { MATCH (n:Network) RETURN 'networks' as l, count(n) as t, count(n) as o }
-        """
-        result = await neo4j_query(cypher)
-        if result.get("errors"):
-            return {"error": str(result["errors"])}
         overview = {}
-        for row in result.get("results", [{}])[0].get("data", []):
-            overview[row["row"][0]] = {"total": row["row"][1], "online": row["row"][2]}
+        # Query each entity type separately
+        queries = [
+            ("hosts", "MATCH (h:Host) RETURN count(h) as total, sum(CASE WHEN h.status='online' THEN 1 ELSE 0 END) as online"),
+            ("vms", "MATCH (v:VM) RETURN count(v) as total, sum(CASE WHEN v.status='running' THEN 1 ELSE 0 END) as online"),
+            ("services", "MATCH (s:Service) RETURN count(s) as total, count(s) as online"),
+            ("pods", "MATCH (p:Pod) RETURN count(p) as total, sum(CASE WHEN p.phase='Running' THEN 1 ELSE 0 END) as online"),
+            ("networks", "MATCH (n:Network) RETURN count(n) as total, count(n) as online"),
+        ]
+        for label, cypher in queries:
+            result = await neo4j_query(cypher)
+            if not result.get("errors") and result.get("results", [{}])[0].get("data"):
+                row = result["results"][0]["data"][0]["row"]
+                overview[label] = {"total": row[0] or 0, "online": row[1] or 0}
+            else:
+                overview[label] = {"total": 0, "online": 0}
         return overview
 
     @mcp.tool()
