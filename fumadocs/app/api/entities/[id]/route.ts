@@ -13,14 +13,31 @@ export async function GET(
   try {
     const context = await getEntityContext(params.id, type);
 
-    if (!context) {
+    if (!context || !context.found) {
       return NextResponse.json(
         { error: 'Entity not found' },
         { status: 404 }
       );
     }
 
-    const response: any = { ...context };
+    // Transform Neo4j MCP response to frontend expected format
+    // MCP returns: {id, type, found, properties, relationships}
+    // Frontend expects: {entity, relationships}
+    const entity = {
+      id: context.id,
+      type: context.type,
+      ...context.properties,
+    };
+
+    const relationships = (context.relationships || []).map((rel: any) => ({
+      type: rel.type,
+      target: {
+        name: rel.target,
+        type: rel.target_type,
+      },
+    }));
+
+    const response: any = { entity, relationships };
 
     if (withDiagram) {
       response.diagram = await generateMermaidDiagram(params.id, depth);
