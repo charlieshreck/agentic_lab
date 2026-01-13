@@ -67,17 +67,19 @@ data:
         data = [row.get("row", []) for row in first.get("data", [])]
         return QueryResult(columns=columns, data=data, summary=f"Returned {len(data)} rows")
 
-    @mcp.tool()
-    async def query_graph(cypher: str) -> QueryResult:
-        """Execute read-only Cypher query. Examples: 'MATCH (h:Host) RETURN h.ip LIMIT 10'"""
+    # Base implementation functions (called by both MCP tools and REST API)
+    async def _query_graph_impl(cypher: str) -> QueryResult:
         upper = cypher.upper()
         if any(kw in upper for kw in ["MERGE", "CREATE", "DELETE", "SET", "REMOVE", "DROP"]):
             return QueryResult(columns=[], data=[], summary="Error: Write operations not allowed")
         return format_result(await neo4j_query(cypher))
 
     @mcp.tool()
-    async def get_entity_context(entity_id: str, entity_type: str = "Host") -> dict:
-        """Get entity with relationships. entity_id: IP, hostname, MAC, or name."""
+    async def query_graph(cypher: str) -> QueryResult:
+        """Execute read-only Cypher query. Examples: 'MATCH (h:Host) RETURN h.ip LIMIT 10'"""
+        return await _query_graph_impl(cypher)
+
+    async def _get_entity_context_impl(entity_id: str, entity_type: str = "Host") -> dict:
         cypher = f"""
         MATCH (e:{entity_type})
         WHERE e.ip = $id OR e.hostname = $id OR e.mac = $id OR e.name = $id OR e.vmid = $id
@@ -95,6 +97,11 @@ data:
         out = [r for r in data[1] if r.get("target")]
         inp = [{"direction": "incoming", **r} for r in data[2] if r.get("source")]
         return {"id": entity_id, "type": entity_type, "found": True, "properties": props, "relationships": out + inp}
+
+    @mcp.tool()
+    async def get_entity_context(entity_id: str, entity_type: str = "Host") -> dict:
+        """Get entity with relationships. entity_id: IP, hostname, MAC, or name."""
+        return await _get_entity_context_impl(entity_id, entity_type)
 
     @mcp.tool()
     async def find_dependencies(service_name: str, depth: int = 2) -> dict:
@@ -155,9 +162,7 @@ data:
         return [{"title": r["row"][0], "path": r["row"][1], "automation": r["row"][2], "alert": r["row"][3]}
                 for r in result["results"][0]["data"]]
 
-    @mcp.tool()
-    async def get_infrastructure_overview() -> dict:
-        """High-level infrastructure overview."""
+    async def _get_infrastructure_overview_impl() -> dict:
         cypher = """
         CALL { MATCH (h:Host) RETURN 'hosts' as l, count(h) as t, sum(CASE WHEN h.status='online' THEN 1 ELSE 0 END) as o }
         UNION ALL CALL { MATCH (v:VM) RETURN 'vms' as l, count(v) as t, sum(CASE WHEN v.status='running' THEN 1 ELSE 0 END) as o }
@@ -172,6 +177,11 @@ data:
         for row in result.get("results", [{}])[0].get("data", []):
             overview[row["row"][0]] = {"total": row["row"][1], "online": row["row"][2]}
         return overview
+
+    @mcp.tool()
+    async def get_infrastructure_overview() -> dict:
+        """High-level infrastructure overview."""
+        return await _get_infrastructure_overview_impl()
 
     @mcp.tool()
     async def get_hosts_on_network(network: str) -> List[dict]:
@@ -239,7 +249,7 @@ data:
             cypher = request.query_params.get("q", "")
             if not cypher:
                 return JSONResponse({"error": "Missing 'q' parameter"}, status_code=400)
-            result = await query_graph(cypher)
+            result = await _query_graph_impl(cypher)
             return JSONResponse({"status": "ok", "columns": result.columns, "data": result.data})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -250,13 +260,13 @@ data:
             entity_type = request.query_params.get("type", "Host")
             if not entity_id:
                 return JSONResponse({"error": "Missing 'id' parameter"}, status_code=400)
-            return JSONResponse(await get_entity_context(entity_id, entity_type))
+            return JSONResponse(await _get_entity_context_impl(entity_id, entity_type))
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def rest_overview(request: Request):
         try:
-            return JSONResponse(await get_infrastructure_overview())
+            return JSONResponse(await _get_infrastructure_overview_impl())
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
