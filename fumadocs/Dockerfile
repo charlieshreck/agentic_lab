@@ -3,17 +3,19 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
+# Install dependencies first
 COPY package.json ./
-
-# Install dependencies
 RUN npm install --legacy-peer-deps
 
-# Copy source
+# Copy source files
 COPY . .
 
-# Build
-RUN npm run build
+# Set environment for build
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+
+# Build - skip linting for faster builds
+RUN npm run build || (echo "Build failed, checking logs..." && cat .next/trace 2>/dev/null || true && exit 1)
 
 # Production stage
 FROM node:20-alpine AS runner
