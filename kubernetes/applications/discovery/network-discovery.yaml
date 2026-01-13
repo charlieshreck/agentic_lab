@@ -1236,22 +1236,3 @@ spec:
               name: discovery-script
               defaultMode: 0755
 
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: network-discovery
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/charlieshreck/agentic_lab.git
-    targetRevision: main
-    path: kubernetes/applications/discovery
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: ai-platform
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
