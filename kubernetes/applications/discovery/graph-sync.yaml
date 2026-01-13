@@ -45,6 +45,10 @@ spec:
               value: "http://infrastructure-mcp:8000"
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
+            - name: COROOT_MCP_URL
+              value: "http://coroot-mcp:8000"
+            - name: GATUS_URL
+              value: "http://10.30.0.20:32080"  # Monit cluster NodePort
             resources:
               requests:
                 memory: "128Mi"
@@ -80,7 +84,11 @@ spec:
                   "truenas": os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000"),
                   "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
                   "knowledge": os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000"),
+                  "coroot": os.environ.get("COROOT_MCP_URL", "http://coroot-mcp:8000"),
               }
+
+              # Direct API access (cross-cluster)
+              GATUS_URL = os.environ.get("GATUS_URL", "http://10.30.0.20:32080")
 
               def neo4j_query(cypher: str, params: dict = None) -> dict:
                   """Execute Cypher query via Neo4j HTTP API."""
@@ -146,6 +154,20 @@ spec:
                       return {}
                   except json.JSONDecodeError as e:
                       logger.warning(f"MCP call {server}/{tool_name} JSON parse failed: {e}")
+                      return {}
+
+              def call_rest_api(base_url: str, endpoint: str) -> dict:
+                  """Call REST API endpoint directly."""
+                  url = f"{base_url}{endpoint}"
+                  req = Request(url, headers={"Accept": "application/json"}, method="GET")
+                  try:
+                      with urlopen(req, timeout=30) as resp:
+                          return json.loads(resp.read().decode())
+                  except (URLError, HTTPError) as e:
+                      logger.warning(f"REST call {url} failed: {e}")
+                      return {}
+                  except json.JSONDecodeError as e:
+                      logger.warning(f"REST call {url} JSON parse failed: {e}")
                       return {}
 
               def sync_proxmox_vms():
@@ -514,6 +536,151 @@ spec:
                   logger.info(f"Synced {count} runbooks")
                   return count
 
+              def sync_coroot_services():
+                  """Sync service health from Coroot to Neo4j."""
+                  logger.info("Syncing Coroot service health...")
+
+                  # Get overview from coroot-mcp REST API
+                  overview_response = call_rest_api(MCP_SERVERS["coroot"], "/api/overview")
+                  overview = overview_response.get("data", {})
+
+                  if not overview or "error" in overview:
+                      logger.warning(f"Coroot overview unavailable: {overview.get('error', 'no data')}")
+                      return 0
+
+                  count = 0
+                  services = overview.get("services", {})
+                  for service_name, service_data in services.items():
+                      # Parse namespace/service from name
+                      parts = service_name.split("/")
+                      namespace = parts[0] if len(parts) > 1 else "unknown"
+                      name = parts[1] if len(parts) > 1 else parts[0]
+
+                      health = service_data.get("health", "unknown")
+                      anomaly_count = service_data.get("anomalies", 0)
+
+                      cypher = """
+                      MERGE (s:Service {name: $name, namespace: $namespace})
+                      SET s.health = $health,
+                          s.anomaly_count = $anomaly_count,
+                          s.last_health_check = datetime(),
+                          s.source = 'coroot'
+                      RETURN s.name
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "namespace": namespace,
+                          "health": health,
+                          "anomaly_count": anomaly_count
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                  # Get alerts
+                  alerts_response = call_rest_api(MCP_SERVERS["coroot"], "/api/alerts")
+                  alerts = alerts_response.get("data", [])
+
+                  for alert in alerts:
+                      alert_name = alert.get("name", alert.get("alertname", "unknown"))
+                      service = alert.get("service", "")
+                      status = alert.get("status", "unknown")
+                      severity = alert.get("severity", alert.get("labels", {}).get("severity", "info"))
+
+                      cypher = """
+                      MERGE (a:Alert {name: $alert_name})
+                      SET a.status = $status,
+                          a.severity = $severity,
+                          a.service = $service,
+                          a.last_seen = datetime(),
+                          a.source = 'coroot'
+                      RETURN a.name
+                      """
+
+                      neo4j_query(cypher, {
+                          "alert_name": alert_name,
+                          "status": status,
+                          "severity": severity,
+                          "service": service
+                      })
+
+                  logger.info(f"Synced {count} services from Coroot, {len(alerts)} alerts")
+                  return count
+
+              def sync_gatus_health():
+                  """Sync endpoint health from Gatus to Neo4j."""
+                  logger.info("Syncing Gatus endpoint health...")
+
+                  # Get endpoint statuses directly from Gatus API
+                  response = call_rest_api(GATUS_URL, "/api/v1/endpoints/statuses")
+
+                  if not response or isinstance(response, dict) and "error" in response:
+                      logger.warning(f"Gatus unavailable: {response}")
+                      return 0
+
+                  count = 0
+                  endpoints = response if isinstance(response, list) else []
+
+                  for endpoint in endpoints:
+                      name = endpoint.get("name", "unknown")
+                      group = endpoint.get("group", "default")
+                      key = endpoint.get("key", f"{group}_{name}")
+
+                      # Get latest result
+                      results = endpoint.get("results", [])
+                      latest = results[-1] if results else {}
+                      success = latest.get("success", False)
+                      status_code = latest.get("status", 0)
+                      response_time = latest.get("duration", 0) / 1000000  # Convert ns to ms
+                      timestamp = latest.get("timestamp", "")
+
+                      # Calculate uptime from recent results
+                      uptime = 0
+                      if results:
+                          successful = sum(1 for r in results if r.get("success", False))
+                          uptime = round((successful / len(results)) * 100, 2)
+
+                      cypher = """
+                      MERGE (e:UptimeMonitor {key: $key})
+                      SET e.name = $name,
+                          e.group = $group,
+                          e.healthy = $healthy,
+                          e.status_code = $status_code,
+                          e.response_time_ms = $response_time,
+                          e.uptime_percent = $uptime,
+                          e.last_check = datetime(),
+                          e.source = 'gatus'
+                      RETURN e.key
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "key": key,
+                          "name": name,
+                          "group": group,
+                          "healthy": success,
+                          "status_code": status_code,
+                          "response_time": response_time,
+                          "uptime": uptime
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                      # Try to link to related Service
+                      if group in ["Apps", "Media", "Home Automation", "Monitoring", "Notes"]:
+                          cypher_link = """
+                          MATCH (e:UptimeMonitor {key: $key})
+                          MATCH (s:Service)
+                          WHERE toLower(s.name) CONTAINS toLower($name) OR toLower($name) CONTAINS toLower(s.name)
+                          MERGE (e)-[:MONITORS]->(s)
+                          RETURN type(e)
+                          """
+                          neo4j_query(cypher_link, {"key": key, "name": name})
+
+                  logger.info(f"Synced {count} endpoints from Gatus")
+                  return count
+
               def run_lifecycle_management():
                   """Update entity lifecycle status."""
                   logger.info("Running lifecycle management...")
@@ -608,6 +775,18 @@ spec:
                   except Exception as e:
                       logger.error(f"Runbooks sync failed: {e}")
                       results["runbooks"] = 0
+
+                  try:
+                      results["coroot_services"] = sync_coroot_services()
+                  except Exception as e:
+                      logger.error(f"Coroot sync failed: {e}")
+                      results["coroot_services"] = 0
+
+                  try:
+                      results["gatus_health"] = sync_gatus_health()
+                  except Exception as e:
+                      logger.error(f"Gatus sync failed: {e}")
+                      results["gatus_health"] = 0
 
                   # Run lifecycle management
                   try:

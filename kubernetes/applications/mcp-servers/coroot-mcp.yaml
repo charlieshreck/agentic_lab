@@ -25,7 +25,7 @@ data:
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    COROOT_URL = os.environ.get("COROOT_URL", "http://coroot.monit-homelab.svc.cluster.local:8080")
+    COROOT_URL = os.environ.get("COROOT_URL", "http://10.30.0.20:32702")  # Monit cluster NodePort
     COROOT_PROJECT = os.environ.get("COROOT_PROJECT", "default")
 
     mcp = FastMCP(
@@ -263,7 +263,7 @@ spec:
             - name: PORT
               value: "8000"
             - name: COROOT_URL
-              value: "http://coroot.monit-homelab.svc.cluster.local:8080"
+              value: "http://10.30.0.20:32702"  # Monit cluster NodePort (cross-cluster access)
             - name: COROOT_PROJECT
               value: "default"
           volumeMounts:
