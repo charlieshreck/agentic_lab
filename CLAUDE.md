@@ -135,6 +135,24 @@ The neo4j-mcp provides **relationship-aware queries** complementing Qdrant's sem
 - network-discovery (every 15 min) - Hosts, Networks, CONNECTED_TO
 - graph-sync (every 5 min) - VMs, Services, Pods, lifecycle management
 
+#### 3d. Kernow Knowledge UI (fumadocs)
+
+Web interface for browsing entities, exploring the knowledge graph, and searching documentation.
+
+| Feature | Description |
+|---------|-------------|
+| **Entities** | Browse hosts, VMs, services, network devices |
+| **Graph** | Explore relationships and dependencies (Neo4j) |
+| **Search** | Semantic search across runbooks and docs (Qdrant) |
+
+**Access:**
+- Internal: `http://10.20.0.40:31099/`
+- External: (not configured yet)
+
+**Tech Stack:** Next.js 14, Tailwind CSS, standalone Docker build
+
+**Source:** `/home/agentic_lab/fumadocs/`
+
 #### 4. Human-in-the-Loop
 - **Interface**: Matrix/Element (self-hosted Conduit server)
 - **Workflow**: Threaded conversations, reaction-based approvals
