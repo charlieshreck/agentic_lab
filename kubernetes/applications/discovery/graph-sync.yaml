@@ -120,7 +120,7 @@ spec:
                       return {"errors": [str(e)]}
 
               def call_mcp_tool(server: str, tool_name: str, arguments: dict = None) -> dict:
-                  """Call MCP tool via JSON-RPC."""
+                  """Call MCP tool via JSON-RPC with SSE response parsing."""
                   url = f"{MCP_SERVERS.get(server, '')}/mcp"
 
                   body = {
@@ -136,19 +136,38 @@ spec:
                   req = Request(
                       url,
                       data=json.dumps(body).encode(),
-                      headers={"Content-Type": "application/json"},
+                      headers={
+                          "Content-Type": "application/json",
+                          "Accept": "application/json, text/event-stream"
+                      },
                       method="POST"
                   )
 
                   try:
                       with urlopen(req, timeout=30) as resp:
-                          result = json.loads(resp.read().decode())
-                          if "result" in result and "content" in result["result"]:
-                              content = result["result"]["content"]
-                              if content and len(content) > 0:
-                                  text = content[0].get("text", "{}")
-                                  return json.loads(text) if text.startswith('{') or text.startswith('[') else {"text": text}
-                          return result.get("result", {})
+                          raw = resp.read().decode()
+                          # Parse SSE format: "event: message\ndata: {...}"
+                          for line in raw.split('\n'):
+                              if line.startswith('data: '):
+                                  result = json.loads(line[6:])  # Skip "data: " prefix
+                                  if "result" in result and "content" in result["result"]:
+                                      content = result["result"]["content"]
+                                      if content and len(content) > 0:
+                                          text = content[0].get("text", "{}")
+                                          return json.loads(text) if text.startswith(('{', '[')) else {"text": text}
+                                  return result.get("result", {})
+                          # Fallback: try parsing as plain JSON (non-SSE response)
+                          try:
+                              result = json.loads(raw)
+                              if "result" in result and "content" in result["result"]:
+                                  content = result["result"]["content"]
+                                  if content and len(content) > 0:
+                                      text = content[0].get("text", "{}")
+                                      return json.loads(text) if text.startswith(('{', '[')) else {"text": text}
+                              return result.get("result", {})
+                          except json.JSONDecodeError:
+                              pass
+                          return {}
                   except (URLError, HTTPError) as e:
                       logger.warning(f"MCP call {server}/{tool_name} failed: {e}")
                       return {}
