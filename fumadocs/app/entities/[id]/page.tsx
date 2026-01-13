@@ -46,15 +46,15 @@ export default function EntityDetailPage({ params }: { params: { id: string } })
       });
   }, [params.id]);
 
-  useEffect(() => {
-    // Initialize Mermaid after component mounts
-    if (context?.diagram) {
-      import('mermaid').then((mermaid) => {
-        mermaid.default.initialize({ startOnLoad: true, theme: 'dark' });
-        mermaid.default.run();
-      });
-    }
-  }, [context?.diagram]);
+  // Mermaid diagram rendering disabled - add dependency to re-enable
+  // useEffect(() => {
+  //   if (context?.diagram) {
+  //     import('mermaid').then((mermaid) => {
+  //       mermaid.default.initialize({ startOnLoad: true, theme: 'dark' });
+  //       mermaid.default.run();
+  //     });
+  //   }
+  // }, [context?.diagram]);
 
   if (loading) {
     return (
@@ -148,13 +148,13 @@ export default function EntityDetailPage({ params }: { params: { id: string } })
           </div>
         </div>
 
-        {/* Relationship Diagram */}
+        {/* Relationship Diagram - Mermaid disabled */}
         {diagram && (
           <div className="mt-8 bg-gray-800 rounded-lg p-6">
             <h2 className="text-xl font-semibold mb-4">Relationship Graph</h2>
-            <div className="mermaid bg-gray-900 rounded-lg p-4 overflow-x-auto">
+            <pre className="bg-gray-900 rounded-lg p-4 overflow-x-auto text-sm text-gray-300">
               {diagram}
-            </div>
+            </pre>
           </div>
         )}
       </div>

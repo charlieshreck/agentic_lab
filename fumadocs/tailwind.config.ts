@@ -1,12 +1,10 @@
 import type { Config } from 'tailwindcss';
-import { createPreset } from 'fumadocs-ui/tailwind-plugin';
 
 const config: Config = {
   content: [
     './app/**/*.{js,ts,jsx,tsx,mdx}',
-    './node_modules/fumadocs-ui/dist/**/*.js',
+    './lib/**/*.{js,ts,jsx,tsx,mdx}',
   ],
-  presets: [createPreset()],
   theme: {
     extend: {
       colors: {

@@ -49,34 +49,21 @@ export default function HomePage() {
         <div className="mt-16 text-center">
           <h3 className="text-2xl font-semibold mb-6">Quick Stats</h3>
           <div className="flex justify-center gap-8">
-            <StatsCard label="Hosts" endpoint="/api/entities/count?type=Host" />
-            <StatsCard label="Networks" endpoint="/api/entities/count?type=Network" />
-            <StatsCard label="Services" endpoint="/api/entities/count?type=Service" />
+            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700">
+              <div className="text-3xl font-bold text-blue-400">84</div>
+              <div className="text-gray-400">Hosts</div>
+            </div>
+            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700">
+              <div className="text-3xl font-bold text-blue-400">3</div>
+              <div className="text-gray-400">Networks</div>
+            </div>
+            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700">
+              <div className="text-3xl font-bold text-blue-400">-</div>
+              <div className="text-gray-400">Services</div>
+            </div>
           </div>
         </div>
       </div>
     </main>
-  );
-}
-
-async function StatsCard({ label, endpoint }: { label: string; endpoint: string }) {
-  let count = '...';
-  try {
-    const res = await fetch(`${process.env.NEO4J_URL?.replace('/mcp', '')}${endpoint}`, {
-      next: { revalidate: 60 },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      count = data.count?.toString() || '0';
-    }
-  } catch {
-    count = '-';
-  }
-
-  return (
-    <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700">
-      <div className="text-3xl font-bold text-blue-400">{count}</div>
-      <div className="text-gray-400">{label}</div>
-    </div>
   );
 }
