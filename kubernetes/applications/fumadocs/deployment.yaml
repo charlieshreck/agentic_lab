@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: fumadocs
-          image: ghcr.io/charlieshreck/kernow-knowledge-ui:latest
+          image: ghcr.io/charlieshreck/agentic_lab/kernow-knowledge-ui:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 3000

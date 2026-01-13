@@ -71,7 +71,7 @@ spec:
               # Configuration
               NEO4J_URL = os.environ.get("NEO4J_URL", "http://neo4j:7474")
               NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
-              NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "").strip()
+              NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")  # Don't strip - Neo4j was initialized with newline
 
               # MCP endpoints
               MCP_SERVERS = {
