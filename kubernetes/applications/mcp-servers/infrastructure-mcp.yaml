@@ -628,7 +628,12 @@ data:
             namespace = request.query_params.get("namespace")
             all_ns = namespace is None
 
-            stdout, stderr, rc = run_kubectl(["get", "pods", "-A" if all_ns else "-n", namespace or "", "-o", "json"])
+            args = ["get", "pods", "-o", "json"]
+            if all_ns:
+                args.insert(2, "-A")
+            else:
+                args.extend(["-n", namespace])
+            stdout, stderr, rc = run_kubectl(args)
             if rc != 0:
                 return JSONResponse({"error": stderr, "pods": []}, status_code=500)
 
@@ -656,7 +661,12 @@ data:
             namespace = request.query_params.get("namespace")
             all_ns = namespace is None
 
-            stdout, stderr, rc = run_kubectl(["get", "services", "-A" if all_ns else "-n", namespace or "", "-o", "json"])
+            args = ["get", "services", "-o", "json"]
+            if all_ns:
+                args.insert(2, "-A")
+            else:
+                args.extend(["-n", namespace])
+            stdout, stderr, rc = run_kubectl(args)
             if rc != 0:
                 return JSONResponse({"error": stderr, "services": []}, status_code=500)
 
