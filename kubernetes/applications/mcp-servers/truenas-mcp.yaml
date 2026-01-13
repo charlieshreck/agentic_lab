@@ -310,7 +310,7 @@ data:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
     async def rest_pools(request):
-        """REST endpoint for storage pools."""
+        """REST endpoint for storage pools - used by graph-sync CronJob."""
         try:
             all_pools = []
             for name, config in INSTANCES.items():
@@ -321,13 +321,13 @@ data:
                     all_pools.extend(pools)
                 except Exception as e:
                     logger.warning(f"Failed to get pools from {name}: {e}")
-            return JSONResponse({"status": "ok", "data": all_pools, "count": len(all_pools)})
+            return JSONResponse({"pools": all_pools})
         except Exception as e:
             logger.error(f"REST pools error: {e}")
-            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+            return JSONResponse({"error": str(e), "pools": []}, status_code=500)
 
     async def rest_datasets(request):
-        """REST endpoint for ZFS datasets."""
+        """REST endpoint for ZFS datasets - used by graph-sync CronJob."""
         try:
             all_datasets = []
             for name, config in INSTANCES.items():
@@ -338,10 +338,32 @@ data:
                     all_datasets.extend(datasets)
                 except Exception as e:
                     logger.warning(f"Failed to get datasets from {name}: {e}")
-            return JSONResponse({"status": "ok", "data": all_datasets, "count": len(all_datasets)})
+            return JSONResponse({"datasets": all_datasets})
         except Exception as e:
             logger.error(f"REST datasets error: {e}")
-            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+            return JSONResponse({"error": str(e), "datasets": []}, status_code=500)
+
+    async def rest_shares(request):
+        """REST endpoint for shares - used by graph-sync CronJob."""
+        try:
+            all_nfs = []
+            all_smb = []
+            for name, config in INSTANCES.items():
+                try:
+                    nfs = await _truenas_api(name, "/sharing/nfs")
+                    for share in nfs:
+                        share["instance"] = name
+                    all_nfs.extend(nfs)
+                    smb = await _truenas_api(name, "/sharing/smb")
+                    for share in smb:
+                        share["instance"] = name
+                    all_smb.extend(smb)
+                except Exception as e:
+                    logger.warning(f"Failed to get shares from {name}: {e}")
+            return JSONResponse({"nfs": all_nfs, "smb": all_smb})
+        except Exception as e:
+            logger.error(f"REST shares error: {e}")
+            return JSONResponse({"error": str(e), "nfs": [], "smb": []}, status_code=500)
 
     if __name__ == "__main__":
         import uvicorn
@@ -350,6 +372,7 @@ data:
             Route("/api/system", rest_system, methods=["GET"]),
             Route("/api/pools", rest_pools, methods=["GET"]),
             Route("/api/datasets", rest_datasets, methods=["GET"]),
+            Route("/api/shares", rest_shares, methods=["GET"]),
         ]
         mcp_app = mcp.http_app()
         app = Starlette(

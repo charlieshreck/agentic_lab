@@ -622,6 +622,89 @@ data:
             logger.error(f"REST execute error: {e}")
             return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
+    async def rest_pods(request: Request):
+        """REST endpoint for pods - used by graph-sync CronJob."""
+        try:
+            namespace = request.query_params.get("namespace")
+            all_ns = namespace is None
+
+            stdout, stderr, rc = run_kubectl(["get", "pods", "-A" if all_ns else "-n", namespace or "", "-o", "json"])
+            if rc != 0:
+                return JSONResponse({"error": stderr, "pods": []}, status_code=500)
+
+            data = parse_json_output(stdout)
+            pods = []
+            for pod in data.get("items", []):
+                container_statuses = pod["status"].get("containerStatuses", [])
+                pods.append({
+                    "name": pod["metadata"]["name"],
+                    "namespace": pod["metadata"]["namespace"],
+                    "status": pod["status"]["phase"],
+                    "ready": all(c.get("ready", False) for c in container_statuses),
+                    "restarts": sum(c.get("restartCount", 0) for c in container_statuses),
+                    "node": pod["spec"].get("nodeName", ""),
+                    "ip": pod["status"].get("podIP", "")
+                })
+            return JSONResponse({"pods": pods})
+        except Exception as e:
+            logger.error(f"REST pods error: {e}")
+            return JSONResponse({"error": str(e), "pods": []}, status_code=500)
+
+    async def rest_services(request: Request):
+        """REST endpoint for services - used by graph-sync CronJob."""
+        try:
+            namespace = request.query_params.get("namespace")
+            all_ns = namespace is None
+
+            stdout, stderr, rc = run_kubectl(["get", "services", "-A" if all_ns else "-n", namespace or "", "-o", "json"])
+            if rc != 0:
+                return JSONResponse({"error": stderr, "services": []}, status_code=500)
+
+            data = parse_json_output(stdout)
+            services = []
+            for svc in data.get("items", []):
+                spec = svc.get("spec", {})
+                ports = []
+                for port in spec.get("ports", []):
+                    port_str = f"{port.get('port', 0)}/{port.get('protocol', 'TCP')}"
+                    if port.get("nodePort"):
+                        port_str += f":{port['nodePort']}"
+                    ports.append(port_str)
+                services.append({
+                    "name": svc["metadata"]["name"],
+                    "namespace": svc["metadata"]["namespace"],
+                    "type": spec.get("type", "ClusterIP"),
+                    "cluster_ip": spec.get("clusterIP", "None"),
+                    "ports": ports
+                })
+            return JSONResponse({"services": services})
+        except Exception as e:
+            logger.error(f"REST services error: {e}")
+            return JSONResponse({"error": str(e), "services": []}, status_code=500)
+
+    async def rest_nodes(request: Request):
+        """REST endpoint for nodes - used by graph-sync CronJob."""
+        try:
+            stdout, stderr, rc = run_kubectl(["get", "nodes", "-o", "json"])
+            if rc != 0:
+                return JSONResponse({"error": stderr, "nodes": []}, status_code=500)
+
+            data = parse_json_output(stdout)
+            nodes = []
+            for node in data.get("items", []):
+                conditions = {c["type"]: c["status"] for c in node["status"].get("conditions", [])}
+                nodes.append({
+                    "name": node["metadata"]["name"],
+                    "ready": conditions.get("Ready") == "True",
+                    "roles": [k.replace("node-role.kubernetes.io/", "") for k in node["metadata"].get("labels", {}) if k.startswith("node-role.kubernetes.io/")],
+                    "version": node["status"].get("nodeInfo", {}).get("kubeletVersion", ""),
+                    "internal_ip": next((addr["address"] for addr in node["status"].get("addresses", []) if addr["type"] == "InternalIP"), "")
+                })
+            return JSONResponse({"nodes": nodes})
+        except Exception as e:
+            logger.error(f"REST nodes error: {e}")
+            return JSONResponse({"error": str(e), "nodes": []}, status_code=500)
+
     # ============================================================================
     # MAIN
     # ============================================================================
@@ -635,6 +718,9 @@ data:
             Route("/health", rest_health, methods=["GET"]),
             Route("/api/cluster", rest_api_cluster, methods=["GET"]),
             Route("/api/health", rest_cluster_health, methods=["GET"]),
+            Route("/api/pods", rest_pods, methods=["GET"]),
+            Route("/api/services", rest_services, methods=["GET"]),
+            Route("/api/nodes", rest_nodes, methods=["GET"]),
             Route("/execute", rest_execute, methods=["POST"]),
         ]
 

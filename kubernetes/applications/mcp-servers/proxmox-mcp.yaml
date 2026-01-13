@@ -533,7 +533,7 @@ data:
         return JSONResponse({"status": "healthy"})
 
     async def rest_vms(request):
-        """REST endpoint for VMs - used by network-discovery CronJob."""
+        """REST endpoint for VMs - used by graph-sync CronJob."""
         try:
             nodes = await _proxmox_api("/nodes")
             all_vms = []
@@ -560,13 +560,13 @@ data:
                         all_vms.append(vm)
                 except Exception as e:
                     logger.warning(f"Failed to get VMs from node {node_name}: {e}")
-            return JSONResponse({"status": "ok", "data": all_vms, "count": len(all_vms)})
+            return JSONResponse({"vms": all_vms})
         except Exception as e:
             logger.error(f"REST vms error: {e}")
-            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+            return JSONResponse({"error": str(e), "vms": []}, status_code=500)
 
     async def rest_containers(request):
-        """REST endpoint for LXC containers - used by network-discovery CronJob."""
+        """REST endpoint for LXC containers - used by graph-sync CronJob."""
         try:
             nodes = await _proxmox_api("/nodes")
             all_cts = []
@@ -579,19 +579,19 @@ data:
                         all_cts.append(ct)
                 except Exception as e:
                     logger.warning(f"Failed to get containers from node {node_name}: {e}")
-            return JSONResponse({"status": "ok", "data": all_cts, "count": len(all_cts)})
+            return JSONResponse({"containers": all_cts})
         except Exception as e:
             logger.error(f"REST containers error: {e}")
-            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+            return JSONResponse({"error": str(e), "containers": []}, status_code=500)
 
     async def rest_nodes(request):
         """REST endpoint for cluster nodes."""
         try:
             nodes = await _proxmox_api("/nodes")
-            return JSONResponse({"status": "ok", "data": nodes, "count": len(nodes)})
+            return JSONResponse({"nodes": nodes})
         except Exception as e:
             logger.error(f"REST nodes error: {e}")
-            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+            return JSONResponse({"error": str(e), "nodes": []}, status_code=500)
 
     if __name__ == "__main__":
         import uvicorn
