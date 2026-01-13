@@ -32,6 +32,11 @@ data:
     LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
 
+    # Neo4j Configuration
+    NEO4J_URL = os.environ.get("NEO4J_URL", "http://neo4j:7474")
+    NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")
+
     # MCP endpoints (running in ai-platform namespace)
     MCP_OPNSENSE_URL = os.environ.get("MCP_OPNSENSE_URL", "http://opnsense-mcp:8000")
     MCP_UNIFI_URL = os.environ.get("MCP_UNIFI_URL", "http://unifi-mcp:8000")
@@ -379,6 +384,109 @@ data:
                 json={"points": points}
             )
             return response.status_code == 200
+
+
+    async def neo4j_upsert(entities: List[dict]) -> bool:
+        """
+        Upsert entities to Neo4j graph database.
+        Creates Host nodes and CONNECTED_TO Network relationships.
+        """
+        if not NEO4J_PASSWORD:
+            logger.warning("NEO4J_PASSWORD not set, skipping Neo4j sync")
+            return False
+
+        try:
+            # Build batch of Cypher statements
+            statements = []
+            for entity in entities:
+                ip = entity.get("ip", "")
+                mac = entity.get("mac", "")
+                hostname = entity.get("hostname", "")
+                device_type = entity.get("type", "unknown")
+                category = entity.get("category", "unknown")
+                manufacturer = entity.get("manufacturer", "unknown")
+                network = entity.get("network", "prod")
+                status = entity.get("status", "online")
+                qdrant_id = entity.get("qdrant_id", "")
+
+                if not ip:
+                    continue
+
+                # Determine network from IP
+                if ip.startswith("10.10."):
+                    network = "prod"
+                elif ip.startswith("10.20."):
+                    network = "agentic"
+                elif ip.startswith("10.30."):
+                    network = "monitoring"
+
+                # MERGE Host node and update properties
+                cypher = """
+                MERGE (h:Host {ip: $ip})
+                SET h += {
+                    mac: $mac,
+                    hostname: $hostname,
+                    type: $type,
+                    category: $category,
+                    manufacturer: $manufacturer,
+                    status: $status,
+                    qdrant_id: $qdrant_id,
+                    last_seen: datetime()
+                }
+                WITH h
+                MERGE (n:Network {name: $network})
+                MERGE (h)-[:CONNECTED_TO]->(n)
+                RETURN h.ip as ip
+                """
+
+                statements.append({
+                    "statement": cypher,
+                    "parameters": {
+                        "ip": ip,
+                        "mac": mac or "",
+                        "hostname": hostname or "",
+                        "type": device_type,
+                        "category": category,
+                        "manufacturer": manufacturer,
+                        "network": network,
+                        "status": status,
+                        "qdrant_id": qdrant_id
+                    }
+                })
+
+            if not statements:
+                logger.info("No entities to upsert to Neo4j")
+                return True
+
+            # Execute transaction against Neo4j HTTP API
+            import base64
+            auth_string = base64.b64encode(f"{NEO4J_USER}:{NEO4J_PASSWORD}".encode()).decode()
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{NEO4J_URL}/db/neo4j/tx/commit",
+                    json={"statements": statements},
+                    headers={
+                        "Authorization": f"Basic {auth_string}",
+                        "Content-Type": "application/json"
+                    }
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    errors = result.get("errors", [])
+                    if errors:
+                        logger.error(f"Neo4j transaction errors: {errors}")
+                        return False
+                    logger.info(f"Synced {len(statements)} entities to Neo4j")
+                    return True
+                else:
+                    logger.error(f"Neo4j upsert failed: {response.status_code} - {response.text}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Neo4j upsert error: {e}")
+            return False
 
 
     async def call_rest_api(base_url: str, endpoint: str, method: str = "GET", params: dict = None) -> Optional[dict]:
@@ -1020,15 +1128,35 @@ data:
 
         logger.info(f"Upserting {len(qdrant_points)} entities to Qdrant")
 
-        # Batch upsert
+        # Batch upsert to Qdrant
         batch_size = 50
         for i in range(0, len(qdrant_points), batch_size):
             batch = qdrant_points[i:i+batch_size]
             success = await qdrant_upsert(batch)
             if success:
-                logger.info(f"Upserted batch {i//batch_size + 1}")
+                logger.info(f"Upserted Qdrant batch {i//batch_size + 1}")
             else:
-                logger.error(f"Failed to upsert batch {i//batch_size + 1}")
+                logger.error(f"Failed to upsert Qdrant batch {i//batch_size + 1}")
+
+        # Sync entities to Neo4j graph database
+        if NEO4J_PASSWORD:
+            logger.info(f"Syncing {len(qdrant_points)} entities to Neo4j")
+            # Extract entities from Qdrant points and add qdrant_id
+            neo4j_entities = []
+            for point in qdrant_points:
+                entity = point["payload"].copy()
+                entity["qdrant_id"] = point["id"]
+                neo4j_entities.append(entity)
+
+            # Batch upsert to Neo4j
+            neo4j_batch_size = 100
+            for i in range(0, len(neo4j_entities), neo4j_batch_size):
+                batch = neo4j_entities[i:i+neo4j_batch_size]
+                success = await neo4j_upsert(batch)
+                if not success:
+                    logger.error(f"Failed to upsert Neo4j batch {i//neo4j_batch_size + 1}")
+        else:
+            logger.info("Skipping Neo4j sync (NEO4J_PASSWORD not configured)")
 
         logger.info("Discovery complete!")
 
@@ -1082,6 +1210,16 @@ spec:
               value: "10.40.0.10"
             - name: SCAN_NETWORKS
               value: "10.10.0.0/24,10.20.0.0/24,10.30.0.0/24"
+            # Neo4j configuration
+            - name: NEO4J_URL
+              value: "http://neo4j.ai-platform.svc.cluster.local:7474"
+            - name: NEO4J_USER
+              value: "neo4j"
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
             volumeMounts:
             - name: script
               mountPath: /scripts
