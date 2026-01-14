@@ -323,7 +323,8 @@ data:
             result = await neo4j_query(cypher, {"id": entity_id})
 
             # Fallback if APOC not available OR primary query returns empty (CALL subquery may not work via HTTP)
-            primary_data = result.get("results", [{}])[0].get("data", [])
+            primary_results = result.get("results", [])
+            primary_data = primary_results[0].get("data", []) if primary_results else []
             if result.get("errors") or not primary_data:
                 cypher = f"""
                 MATCH (e:{entity_type})
