@@ -523,6 +523,13 @@ data:
             if (hostname and hostname == node_name) or (ip and ip == node_ip):
                 cluster = node.get("cluster", "unknown")
 
+                # Store K8s node name
+                enrichment["k8s_node_name"] = node.get("name", "")
+
+                # If hostname looks like DNS-resolved K8s internal name, use node name
+                if "kubernetes.default.svc" in hostname or hostname.startswith("10-"):
+                    enrichment["hostname"] = node.get("name", "")
+
                 # Basic K8s info
                 enrichment["k8s_cluster"] = cluster
                 enrichment["k8s_ready"] = node.get("ready", False)
@@ -540,10 +547,11 @@ data:
                 pod_count = pod_counts.get(key, 0)
                 enrichment["k8s_pod_count"] = pod_count
 
-                # Update category/type if not already set by Proxmox
-                if not entity.get("category"):
+                # Talos-based K8s nodes
+                if "talos" in node_name or cluster in ["prod", "agentic", "monit"]:
+                    enrichment["type"] = "talos_node"
                     enrichment["category"] = "kubernetes"
-                if not entity.get("type") or entity.get("type") == "unknown":
+                elif not entity.get("type") or entity.get("type") == "unknown":
                     if "control-plane" in roles:
                         enrichment["type"] = "k8s_control_plane"
                     else:
@@ -663,7 +671,7 @@ data:
         params = {"ip": ip}
 
         enrichment_fields = [
-            "friendly_name", "location", "type", "category", "manufacturer",
+            "friendly_name", "location", "type", "category", "manufacturer", "hostname",
             "model", "firmware_version", "relay_count", "power_watts",
             "plex_version", "plex_library_count", "wifi_ssid", "wifi_signal",
             "ha_entity_id", "uptime",
@@ -671,7 +679,7 @@ data:
             "vm_id", "vm_name", "vm_status", "vm_node", "vm_cpus",
             "vm_memory_gb", "vm_memory_pct", "vm_disk_gb", "vm_cpu_pct", "vm_uptime",
             # Kubernetes fields
-            "k8s_cluster", "k8s_ready", "k8s_version", "k8s_role", "k8s_pod_count"
+            "k8s_cluster", "k8s_ready", "k8s_version", "k8s_role", "k8s_pod_count", "k8s_node_name"
         ]
 
         for field in enrichment_fields:
