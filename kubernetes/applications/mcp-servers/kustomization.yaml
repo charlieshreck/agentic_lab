@@ -30,3 +30,5 @@ resources:
   - plex-mcp.yaml
   # Knowledge graph
   - neo4j-mcp.yaml
+  # IoT / Smart home
+  - tasmota-mcp.yaml

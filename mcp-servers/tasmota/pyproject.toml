@@ -1,0 +1,19 @@
+[project]
+name = "tasmota-mcp"
+version = "0.1.0"
+description = "MCP server for Tasmota device control and configuration"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.7.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.11.0",
+    "pydantic-settings>=2.9.0",
+    "uvicorn>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
