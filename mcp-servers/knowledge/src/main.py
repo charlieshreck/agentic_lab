@@ -168,6 +168,16 @@ async def qdrant_get_by_id(collection: str, point_id: str) -> Optional[dict]:
         return None
 
 
+async def qdrant_delete_points(collection: str, point_ids: List[str]) -> bool:
+    """Delete points by IDs from a Qdrant collection."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{QDRANT_URL}/collections/{collection}/points/delete",
+            json={"points": point_ids}
+        )
+        return response.status_code == 200
+
+
 def payload_to_entity(point: dict) -> EntityResult:
     """Convert Qdrant point to EntityResult."""
     payload = point.get("payload", {})
@@ -809,6 +819,84 @@ async def add_entity(
     except Exception as e:
         logger.error(f"Add entity failed: {e}")
         return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def delete_entity(entity_id: str) -> dict:
+    """
+    Delete an entity by its ID.
+
+    Args:
+        entity_id: The UUID of the entity to delete
+
+    Returns:
+        Status of the operation
+    """
+    try:
+        success = await qdrant_delete_points("entities", [entity_id])
+        return {"success": success, "id": entity_id}
+    except Exception as e:
+        logger.error(f"Delete entity failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def delete_entities_by_ip(ip: str) -> dict:
+    """
+    Delete all entities matching an IP address. Useful for cleaning up duplicates.
+
+    Args:
+        ip: IP address to match
+
+    Returns:
+        Status with count of deleted entities
+    """
+    try:
+        # Find all entities with this IP
+        filter_conditions = {
+            "must": [{"key": "ip", "match": {"value": ip}}]
+        }
+        results = await qdrant_scroll("entities", filter_conditions, limit=100)
+
+        if not results:
+            return {"success": True, "deleted": 0, "message": f"No entities found with IP {ip}"}
+
+        # Get all IDs
+        entity_ids = [str(r.get("id", "")) for r in results if r.get("id")]
+
+        if entity_ids:
+            success = await qdrant_delete_points("entities", entity_ids)
+            return {"success": success, "deleted": len(entity_ids), "ids": entity_ids}
+
+        return {"success": True, "deleted": 0}
+    except Exception as e:
+        logger.error(f"Delete entities by IP failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def list_entity_types() -> List[dict]:
+    """
+    List all unique entity types with their counts.
+
+    Returns:
+        List of {type: str, count: int} entries
+    """
+    try:
+        # Scroll through all entities and count types
+        all_points = await qdrant_scroll("entities", limit=1000)
+
+        type_counts = {}
+        for point in all_points:
+            entity_type = point.get("payload", {}).get("type", "unknown")
+            type_counts[entity_type] = type_counts.get(entity_type, 0) + 1
+
+        # Sort by count descending
+        result = [{"type": t, "count": c} for t, c in sorted(type_counts.items(), key=lambda x: -x[1])]
+        return result
+    except Exception as e:
+        logger.error(f"List entity types failed: {e}")
+        return []
 
 
 def main():
