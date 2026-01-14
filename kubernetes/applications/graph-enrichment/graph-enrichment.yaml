@@ -56,21 +56,28 @@ data:
             logger.error(f"Neo4j write failed: {e}")
             return False
 
-    def mcp_call(base_url: str, tool: str, params: Dict = None) -> Optional[Dict]:
-        """Call an MCP tool."""
+    def rest_get(base_url: str, path: str, params: Dict = None) -> Optional[Dict]:
+        """Make REST GET request to MCP server."""
         try:
-            resp = client.post(f"{base_url}/mcp", json={
-                "method": "tools/call",
-                "params": {"name": tool, "arguments": params or {}}
-            })
-            result = resp.json()
-            if "result" in result:
-                content = result["result"].get("content", [])
-                if content and "text" in content[0]:
-                    return json.loads(content[0]["text"])
-            return result
+            resp = client.get(f"{base_url}{path}", params=params or {})
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"REST GET {base_url}{path} returned {resp.status_code}")
+            return None
         except Exception as e:
-            logger.error(f"MCP call to {tool} failed: {e}")
+            logger.error(f"REST GET {base_url}{path} failed: {e}")
+            return None
+
+    def rest_post(base_url: str, path: str, data: Dict = None) -> Optional[Dict]:
+        """Make REST POST request to MCP server."""
+        try:
+            resp = client.post(f"{base_url}{path}", json=data or {})
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"REST POST {base_url}{path} returned {resp.status_code}")
+            return None
+        except Exception as e:
+            logger.error(f"REST POST {base_url}{path} failed: {e}")
             return None
 
     # ============================================================
@@ -82,12 +89,13 @@ data:
         logger.info("Enriching TrueNAS shares...")
 
         for instance in ["hdd", "media"]:
-            # Get shares
-            shares_resp = mcp_call(TRUENAS_MCP, "truenas_list_shares", {"instance": instance})
+            # Get shares via REST API
+            shares_resp = rest_get(TRUENAS_MCP, f"/api/shares", {"instance": instance})
             if not shares_resp:
+                logger.warning(f"Could not get shares for {instance}")
                 continue
 
-            result = json.loads(shares_resp.get("result", "{}")) if isinstance(shares_resp.get("result"), str) else shares_resp
+            result = shares_resp
 
             instance_name = f"TrueNAS-{instance.upper()}"
 

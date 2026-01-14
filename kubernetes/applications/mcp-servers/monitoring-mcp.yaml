@@ -1,0 +1,758 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monitoring-mcp-code
+  namespace: ai-platform
+  labels:
+    app: monitoring-mcp
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """MCP server for monitoring stack (VictoriaMetrics, AlertManager, VictoriaLogs, Grafana, Gatus)."""
+    import os
+    import logging
+    from typing import List, Optional, Dict, Any
+    from datetime import datetime, timedelta
+    import httpx
+    from fastmcp import FastMCP
+    from pydantic import BaseModel
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    from starlette.responses import JSONResponse
+    from starlette.requests import Request
+    import uvicorn
+    import base64
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Endpoints (monit cluster NodePorts)
+    VICTORIA_METRICS_URL = os.environ.get("VICTORIA_METRICS_URL", "http://10.30.0.20:30084")
+    ALERTMANAGER_URL = os.environ.get("ALERTMANAGER_URL", "http://10.30.0.20:30083")
+    VICTORIA_LOGS_URL = os.environ.get("VICTORIA_LOGS_URL", "http://10.30.0.20:30085")
+    GRAFANA_URL = os.environ.get("GRAFANA_URL", "http://10.30.0.20:30081")
+    GRAFANA_USER = os.environ.get("GRAFANA_USER", "admin")
+    GRAFANA_PASSWORD = os.environ.get("GRAFANA_PASSWORD", "")
+    GATUS_URL = os.environ.get("GATUS_URL", "http://10.30.0.20:30086")
+
+    mcp = FastMCP(
+        name="monitoring-mcp",
+        instructions="Query metrics, logs, alerts, and dashboards from the monitoring stack."
+    )
+
+    # ============================================================================
+    # PYDANTIC MODELS
+    # ============================================================================
+
+    class MetricResult(BaseModel):
+        metric: Dict[str, str]
+        values: List[Any]
+
+    class Alert(BaseModel):
+        labels: Dict[str, str]
+        annotations: Dict[str, str]
+        state: str
+        activeAt: Optional[str] = None
+
+    class Silence(BaseModel):
+        id: str
+        matchers: List[Dict[str, Any]]
+        startsAt: str
+        endsAt: str
+        createdBy: str
+        comment: str
+        status: Dict[str, str]
+
+    class Dashboard(BaseModel):
+        uid: str
+        title: str
+        url: str
+        tags: List[str]
+
+    class EndpointStatus(BaseModel):
+        name: str
+        group: str
+        healthy: bool
+        hostname: Optional[str] = None
+
+    # ============================================================================
+    # HELPER FUNCTIONS
+    # ============================================================================
+
+    def _grafana_auth() -> Dict[str, str]:
+        """Return Grafana basic auth header."""
+        if GRAFANA_PASSWORD:
+            creds = base64.b64encode(f"{GRAFANA_USER}:{GRAFANA_PASSWORD}".encode()).decode()
+            return {"Authorization": f"Basic {creds}"}
+        return {}
+
+    async def _vm_request(endpoint: str, params: dict = None) -> dict:
+        """Make request to VictoriaMetrics."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                url = f"{VICTORIA_METRICS_URL}/{endpoint}"
+                logger.info(f"VM request: {url}")
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"VM request failed: {e}")
+                return {"error": str(e)}
+
+    async def _am_request(method: str, endpoint: str, json_data: dict = None) -> dict:
+        """Make request to AlertManager."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                url = f"{ALERTMANAGER_URL}/{endpoint}"
+                logger.info(f"AM request: {method} {url}")
+                response = await client.request(method, url, json=json_data)
+                response.raise_for_status()
+                if response.status_code == 204:
+                    return {"success": True}
+                return response.json()
+            except Exception as e:
+                logger.error(f"AM request failed: {e}")
+                return {"error": str(e)}
+
+    async def _vl_request(endpoint: str, params: dict = None) -> dict:
+        """Make request to VictoriaLogs."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                url = f"{VICTORIA_LOGS_URL}/{endpoint}"
+                logger.info(f"VL request: {url}")
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                # VictoriaLogs returns NDJSON, parse line by line
+                lines = response.text.strip().split('\n')
+                results = []
+                import json
+                for line in lines:
+                    if line:
+                        try:
+                            results.append(json.loads(line))
+                        except:
+                            results.append({"raw": line})
+                return {"results": results}
+            except Exception as e:
+                logger.error(f"VL request failed: {e}")
+                return {"error": str(e)}
+
+    async def _grafana_request(method: str, endpoint: str, json_data: dict = None) -> dict:
+        """Make request to Grafana."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                url = f"{GRAFANA_URL}/{endpoint}"
+                logger.info(f"Grafana request: {method} {url}")
+                headers = _grafana_auth()
+                response = await client.request(method, url, json=json_data, headers=headers)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"Grafana request failed: {e}")
+                return {"error": str(e)}
+
+    async def _gatus_request(endpoint: str) -> dict:
+        """Make request to Gatus."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                url = f"{GATUS_URL}/{endpoint}"
+                logger.info(f"Gatus request: {url}")
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"Gatus request failed: {e}")
+                return {"error": str(e)}
+
+    # ============================================================================
+    # VICTORIAMETRICS TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def query_metrics(query: str, start: str = "1h", step: str = "1m") -> dict:
+        """
+        Execute PromQL query against VictoriaMetrics.
+
+        Args:
+            query: PromQL query string (e.g., "up", "rate(http_requests_total[5m])")
+            start: Time range start as duration (e.g., "1h", "30m", "24h")
+            step: Query resolution step (e.g., "1m", "5m")
+
+        Returns:
+            Query results with metric values
+        """
+        end_time = datetime.utcnow()
+        # Parse start duration
+        duration_map = {"h": 3600, "m": 60, "d": 86400}
+        unit = start[-1]
+        value = int(start[:-1])
+        seconds = value * duration_map.get(unit, 3600)
+        start_time = end_time - timedelta(seconds=seconds)
+
+        params = {
+            "query": query,
+            "start": int(start_time.timestamp()),
+            "end": int(end_time.timestamp()),
+            "step": step
+        }
+        return await _vm_request("api/v1/query_range", params)
+
+    @mcp.tool()
+    async def query_metrics_instant(query: str) -> dict:
+        """
+        Execute instant PromQL query against VictoriaMetrics.
+
+        Args:
+            query: PromQL query string
+
+        Returns:
+            Current metric values
+        """
+        params = {"query": query}
+        return await _vm_request("api/v1/query", params)
+
+    @mcp.tool()
+    async def get_scrape_targets() -> dict:
+        """
+        List all Prometheus scrape targets and their status.
+
+        Returns:
+            Active and dropped targets with health status
+        """
+        return await _vm_request("api/v1/targets")
+
+    @mcp.tool()
+    async def get_metric_names(search: str = "") -> dict:
+        """
+        Get available metric names, optionally filtered by search term.
+
+        Args:
+            search: Optional search filter
+
+        Returns:
+            List of metric names
+        """
+        data = await _vm_request("api/v1/label/__name__/values")
+        if "error" in data:
+            return data
+        names = data.get("data", [])
+        if search:
+            names = [n for n in names if search.lower() in n.lower()]
+        return {"count": len(names), "metrics": names[:100]}  # Limit to 100
+
+    @mcp.tool()
+    async def get_tsdb_stats() -> dict:
+        """
+        Get VictoriaMetrics TSDB statistics (cardinality, storage).
+
+        Returns:
+            Database statistics
+        """
+        return await _vm_request("api/v1/status/tsdb")
+
+    # ============================================================================
+    # ALERTMANAGER TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def list_alerts(active: bool = True, silenced: bool = False, inhibited: bool = False) -> dict:
+        """
+        List current AlertManager alerts.
+
+        Args:
+            active: Include active alerts
+            silenced: Include silenced alerts
+            inhibited: Include inhibited alerts
+
+        Returns:
+            List of current alerts
+        """
+        params = []
+        if active:
+            params.append("active=true")
+        if silenced:
+            params.append("silenced=true")
+        if inhibited:
+            params.append("inhibited=true")
+        endpoint = f"api/v2/alerts?{'&'.join(params)}" if params else "api/v2/alerts"
+        return await _am_request("GET", endpoint)
+
+    @mcp.tool()
+    async def create_silence(
+        alertname: str,
+        duration_hours: int = 2,
+        comment: str = "Created via monitoring-mcp",
+        matcher_type: str = "="
+    ) -> dict:
+        """
+        Create a silence for matching alerts.
+
+        Args:
+            alertname: Alert name to silence (e.g., "Watchdog", "KubePodCrashLooping")
+            duration_hours: How long to silence (default 2 hours)
+            comment: Reason for silence
+            matcher_type: Match type: "=" (exact), "=~" (regex), "!=" (not equal)
+
+        Returns:
+            Created silence ID
+        """
+        start = datetime.utcnow()
+        end = start + timedelta(hours=duration_hours)
+
+        silence = {
+            "matchers": [
+                {
+                    "name": "alertname",
+                    "value": alertname,
+                    "isRegex": matcher_type == "=~",
+                    "isEqual": matcher_type != "!="
+                }
+            ],
+            "startsAt": start.isoformat() + "Z",
+            "endsAt": end.isoformat() + "Z",
+            "createdBy": "monitoring-mcp",
+            "comment": comment
+        }
+        return await _am_request("POST", "api/v2/silences", silence)
+
+    @mcp.tool()
+    async def delete_silence(silence_id: str) -> dict:
+        """
+        Delete/expire a silence by ID.
+
+        Args:
+            silence_id: The silence UUID to delete
+
+        Returns:
+            Success status
+        """
+        return await _am_request("DELETE", f"api/v2/silence/{silence_id}")
+
+    @mcp.tool()
+    async def list_silences() -> dict:
+        """
+        List all active and pending silences.
+
+        Returns:
+            List of silences with matchers and expiry
+        """
+        return await _am_request("GET", "api/v2/silences")
+
+    @mcp.tool()
+    async def get_alertmanager_status() -> dict:
+        """
+        Get AlertManager cluster and configuration status.
+
+        Returns:
+            AlertManager status including uptime and config
+        """
+        return await _am_request("GET", "api/v2/status")
+
+    # ============================================================================
+    # VICTORIALOGS TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def query_logs(query: str, limit: int = 100, start: str = "1h") -> dict:
+        """
+        Execute LogsQL query against VictoriaLogs.
+
+        Args:
+            query: LogsQL query (e.g., "_stream:{app='nginx'}", "error OR exception")
+            limit: Maximum number of log entries to return
+            start: Time range as duration (e.g., "1h", "30m")
+
+        Returns:
+            Matching log entries
+        """
+        # Parse start duration
+        duration_map = {"h": 3600, "m": 60, "d": 86400}
+        unit = start[-1]
+        value = int(start[:-1])
+        seconds = value * duration_map.get(unit, 3600)
+        start_time = datetime.utcnow() - timedelta(seconds=seconds)
+
+        params = {
+            "query": query,
+            "limit": limit,
+            "start": int(start_time.timestamp())
+        }
+        return await _vl_request("select/logsql/query", params)
+
+    @mcp.tool()
+    async def get_log_stats(query: str, start: str = "1h") -> dict:
+        """
+        Get log statistics (count, rate) for a query.
+
+        Args:
+            query: LogsQL query
+            start: Time range as duration
+
+        Returns:
+            Log statistics including count over time
+        """
+        duration_map = {"h": 3600, "m": 60, "d": 86400}
+        unit = start[-1]
+        value = int(start[:-1])
+        seconds = value * duration_map.get(unit, 3600)
+        start_time = datetime.utcnow() - timedelta(seconds=seconds)
+
+        params = {
+            "query": query,
+            "start": int(start_time.timestamp()),
+            "end": int(datetime.utcnow().timestamp())
+        }
+        return await _vl_request("select/logsql/stats_query", params)
+
+    # ============================================================================
+    # GRAFANA TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def list_dashboards(search: str = "") -> dict:
+        """
+        List available Grafana dashboards.
+
+        Args:
+            search: Optional search term to filter dashboards
+
+        Returns:
+            List of dashboards with UIDs and titles
+        """
+        params = f"?query={search}" if search else ""
+        data = await _grafana_request("GET", f"api/search{params}")
+        if "error" in data:
+            return data
+        if isinstance(data, list):
+            dashboards = [
+                {
+                    "uid": d.get("uid", ""),
+                    "title": d.get("title", ""),
+                    "url": f"{GRAFANA_URL}{d.get('url', '')}",
+                    "tags": d.get("tags", [])
+                }
+                for d in data if d.get("type") == "dash-db"
+            ]
+            return {"count": len(dashboards), "dashboards": dashboards}
+        return data
+
+    @mcp.tool()
+    async def get_dashboard_url(uid_or_title: str) -> dict:
+        """
+        Get direct URL to a dashboard by UID or title.
+
+        Args:
+            uid_or_title: Dashboard UID or title to search for
+
+        Returns:
+            Dashboard URL and details
+        """
+        # First try as UID
+        data = await _grafana_request("GET", f"api/dashboards/uid/{uid_or_title}")
+        if "error" not in data and "dashboard" in data:
+            db = data["dashboard"]
+            return {
+                "uid": db.get("uid"),
+                "title": db.get("title"),
+                "url": f"{GRAFANA_URL}/d/{db.get('uid')}"
+            }
+
+        # Fallback to search by title
+        search_data = await list_dashboards(uid_or_title)
+        if "dashboards" in search_data and search_data["dashboards"]:
+            return search_data["dashboards"][0]
+
+        return {"error": f"Dashboard not found: {uid_or_title}"}
+
+    @mcp.tool()
+    async def create_annotation(
+        text: str,
+        tags: List[str] = [],
+        dashboard_uid: str = None,
+        panel_id: int = None
+    ) -> dict:
+        """
+        Create annotation in Grafana (marks events on graphs).
+
+        Args:
+            text: Annotation text/description
+            tags: List of tags (e.g., ["deployment", "incident"])
+            dashboard_uid: Optional dashboard UID to scope annotation
+            panel_id: Optional panel ID within dashboard
+
+        Returns:
+            Created annotation ID
+        """
+        annotation = {
+            "text": text,
+            "tags": tags,
+            "time": int(datetime.utcnow().timestamp() * 1000)
+        }
+        if dashboard_uid:
+            annotation["dashboardUID"] = dashboard_uid
+        if panel_id:
+            annotation["panelId"] = panel_id
+
+        return await _grafana_request("POST", "api/annotations", annotation)
+
+    @mcp.tool()
+    async def list_datasources() -> dict:
+        """
+        List configured Grafana datasources.
+
+        Returns:
+            List of datasources with names and types
+        """
+        data = await _grafana_request("GET", "api/datasources")
+        if "error" in data:
+            return data
+        if isinstance(data, list):
+            return {
+                "count": len(data),
+                "datasources": [
+                    {
+                        "name": d.get("name"),
+                        "type": d.get("type"),
+                        "url": d.get("url"),
+                        "isDefault": d.get("isDefault", False)
+                    }
+                    for d in data
+                ]
+            }
+        return data
+
+    # ============================================================================
+    # GATUS TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def get_endpoint_status() -> dict:
+        """
+        Get health status of all Gatus-monitored endpoints.
+
+        Returns:
+            List of endpoints with health status
+        """
+        data = await _gatus_request("api/v1/endpoints/statuses")
+        if "error" in data:
+            return data
+
+        endpoints = []
+        for item in data:
+            group = item.get("group", "default")
+            name = item.get("name", "unknown")
+            results = item.get("results", [])
+            # Get most recent result
+            healthy = results[-1].get("success", False) if results else False
+            hostname = results[-1].get("hostname", "") if results else ""
+
+            endpoints.append({
+                "name": name,
+                "group": group,
+                "healthy": healthy,
+                "hostname": hostname
+            })
+
+        healthy_count = sum(1 for e in endpoints if e["healthy"])
+        return {
+            "total": len(endpoints),
+            "healthy": healthy_count,
+            "unhealthy": len(endpoints) - healthy_count,
+            "endpoints": endpoints
+        }
+
+    @mcp.tool()
+    async def get_failing_endpoints() -> dict:
+        """
+        Get only endpoints that are currently failing.
+
+        Returns:
+            List of unhealthy endpoints
+        """
+        status = await get_endpoint_status()
+        if "error" in status:
+            return status
+
+        failing = [e for e in status.get("endpoints", []) if not e["healthy"]]
+        return {
+            "count": len(failing),
+            "endpoints": failing
+        }
+
+    # ============================================================================
+    # REST API (for LangGraph/external tools)
+    # ============================================================================
+
+    async def rest_health(request: Request):
+        """Health check endpoint."""
+        return JSONResponse({"status": "healthy"})
+
+    async def rest_api_metrics(request: Request):
+        """Query metrics endpoint."""
+        try:
+            query = request.query_params.get("query", "up")
+            start = request.query_params.get("start", "1h")
+            data = await query_metrics(query, start)
+            return JSONResponse({"status": "ok", "data": data})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_alerts(request: Request):
+        """Get alerts endpoint."""
+        try:
+            data = await list_alerts()
+            return JSONResponse({"status": "ok", "data": data})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_endpoints(request: Request):
+        """Get endpoint status."""
+        try:
+            data = await get_endpoint_status()
+            return JSONResponse({"status": "ok", "data": data})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    # ============================================================================
+    # MAIN
+    # ============================================================================
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        logger.info(f"Starting monitoring-mcp on port {port}")
+        logger.info(f"VictoriaMetrics: {VICTORIA_METRICS_URL}")
+        logger.info(f"AlertManager: {ALERTMANAGER_URL}")
+        logger.info(f"VictoriaLogs: {VICTORIA_LOGS_URL}")
+        logger.info(f"Grafana: {GRAFANA_URL}")
+        logger.info(f"Gatus: {GATUS_URL}")
+
+        rest_routes = [
+            Route("/health", rest_health, methods=["GET"]),
+            Route("/api/metrics", rest_api_metrics, methods=["GET"]),
+            Route("/api/alerts", rest_api_alerts, methods=["GET"]),
+            Route("/api/endpoints", rest_api_endpoints, methods=["GET"]),
+        ]
+
+        mcp_app = mcp.http_app()
+        app = Starlette(
+            routes=rest_routes + [Mount("/", app=mcp_app)],
+            lifespan=mcp_app.lifespan
+        )
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    fastmcp>=2.7.0
+    pydantic>=2.11.0
+    uvicorn>=0.34.0
+    starlette>=0.40.0
+    httpx>=0.28.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitoring-mcp
+  namespace: ai-platform
+  labels:
+    app: monitoring-mcp
+    component: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: monitoring-mcp
+  template:
+    metadata:
+      labels:
+        app: monitoring-mcp
+        component: mcp
+    spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+      containers:
+        - name: mcp-server
+          image: python:3.11-slim
+          command: ['sh', '-c', 'cd /app && PYTHONPATH=/app/deps python /code/main.py']
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: VICTORIA_METRICS_URL
+              value: "http://10.30.0.20:30084"
+            - name: ALERTMANAGER_URL
+              value: "http://10.30.0.20:30083"
+            - name: VICTORIA_LOGS_URL
+              value: "http://10.30.0.20:30085"
+            - name: GRAFANA_URL
+              value: "http://10.30.0.20:30081"
+            - name: GATUS_URL
+              value: "http://10.30.0.20:30086"
+            - name: GRAFANA_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-monitoring-grafana
+                  key: GRAFANA_USER
+            - name: GRAFANA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-monitoring-grafana
+                  key: GRAFANA_PASSWORD
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: code
+          configMap:
+            name: monitoring-mcp-code
+        - name: deps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitoring-mcp
+  namespace: ai-platform
+  labels:
+    app: monitoring-mcp
+    component: mcp
+spec:
+  type: NodePort
+  selector:
+    app: monitoring-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 31099
+      name: http
