@@ -399,7 +399,7 @@ agentic_lab/
 ## Related Repositories
 
 - **prod_homelab**: Production Talos cluster (10.10.0.0/24) - Production applications
-- **monit_homelab**: Monitoring K3s cluster (10.30.0.0/24) - Observability stack
+- **monit_homelab**: Monitoring Talos cluster (10.30.0.0/24) - Observability stack
 
 ---
 
