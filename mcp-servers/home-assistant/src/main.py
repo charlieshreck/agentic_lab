@@ -297,26 +297,119 @@ async def list_areas() -> List[dict]:
         return []
 
 
+@mcp.tool()
+async def list_entities() -> List[dict]:
+    """
+    List all entities in Home Assistant.
+
+    Returns:
+        List of all entity states for discovery
+    """
+    try:
+        states = await ha_request("GET", "states")
+        return [
+            {
+                "entity_id": s["entity_id"],
+                "state": s["state"],
+                "friendly_name": s.get("attributes", {}).get("friendly_name", s["entity_id"]),
+                "device_class": s.get("attributes", {}).get("device_class"),
+            }
+            for s in states
+        ]
+    except Exception as e:
+        logger.error(f"Failed to list entities: {e}")
+        return []
+
+
+# REST API endpoints for direct HTTP access (used by discovery agents)
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route, Mount
+
+
+async def api_index(request):
+    """REST endpoint listing available APIs."""
+    return JSONResponse({
+        "status": "ok",
+        "endpoints": [
+            "/api/lights - List all lights",
+            "/api/climate - List climate entities",
+            "/api/entities - List all entities",
+            "/api/areas - List all areas",
+        ]
+    })
+
+
+async def api_lights(request):
+    """REST endpoint for listing lights."""
+    try:
+        data = await list_lights()
+        return JSONResponse({"status": "ok", "data": [d.model_dump() for d in data]})
+    except Exception as e:
+        logger.error(f"REST api_lights error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_climate(request):
+    """REST endpoint for listing climate entities."""
+    try:
+        data = await list_climate()
+        return JSONResponse({"status": "ok", "data": [d.model_dump() for d in data]})
+    except Exception as e:
+        logger.error(f"REST api_climate error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_entities(request):
+    """REST endpoint for listing all entities."""
+    try:
+        data = await list_entities()
+        return JSONResponse({"status": "ok", "data": data})
+    except Exception as e:
+        logger.error(f"REST api_entities error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_areas(request):
+    """REST endpoint for listing areas."""
+    try:
+        data = await list_areas()
+        return JSONResponse({"status": "ok", "data": data})
+    except Exception as e:
+        logger.error(f"REST api_areas error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
 def main():
+    import uvicorn
+    from starlette.middleware.cors import CORSMiddleware
+
     port = int(os.environ.get("PORT", "8000"))
-    transport = os.environ.get("MCP_TRANSPORT", "sse")
 
-    logger.info(f"Starting home-assistant MCP server on port {port} with {transport} transport")
+    logger.info(f"Starting home-assistant MCP server on port {port}")
 
-    if transport == "http":
-        from starlette.middleware.cors import CORSMiddleware
-        app = mcp.streamable_http_app()
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["*"],
-        )
-        import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=port)
-    else:
-        mcp.run(transport="sse", host="0.0.0.0", port=port)
+    # REST routes for direct HTTP access (used by discovery agents)
+    rest_routes = [
+        Route("/api", api_index),
+        Route("/api/lights", api_lights),
+        Route("/api/climate", api_climate),
+        Route("/api/entities", api_entities),
+        Route("/api/areas", api_areas),
+    ]
+
+    # Combine REST routes with MCP app
+    mcp_app = mcp.http_app()
+    app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":

@@ -69,12 +69,11 @@ data:
         return {"success": True, "service": f"{domain}.{service}"}
 
     # ============================================================================
-    # GENERAL ENTITY TOOLS
+    # HELPER FUNCTIONS (called by both MCP tools and REST endpoints)
     # ============================================================================
 
-    @mcp.tool()
-    async def list_entities(domain: str = "all", area: Optional[str] = None) -> List[dict]:
-        """List entities by domain (light, switch, climate, cover, fan, lock, media_player, scene, script, automation, sensor, binary_sensor) or 'all'."""
+    async def _list_entities_impl(domain: str = "all", area: Optional[str] = None) -> List[dict]:
+        """Internal: List entities by domain."""
         try:
             states = await ha_request("GET", "states")
             if isinstance(states, dict) and "error" in states:
@@ -96,9 +95,8 @@ data:
         except Exception as e:
             return [{"error": str(e)}]
 
-    @mcp.tool()
-    async def get_entity_state(entity_id: str) -> dict:
-        """Get the current state and attributes of any entity."""
+    async def _get_entity_state_impl(entity_id: str) -> dict:
+        """Internal: Get the current state and attributes of any entity."""
         try:
             state = await ha_request("GET", f"states/{entity_id}")
             if isinstance(state, dict) and "error" in state:
@@ -114,9 +112,8 @@ data:
         except Exception as e:
             return {"error": str(e)}
 
-    @mcp.tool()
-    async def get_home_overview() -> dict:
-        """Get an overview of home state: lights on, climate status, open covers, etc."""
+    async def _get_home_overview_impl() -> dict:
+        """Internal: Get an overview of home state."""
         try:
             states = await ha_request("GET", "states")
             if isinstance(states, dict) and "error" in states:
@@ -173,6 +170,25 @@ data:
             return overview
         except Exception as e:
             return {"error": str(e)}
+
+    # ============================================================================
+    # GENERAL ENTITY TOOLS (MCP)
+    # ============================================================================
+
+    @mcp.tool()
+    async def list_entities(domain: str = "all", area: Optional[str] = None) -> List[dict]:
+        """List entities by domain (light, switch, climate, cover, fan, lock, media_player, scene, script, automation, sensor, binary_sensor) or 'all'."""
+        return await _list_entities_impl(domain, area)
+
+    @mcp.tool()
+    async def get_entity_state(entity_id: str) -> dict:
+        """Get the current state and attributes of any entity."""
+        return await _get_entity_state_impl(entity_id)
+
+    @mcp.tool()
+    async def get_home_overview() -> dict:
+        """Get an overview of home state: lights on, climate status, open covers, etc."""
+        return await _get_home_overview_impl()
 
     # ============================================================================
     # LIGHT TOOLS
@@ -423,7 +439,7 @@ data:
         """Get entities for langgraph context."""
         try:
             domain = request.query_params.get("domain", "all")
-            entities = await list_entities(domain=domain)
+            entities = await _list_entities_impl(domain=domain)
             return JSONResponse({"status": "ok", "data": entities, "count": len(entities)})
         except Exception as e:
             logger.error(f"REST api_entities error: {e}")
@@ -432,7 +448,7 @@ data:
     async def rest_api_overview(request: Request):
         """Get home overview for langgraph context."""
         try:
-            overview = await get_home_overview()
+            overview = await _get_home_overview_impl()
             return JSONResponse({"status": "ok", "data": overview})
         except Exception as e:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
@@ -443,7 +459,7 @@ data:
             entity_id = request.query_params.get("entity_id", "")
             if not entity_id:
                 return JSONResponse({"status": "error", "error": "Missing entity_id"}, status_code=400)
-            state = await get_entity_state(entity_id)
+            state = await _get_entity_state_impl(entity_id)
             return JSONResponse({"status": "ok", "data": state})
         except Exception as e:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
