@@ -372,20 +372,6 @@ data:
     uvicorn>=0.34.0
     starlette>=0.40.0
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: tasmota-mcp-data
-  namespace: ai-platform
-  labels:
-    app: tasmota-mcp
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Mi
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -465,8 +451,7 @@ spec:
         - name: deps
           emptyDir: {}
         - name: data
-          persistentVolumeClaim:
-            claimName: tasmota-mcp-data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
