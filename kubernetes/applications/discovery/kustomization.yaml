@@ -7,3 +7,4 @@ resources:
   - network-discovery.yaml
   - graph-sync.yaml
   - entity-enrichment.yaml
+  - runbook-indexer.yaml

@@ -1,0 +1,391 @@
+---
+# Runbook Indexer
+#
+# Purpose: Index runbook markdown files into Qdrant with proper titles,
+# descriptions, and search metadata.
+#
+# Reads runbooks from:
+# 1. /home/agentic_lab/runbooks/ - markdown files
+# 2. seed-runbooks ConfigMap - JSON runbook definitions
+#
+# Creates rich embeddings for semantic search.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runbook-indexer-script
+  namespace: ai-platform
+data:
+  index.py: |
+    #!/usr/bin/env python3
+    """
+    Runbook Indexer - Index markdown and JSON runbooks into Qdrant.
+    """
+    import os
+    import re
+    import json
+    import hashlib
+    import logging
+    from datetime import datetime, timezone
+    from typing import Dict, List, Optional, Any
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+    from pathlib import Path
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+
+    # Configuration
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    RUNBOOK_PATH = os.environ.get("RUNBOOK_PATH", "/runbooks")
+
+    # ============================================================
+    # API Helpers
+    # ============================================================
+
+    def http_get(url: str) -> Optional[dict]:
+        """HTTP GET with JSON response."""
+        req = Request(url, headers={"Accept": "application/json"})
+        try:
+            with urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            logger.warning(f"HTTP GET {url} failed: {e}")
+            return None
+
+    def http_post(url: str, data: dict) -> Optional[dict]:
+        """HTTP POST with JSON body."""
+        req = Request(url, data=json.dumps(data).encode(),
+                     headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            logger.warning(f"HTTP POST {url} failed: {e}")
+            return None
+
+    def http_put(url: str, data: dict) -> Optional[dict]:
+        """HTTP PUT with JSON body."""
+        req = Request(url, data=json.dumps(data).encode(),
+                     headers={"Content-Type": "application/json"}, method="PUT")
+        try:
+            with urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            logger.warning(f"HTTP PUT {url} failed: {e}")
+            return None
+
+    def get_embedding(text: str) -> Optional[List[float]]:
+        """Get embedding from LiteLLM."""
+        result = http_post(
+            f"{LITELLM_URL}/embeddings",
+            {"model": "embeddings", "input": text[:8000]}  # Truncate if too long
+        )
+        if result and "data" in result:
+            return result["data"][0]["embedding"]
+        return None
+
+    # ============================================================
+    # Markdown Parsing
+    # ============================================================
+
+    def extract_title_from_markdown(content: str, filename: str) -> str:
+        """Extract title from markdown content."""
+        # Try YAML frontmatter
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                for line in parts[1].split("\n"):
+                    if line.startswith("title:"):
+                        return line.replace("title:", "").strip().strip('"\'')
+
+        # Try first H1
+        for line in content.split("\n"):
+            if line.startswith("# "):
+                return line[2:].strip()
+
+        # Fallback to filename
+        return filename.replace("-", " ").replace("_", " ").replace(".md", "").title()
+
+    def extract_category_from_path(path: str) -> str:
+        """Extract category from file path."""
+        parts = Path(path).parts
+        if len(parts) >= 2:
+            return parts[-2]  # Parent directory
+        return "general"
+
+    def parse_markdown_runbook(filepath: str) -> dict:
+        """Parse a markdown runbook file."""
+        with open(filepath, "r") as f:
+            content = f.read()
+
+        filename = os.path.basename(filepath)
+        title = extract_title_from_markdown(content, filename)
+        category = extract_category_from_path(filepath)
+
+        # Extract sections
+        sections = {}
+        current_section = "content"
+        current_content = []
+
+        for line in content.split("\n"):
+            if line.startswith("## "):
+                if current_content:
+                    sections[current_section] = "\n".join(current_content).strip()
+                current_section = line[3:].strip().lower().replace(" ", "_")
+                current_content = []
+            else:
+                current_content.append(line)
+
+        if current_content:
+            sections[current_section] = "\n".join(current_content).strip()
+
+        # Build runbook object
+        return {
+            "title": title,
+            "path": filepath,
+            "category": category,
+            "content": content[:10000],  # First 10k chars
+            "solution": sections.get("solution", sections.get("fix", sections.get("steps", ""))),
+            "trigger_pattern": sections.get("trigger", sections.get("problem", title)),
+            "tags": [category, filename.replace(".md", "")],
+            "source": "markdown",
+            "indexed_at": datetime.now(timezone.utc).isoformat()
+        }
+
+    # ============================================================
+    # JSON Runbook Parsing
+    # ============================================================
+
+    def parse_json_runbook(runbook: dict) -> dict:
+        """Parse a JSON runbook from seed-runbooks."""
+        name = runbook.get("name", runbook.get("title", ""))
+        description = runbook.get("description", "")
+
+        # Build solution from fix steps
+        fix = runbook.get("fix", {})
+        steps = fix.get("steps", [])
+        solution_parts = [fix.get("description", "")]
+        for step in steps:
+            if isinstance(step, dict):
+                solution_parts.append(f"- {step.get('name', '')}: {step.get('command', '')}")
+            else:
+                solution_parts.append(f"- {step}")
+        solution = "\n".join(solution_parts)
+
+        # Build trigger pattern
+        triggers = runbook.get("triggers", {})
+        patterns = triggers.get("alert_patterns", []) + triggers.get("keywords", [])
+        trigger_pattern = " ".join(patterns) if patterns else name
+
+        return {
+            "title": name,
+            "path": f"seed-runbooks/{runbook.get('id', name)}",
+            "category": "kubernetes",
+            "content": json.dumps(runbook, indent=2),
+            "solution": solution,
+            "trigger_pattern": trigger_pattern,
+            "tags": triggers.get("severity", []) + ["seed-runbook"],
+            "source": "seed-runbooks",
+            "indexed_at": datetime.now(timezone.utc).isoformat()
+        }
+
+    # ============================================================
+    # Qdrant Operations
+    # ============================================================
+
+    def generate_point_id(title: str, path: str) -> str:
+        """Generate consistent point ID from title and path."""
+        content = f"{title}:{path}"
+        return hashlib.md5(content.encode()).hexdigest()[:16]
+
+    def delete_existing_runbooks() -> bool:
+        """Delete all existing runbooks to reindex fresh."""
+        # Get all point IDs
+        result = http_post(
+            f"{QDRANT_URL}/collections/runbooks/points/scroll",
+            {"limit": 1000, "with_payload": False}
+        )
+        if not result or "result" not in result:
+            return False
+
+        points = result["result"].get("points", [])
+        if not points:
+            return True
+
+        ids = [p["id"] for p in points]
+
+        # Delete all
+        delete_result = http_post(
+            f"{QDRANT_URL}/collections/runbooks/points/delete",
+            {"points": ids}
+        )
+        return delete_result is not None
+
+    def upsert_runbooks(runbooks: List[dict]) -> int:
+        """Upsert runbooks to Qdrant."""
+        points = []
+
+        for rb in runbooks:
+            title = rb.get("title", "")
+            if not title:
+                continue
+
+            # Generate rich description for embedding
+            description = f"{title}. {rb.get('trigger_pattern', '')}. {rb.get('solution', '')[:500]}"
+            embedding = get_embedding(description)
+
+            if not embedding:
+                logger.warning(f"Failed to get embedding for: {title}")
+                continue
+
+            point_id = generate_point_id(title, rb.get("path", ""))
+            points.append({
+                "id": point_id,
+                "vector": embedding,
+                "payload": rb
+            })
+
+        if not points:
+            return 0
+
+        # Batch upsert
+        result = http_put(
+            f"{QDRANT_URL}/collections/runbooks/points",
+            {"points": points}
+        )
+
+        return len(points) if result else 0
+
+    # ============================================================
+    # Main
+    # ============================================================
+
+    def run_indexer():
+        """Main indexer function."""
+        logger.info("Starting runbook indexer...")
+        start_time = datetime.now(timezone.utc)
+
+        runbooks = []
+
+        # Index markdown files
+        if os.path.exists(RUNBOOK_PATH):
+            for root, dirs, files in os.walk(RUNBOOK_PATH):
+                for file in files:
+                    if file.endswith(".md"):
+                        filepath = os.path.join(root, file)
+                        try:
+                            rb = parse_markdown_runbook(filepath)
+                            if rb.get("title"):
+                                runbooks.append(rb)
+                                logger.info(f"Parsed: {rb['title']}")
+                        except Exception as e:
+                            logger.error(f"Failed to parse {filepath}: {e}")
+
+        logger.info(f"Parsed {len(runbooks)} markdown runbooks")
+
+        # Index seed-runbooks from ConfigMap (if mounted)
+        seed_path = "/config/runbooks.json"
+        if os.path.exists(seed_path):
+            try:
+                with open(seed_path) as f:
+                    seed_runbooks = json.load(f)
+                for rb in seed_runbooks:
+                    parsed = parse_json_runbook(rb)
+                    if parsed.get("title"):
+                        runbooks.append(parsed)
+                        logger.info(f"Parsed seed: {parsed['title']}")
+            except Exception as e:
+                logger.error(f"Failed to parse seed runbooks: {e}")
+
+        logger.info(f"Total runbooks to index: {len(runbooks)}")
+
+        # Clear old data and reindex
+        logger.info("Clearing existing runbooks...")
+        delete_existing_runbooks()
+
+        # Upsert new data
+        indexed = upsert_runbooks(runbooks)
+
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.info(f"""
+        ========================================
+        Runbook Indexing Complete in {elapsed:.1f}s
+        ========================================
+        Markdown files parsed: {len([r for r in runbooks if r['source'] == 'markdown'])}
+        Seed runbooks parsed: {len([r for r in runbooks if r['source'] == 'seed-runbooks'])}
+        Total indexed: {indexed}
+        ========================================
+        """)
+
+        return 0 if indexed > 0 else 1
+
+    if __name__ == "__main__":
+        exit(run_indexer())
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: runbook-indexer
+  namespace: ai-platform
+  labels:
+    app: runbook-indexer
+    component: discovery
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: indexer
+              image: python:3.11-slim
+              command:
+                - python
+                - /app/index.py
+              env:
+                - name: QDRANT_URL
+                  value: "http://qdrant:6333"
+                - name: LITELLM_URL
+                  value: "http://litellm:4000"
+                - name: RUNBOOK_PATH
+                  value: "/runbooks"
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+              volumeMounts:
+                - name: script
+                  mountPath: /app
+                - name: runbooks
+                  mountPath: /runbooks
+                  readOnly: true
+                - name: seed-runbooks
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: runbook-indexer-script
+            - name: runbooks
+              hostPath:
+                path: /home/agentic_lab/runbooks
+                type: Directory
+            - name: seed-runbooks
+              configMap:
+                name: seed-runbooks
+                optional: true
