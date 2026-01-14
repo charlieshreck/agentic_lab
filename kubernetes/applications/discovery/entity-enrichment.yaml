@@ -352,12 +352,12 @@ data:
             enrichment["plex_claimed"] = data.get("claimed", False)
             enrichment["plex_machine_id"] = data.get("machine_id", "")[:20] + "..." if data.get("machine_id") else ""
 
-        # Get active sessions
+        # Get active sessions (count at top level, data is list of sessions)
         sessions = http_get(f"{PLEX_MCP}/api/sessions")
-        if sessions and "data" in sessions:
-            data = sessions["data"]
-            enrichment["plex_active_streams"] = data.get("stream_count", 0)
-            enrichment["plex_transcodes"] = data.get("transcode_count", 0)
+        if sessions:
+            enrichment["plex_active_streams"] = sessions.get("count", 0)
+            # Check for transcodes in active sessions
+            enrichment["plex_transcodes"] = sum(1 for s in sessions.get("data", []) if s.get("transcode"))
 
         return enrichment
 
