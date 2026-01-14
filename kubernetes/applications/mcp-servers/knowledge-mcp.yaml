@@ -500,6 +500,35 @@ data:
             return {"error": str(e)}
 
     # ============================================================================
+    # ENTITY MANAGEMENT TOOLS
+    # ============================================================================
+
+    @mcp.tool()
+    async def delete_entity(entity_id: str) -> dict:
+        """Delete an entity by its ID."""
+        try:
+            success = await qdrant_delete("entities", [entity_id])
+            return {"success": success, "id": entity_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def delete_entities_by_ip(ip: str) -> dict:
+        """Delete all entities matching an IP address. Useful for cleaning up duplicates."""
+        try:
+            filter_ = {"must": [{"key": "ip", "match": {"value": ip}}]}
+            results = await qdrant_scroll("entities", filter_, limit=100)
+            if not results:
+                return {"success": True, "deleted": 0, "message": f"No entities found with IP {ip}"}
+            entity_ids = [str(r.get("id", "")) for r in results if r.get("id")]
+            if entity_ids:
+                success = await qdrant_delete("entities", entity_ids)
+                return {"success": success, "deleted": len(entity_ids), "ids": entity_ids}
+            return {"success": True, "deleted": 0}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ============================================================================
     # REST API (for langgraph context building)
     # ============================================================================
 
