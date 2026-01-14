@@ -783,7 +783,7 @@ spec:
             - containerPort: 8000
           env:
             - name: UNIFI_HOST
-              value: "https://10.10.0.51:8443"
+              value: "https://10.10.0.51:11443"
             - name: UNIFI_API_KEY
               valueFrom:
                 secretKeyRef:
