@@ -694,8 +694,9 @@ def main():
     ]
 
     # Combine REST routes with MCP app using http_app() for proper HTTP transport
+    # FastMCP's http_app() internally handles /mcp path, so mount at root
     mcp_app = mcp.http_app()
-    app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+    app = Starlette(routes=rest_routes + [Mount("/", app=mcp_app)])
 
     app.add_middleware(
         CORSMiddleware,
