@@ -349,10 +349,12 @@ data:
                 """
                 result = await neo4j_query(cypher, {"id": entity_id})
 
-            if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+            # Safely check for valid results
+            results = result.get("results", [])
+            if result.get("errors") or not results or not results[0].get("data"):
                 return JSONResponse({"error": "Entity not found", "id": entity_id}, status_code=404)
 
-            data = result["results"][0]["data"][0]["row"]
+            data = results[0]["data"][0]["row"]
             center_props = data[0] or {}
             nodes = [n for n in (data[1] or []) if n.get("id")]
             edges = [e for e in (data[2] or []) if e.get("source") and e.get("target")]
