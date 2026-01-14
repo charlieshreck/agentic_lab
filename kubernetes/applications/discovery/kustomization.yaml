@@ -6,3 +6,4 @@ namespace: ai-platform
 resources:
   - network-discovery.yaml
   - graph-sync.yaml
+  - entity-enrichment.yaml

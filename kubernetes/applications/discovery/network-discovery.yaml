@@ -48,21 +48,72 @@ data:
     # Hostname patterns for device classification (regex patterns)
     import re
     HOSTNAME_PATTERNS = [
-        # Google devices
+        # ============================================================
+        # EXACT MATCHES - Specific hostnames we know
+        # ============================================================
+        (r"^homeassistant$", {"type": "home_assistant", "category": "automation_hub"}),
+        (r"^plex$", {"type": "plex_server", "category": "media"}),
+        (r"^meross$", {"type": "meross_device", "category": "iot", "manufacturer": "meross"}),
+
+        # ============================================================
+        # Google/Nest devices
+        # ============================================================
+        (r"pixel[-_]?\d+", {"type": "pixel_phone", "category": "endpoint", "manufacturer": "google"}),
+        (r"nest[-_]?audio", {"type": "nest_audio", "category": "media", "manufacturer": "google"}),
+        (r"nest[-_]?hello", {"type": "nest_doorbell", "category": "iot", "manufacturer": "google"}),
+        (r"nest[-_]?hub", {"type": "nest_hub", "category": "media", "manufacturer": "google"}),
+        (r"nest[-_]?mini", {"type": "nest_mini", "category": "media", "manufacturer": "google"}),
+        (r"nest[-_]?thermostat", {"type": "nest_thermostat", "category": "iot", "manufacturer": "google"}),
+        (r"nest[-_]?cam", {"type": "nest_camera", "category": "iot", "manufacturer": "google"}),
         (r"google[-_]?home[-_]?mini", {"type": "google_home_mini", "category": "media", "manufacturer": "google"}),
         (r"google[-_]?home[-_]?max", {"type": "google_home_max", "category": "media", "manufacturer": "google"}),
         (r"google[-_]?home", {"type": "google_home", "category": "media", "manufacturer": "google"}),
-        (r"google[-_]?nest[-_]?hub", {"type": "nest_hub", "category": "media", "manufacturer": "google"}),
-        (r"nest[-_]?mini", {"type": "nest_mini", "category": "media", "manufacturer": "google"}),
         (r"chromecast", {"type": "chromecast", "category": "media", "manufacturer": "google"}),
+
+        # ============================================================
+        # Samsung devices (SEC prefix is Samsung Electronics Company)
+        # ============================================================
+        (r"^sec[0-9a-f]+$", {"type": "samsung_device", "category": "endpoint", "manufacturer": "samsung"}),
+        (r"galaxy[-_]?tab", {"type": "samsung_tablet", "category": "endpoint", "manufacturer": "samsung"}),
+        (r"galaxy[-_]?s\d+|galaxy[-_]?note", {"type": "samsung_phone", "category": "endpoint", "manufacturer": "samsung"}),
+        (r"samsung[-_]?(tv|smart)", {"type": "smart_tv", "category": "media", "manufacturer": "samsung"}),
+
+        # ============================================================
         # Apple devices
+        # ============================================================
         (r"iphone", {"type": "iphone", "category": "endpoint", "manufacturer": "apple"}),
         (r"ipad", {"type": "ipad", "category": "endpoint", "manufacturer": "apple"}),
+        (r"^mac$", {"type": "mac_computer", "category": "compute", "manufacturer": "apple"}),
         (r"macbook", {"type": "macbook", "category": "compute", "manufacturer": "apple"}),
         (r"imac", {"type": "imac", "category": "compute", "manufacturer": "apple"}),
+        (r"mac[-_]?mini", {"type": "mac_mini", "category": "compute", "manufacturer": "apple"}),
+        (r"mac[-_]?pro", {"type": "mac_pro", "category": "compute", "manufacturer": "apple"}),
+        (r"mac[-_]?studio", {"type": "mac_studio", "category": "compute", "manufacturer": "apple"}),
         (r"apple[-_]?tv", {"type": "apple_tv", "category": "media", "manufacturer": "apple"}),
         (r"homepod", {"type": "homepod", "category": "media", "manufacturer": "apple"}),
+
+        # ============================================================
+        # UniFi/Ubiquiti - Including U6/U7 model patterns
+        # ============================================================
+        (r"u[67][-_]?(pro|lite|lr|mesh|enterprise|pro[-_]?wall)", {"type": "unifi_ap", "category": "infrastructure", "manufacturer": "ubiquiti"}),
+        (r"uap[-_]?", {"type": "unifi_ap", "category": "infrastructure", "manufacturer": "ubiquiti"}),
+        (r"usw[-_]?", {"type": "unifi_switch", "category": "infrastructure", "manufacturer": "ubiquiti"}),
+        (r"ugw[-_]?|udm[-_]?", {"type": "unifi_gateway", "category": "infrastructure", "manufacturer": "ubiquiti"}),
+        (r"unifi|ubnt", {"type": "unifi_device", "category": "infrastructure", "manufacturer": "ubiquiti"}),
+
+        # ============================================================
+        # Media/Streaming devices
+        # ============================================================
+        (r"^hdhr[-_]?", {"type": "hdhomerun", "category": "media", "manufacturer": "silicondust"}),
+        (r"roku", {"type": "roku", "category": "media", "manufacturer": "roku"}),
+        (r"fire[-_]?tv|fire[-_]?stick", {"type": "fire_tv", "category": "media", "manufacturer": "amazon"}),
+        (r"echo|alexa", {"type": "echo", "category": "media", "manufacturer": "amazon"}),
+        (r"sonos", {"type": "sonos_speaker", "category": "media", "manufacturer": "sonos"}),
+
+        # ============================================================
         # Smart home / IoT
+        # ============================================================
+        (r"^esp[-_]?[0-9a-f]+$", {"type": "esp_device", "category": "iot", "manufacturer": "espressif"}),
         (r"tasmota", {"type": "tasmota", "category": "iot"}),
         (r"sonoff", {"type": "sonoff", "category": "iot", "manufacturer": "sonoff"}),
         (r"shelly", {"type": "shelly", "category": "iot", "manufacturer": "shelly"}),
@@ -71,38 +122,60 @@ data:
         (r"hue[-_]?bridge", {"type": "hue_bridge", "category": "iot", "manufacturer": "philips"}),
         (r"ecobee", {"type": "thermostat", "category": "iot", "manufacturer": "ecobee"}),
         (r"ring", {"type": "doorbell", "category": "iot", "manufacturer": "ring"}),
-        (r"roku", {"type": "roku", "category": "media", "manufacturer": "roku"}),
-        (r"fire[-_]?tv|fire[-_]?stick", {"type": "fire_tv", "category": "media", "manufacturer": "amazon"}),
-        (r"echo|alexa", {"type": "echo", "category": "media", "manufacturer": "amazon"}),
-        # Appliances
+
+        # ============================================================
+        # Smart appliances - Including WiFi appliances
+        # ============================================================
+        (r"wifiwash|washmachine|washing", {"type": "smart_washer", "category": "appliance"}),
+        (r"wifitd|tumble|dryer", {"type": "smart_dryer", "category": "appliance"}),
+        (r"wifidw|dishwasher", {"type": "smart_dishwasher", "category": "appliance"}),
+        (r"wifiref|fridge|refrigerator", {"type": "smart_fridge", "category": "appliance"}),
+        (r"wifioven|oven", {"type": "smart_oven", "category": "appliance"}),
         (r"fellow[-_]?aiden|fellow[-_]?kettle|fellow[-_]?stagg", {"type": "smart_kettle", "category": "appliance", "manufacturer": "fellow"}),
         (r"roomba|irobot", {"type": "robot_vacuum", "category": "appliance", "manufacturer": "irobot"}),
         (r"roborock", {"type": "robot_vacuum", "category": "appliance", "manufacturer": "roborock"}),
         (r"dyson", {"type": "smart_appliance", "category": "appliance", "manufacturer": "dyson"}),
+
+        # ============================================================
         # Network/Infrastructure
-        (r"unifi|ubnt|uap|usw|ugw", {"type": "unifi_device", "category": "infrastructure", "manufacturer": "ubiquiti"}),
+        # ============================================================
         (r"opnsense|pfsense", {"type": "firewall", "category": "infrastructure"}),
         (r"proxmox|pve", {"type": "hypervisor", "category": "compute"}),
         (r"truenas|freenas", {"type": "nas", "category": "storage"}),
         (r"synology|diskstation", {"type": "synology_nas", "category": "storage", "manufacturer": "synology"}),
         (r"qnap", {"type": "qnap_nas", "category": "storage", "manufacturer": "qnap"}),
-        # Printers
+
+        # ============================================================
+        # Printers - Including model number patterns
+        # ============================================================
+        (r"^[0-9]+rv[0-9]+$", {"type": "printer", "category": "peripheral", "manufacturer": "xerox"}),
+        (r"^[0-9]+[a-z]{2}[0-9]+[a-z0-9]+$", {"type": "printer", "category": "peripheral"}),
         (r"hp[-_]?(officejet|laserjet|envy|deskjet)", {"type": "printer", "category": "peripheral", "manufacturer": "hp"}),
         (r"epson", {"type": "printer", "category": "peripheral", "manufacturer": "epson"}),
         (r"brother", {"type": "printer", "category": "peripheral", "manufacturer": "brother"}),
         (r"canon[-_]?(pixma|imageclass)", {"type": "printer", "category": "peripheral", "manufacturer": "canon"}),
+
+        # ============================================================
         # Computers/Servers
+        # ============================================================
         (r"raspberry[-_]?pi|raspberrypi|rpi", {"type": "raspberry_pi", "category": "compute"}),
-        (r"talos", {"type": "talos_node", "category": "compute"}),
+        (r"talos[-_]?", {"type": "talos_node", "category": "compute"}),
+        (r"agentic[-_]?\d+", {"type": "talos_node", "category": "compute"}),
+        (r"prod[-_]?\d+|worker[-_]?\d+|cp[-_]?\d+", {"type": "kubernetes_node", "category": "compute"}),
         (r"k8s|kubernetes|node", {"type": "kubernetes_node", "category": "compute"}),
         (r"docker|container", {"type": "docker_host", "category": "compute"}),
+
+        # ============================================================
         # Gaming
+        # ============================================================
         (r"playstation|ps[45]", {"type": "playstation", "category": "media", "manufacturer": "sony"}),
         (r"xbox", {"type": "xbox", "category": "media", "manufacturer": "microsoft"}),
         (r"nintendo|switch", {"type": "nintendo_switch", "category": "media", "manufacturer": "nintendo"}),
         (r"steam[-_]?deck", {"type": "steam_deck", "category": "media", "manufacturer": "valve"}),
+
+        # ============================================================
         # TVs
-        (r"samsung[-_]?(tv|smart)", {"type": "smart_tv", "category": "media", "manufacturer": "samsung"}),
+        # ============================================================
         (r"lg[-_]?(tv|smart|oled)", {"type": "smart_tv", "category": "media", "manufacturer": "lg"}),
         (r"sony[-_]?(tv|bravia)", {"type": "smart_tv", "category": "media", "manufacturer": "sony"}),
         (r"vizio", {"type": "smart_tv", "category": "media", "manufacturer": "vizio"}),

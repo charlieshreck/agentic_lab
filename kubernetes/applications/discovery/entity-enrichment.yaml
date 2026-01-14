@@ -1,0 +1,704 @@
+---
+# Entity Enrichment Pipeline
+#
+# Purpose: Transform shallow network-discovered entities into rich, contextual
+# knowledge that gives AI models complete understanding of every device.
+#
+# Runs 30 minutes after network-discovery to enrich discovered entities with:
+# - Home Assistant: rooms, automations, device details, power/wifi telemetry
+# - Tasmota: firmware, relay config, power monitoring
+# - Plex: version, libraries, active sessions
+# - UniFi: signal strength, experience score, connection quality
+# - Kubernetes: full pod/service specs, resource usage
+#
+# Target: Industry-leading estate context where every entity has complete
+# actionable information for AI-driven operations.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: entity-enrichment-script
+  namespace: ai-platform
+data:
+  enrich.py: |
+    #!/usr/bin/env python3
+    """
+    Entity Enrichment Pipeline
+
+    Transforms shallow discovered entities into rich contextual knowledge.
+    """
+    import os
+    import re
+    import json
+    import asyncio
+    import logging
+    from datetime import datetime, timezone
+    from typing import Dict, List, Optional, Any
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+    from base64 import b64encode
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+
+    # Configuration
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    NEO4J_URL = os.environ.get("NEO4J_URL", "http://neo4j:7474")
+    NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")
+
+    # MCP endpoints
+    HOME_ASSISTANT_MCP = os.environ.get("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000")
+    PLEX_MCP = os.environ.get("PLEX_MCP_URL", "http://plex-mcp:8000")
+    UNIFI_MCP = os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000")
+
+    # Room extraction patterns - parse location from Home Assistant entity names
+    ROOM_PATTERNS = [
+        # Explicit room prefixes
+        (r"^(kitchen)\s+", "kitchen"),
+        (r"^(living\s*room)\s+", "living_room"),
+        (r"^(dining\s*room)\s+", "dining_room"),
+        (r"^(bedroom)\s+", "bedroom"),
+        (r"^(bathroom)\s+", "bathroom"),
+        (r"^(ensuite)\s+", "ensuite"),
+        (r"^(garage)\s+", "garage"),
+        (r"^(study)\s+", "study"),
+        (r"^(office)\s+", "office"),
+        (r"^(hall)\s+", "hallway"),
+        (r"^(hallway)\s+", "hallway"),
+        (r"^(laundry)\s+", "laundry"),
+        (r"^(cloakroom)\s+", "cloakroom"),
+        (r"^(loo)\s+", "toilet"),
+        (r"^(toilet)\s+", "toilet"),
+        (r"^(shower)\s+", "shower_room"),
+        (r"^(patio)\s+", "patio"),
+        (r"^(garden)\s+", "garden"),
+        (r"^(front\s*door)\s+", "front_entrance"),
+        (r"^(door)\s+", "entrance"),
+        (r"^(stair)\s+", "stairs"),
+        (r"^(play\s*room)\s+", "play_room"),
+        # Possessive patterns (Albie's Room, Vienna's Pendant)
+        (r"^(\w+)'s\s+(room|bedroom)", lambda m: f"{m.group(1).lower()}_room"),
+        (r"^(\w+)'s\s+", lambda m: f"{m.group(1).lower()}_room"),
+    ]
+
+    # Device type refinements based on HA entity domain
+    HA_DOMAIN_TO_TYPE = {
+        "light": "smart_light",
+        "switch": "smart_switch",
+        "sensor": "sensor",
+        "binary_sensor": "binary_sensor",
+        "climate": "thermostat",
+        "cover": "smart_cover",
+        "fan": "smart_fan",
+        "lock": "smart_lock",
+        "media_player": "media_player",
+        "camera": "camera",
+        "vacuum": "robot_vacuum",
+        "device_tracker": "tracked_device",
+        "automation": "automation",
+        "scene": "scene",
+        "script": "script",
+    }
+
+    # ============================================================
+    # API Helpers
+    # ============================================================
+
+    def http_get(url: str, headers: dict = None) -> Optional[dict]:
+        """HTTP GET with JSON response."""
+        req = Request(url, headers=headers or {"Accept": "application/json"})
+        try:
+            with urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            logger.warning(f"HTTP GET {url} failed: {e}")
+            return None
+
+    def http_post(url: str, data: dict, headers: dict = None) -> Optional[dict]:
+        """HTTP POST with JSON body and response."""
+        hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
+        if headers:
+            hdrs.update(headers)
+        req = Request(url, data=json.dumps(data).encode(), headers=hdrs, method="POST")
+        try:
+            with urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            logger.warning(f"HTTP POST {url} failed: {e}")
+            return None
+
+    def neo4j_query(cypher: str, params: dict = None) -> dict:
+        """Execute Cypher query."""
+        url = f"{NEO4J_URL}/db/neo4j/tx/commit"
+        auth = b64encode(f"{NEO4J_USER}:{NEO4J_PASSWORD}".encode()).decode()
+        body = {"statements": [{"statement": cypher, "parameters": params or {}}]}
+        req = Request(
+            url,
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Basic {auth}"},
+            method="POST"
+        )
+        try:
+            with urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except (URLError, HTTPError) as e:
+            logger.error(f"Neo4j query failed: {e}")
+            return {"errors": [str(e)]}
+
+    # ============================================================
+    # Qdrant Operations
+    # ============================================================
+
+    def qdrant_scroll(collection: str, limit: int = 100, filter_: dict = None) -> List[dict]:
+        """Scroll through Qdrant collection."""
+        url = f"{QDRANT_URL}/collections/{collection}/points/scroll"
+        body = {"limit": limit, "with_payload": True, "with_vector": False}
+        if filter_:
+            body["filter"] = filter_
+        result = http_post(url, body)
+        if result and "result" in result:
+            return result["result"].get("points", [])
+        return []
+
+    def qdrant_upsert(collection: str, points: List[dict]) -> bool:
+        """Upsert points to Qdrant."""
+        url = f"{QDRANT_URL}/collections/{collection}/points"
+        result = http_post(url, {"points": points}, headers={"Content-Type": "application/json"})
+        return result is not None
+
+    def get_embedding(text: str) -> Optional[List[float]]:
+        """Get embedding from LiteLLM."""
+        result = http_post(
+            f"{LITELLM_URL}/embeddings",
+            {"model": "embeddings", "input": text}
+        )
+        if result and "data" in result:
+            return result["data"][0]["embedding"]
+        return None
+
+    # ============================================================
+    # Home Assistant Enrichment
+    # ============================================================
+
+    def get_ha_entities() -> List[dict]:
+        """Fetch all Home Assistant entities."""
+        # Use the REST API endpoint
+        result = http_get(f"{HOME_ASSISTANT_MCP}/api/entities")
+        if result and "result" in result:
+            return result["result"]
+        # Fallback: try MCP tool call
+        return []
+
+    def extract_room(name: str) -> Optional[str]:
+        """Extract room/location from entity friendly name."""
+        name_lower = name.lower().strip()
+
+        for pattern, room in ROOM_PATTERNS:
+            match = re.match(pattern, name_lower, re.IGNORECASE)
+            if match:
+                if callable(room):
+                    return room(match)
+                return room
+
+        return None
+
+    def parse_ha_entity(entity: dict) -> dict:
+        """Parse Home Assistant entity into enrichment data."""
+        entity_id = entity.get("entity_id", "")
+        name = entity.get("name", "")
+        state = entity.get("state", "")
+        area = entity.get("area", "")
+
+        # Extract domain from entity_id (e.g., "light.kitchen_spots" -> "light")
+        domain = entity_id.split(".")[0] if "." in entity_id else ""
+
+        # Determine device type from domain
+        device_type = HA_DOMAIN_TO_TYPE.get(domain)
+
+        # Extract room from name if not provided by HA
+        location = area if area else extract_room(name)
+
+        return {
+            "ha_entity_id": entity_id,
+            "friendly_name": name,
+            "ha_domain": domain,
+            "ha_state": state,
+            "device_type_hint": device_type,
+            "location": location,
+        }
+
+    def build_ha_lookup(ha_entities: List[dict]) -> Dict[str, dict]:
+        """Build lookup tables for HA entities by various keys."""
+        lookup = {
+            "by_name": {},      # friendly name -> entity
+            "by_entity_id": {}, # entity_id -> entity
+        }
+
+        for entity in ha_entities:
+            parsed = parse_ha_entity(entity)
+            name = parsed.get("friendly_name", "").lower().replace(" ", "_").replace("-", "_")
+            entity_id = parsed.get("ha_entity_id", "")
+
+            if name:
+                lookup["by_name"][name] = parsed
+            if entity_id:
+                lookup["by_entity_id"][entity_id] = parsed
+
+        return lookup
+
+    def match_entity_to_ha(entity: dict, ha_lookup: dict) -> Optional[dict]:
+        """Try to match a discovered entity to Home Assistant data."""
+        hostname = entity.get("hostname", "").lower().replace("-", "_").replace(" ", "_")
+
+        # Direct hostname match
+        if hostname in ha_lookup["by_name"]:
+            return ha_lookup["by_name"][hostname]
+
+        # Partial match - hostname contains HA name or vice versa
+        for name, ha_data in ha_lookup["by_name"].items():
+            if name in hostname or hostname in name:
+                return ha_data
+            # Handle tasmota naming: tasmota-ABCDEF might match "kitchen_spots"
+            friendly = ha_data.get("friendly_name", "").lower().replace(" ", "_")
+            if friendly and (friendly in hostname or hostname in friendly):
+                return ha_data
+
+        return None
+
+    # ============================================================
+    # Tasmota Direct Enrichment
+    # ============================================================
+
+    def enrich_tasmota(ip: str) -> dict:
+        """Query Tasmota device directly for detailed info."""
+        enrichment = {}
+
+        # Get full status
+        status = http_get(f"http://{ip}/cm?cmnd=Status%200")
+        if status:
+            # Device info
+            if "StatusFWR" in status:
+                fwr = status["StatusFWR"]
+                enrichment["firmware_version"] = fwr.get("Version", "")
+                enrichment["build_date"] = fwr.get("BuildDateTime", "")
+                enrichment["core_version"] = fwr.get("Core", "")
+
+            # Network info
+            if "StatusNET" in status:
+                net = status["StatusNET"]
+                enrichment["tasmota_hostname"] = net.get("Hostname", "")
+                enrichment["tasmota_ip"] = net.get("IPAddress", "")
+                enrichment["tasmota_mac"] = net.get("Mac", "")
+                enrichment["wifi_ssid"] = net.get("SSId", "")
+                enrichment["wifi_rssi"] = net.get("RSSI", 0)
+                enrichment["wifi_signal"] = net.get("Signal", 0)
+
+            # Power/relay info
+            if "StatusSTS" in status:
+                sts = status["StatusSTS"]
+                # Count relays (POWER, POWER1, POWER2, etc.)
+                relay_count = sum(1 for k in sts.keys() if k.startswith("POWER"))
+                enrichment["relay_count"] = relay_count
+                enrichment["relay_states"] = {k: v for k, v in sts.items() if k.startswith("POWER")}
+                enrichment["uptime"] = sts.get("Uptime", "")
+                enrichment["heap_free"] = sts.get("Heap", 0)
+
+            # Energy monitoring
+            if "StatusSNS" in status:
+                sns = status["StatusSNS"]
+                if "ENERGY" in sns:
+                    energy = sns["ENERGY"]
+                    enrichment["power_watts"] = energy.get("Power", 0)
+                    enrichment["voltage"] = energy.get("Voltage", 0)
+                    enrichment["current_amps"] = energy.get("Current", 0)
+                    enrichment["energy_today_kwh"] = energy.get("Today", 0)
+                    enrichment["energy_total_kwh"] = energy.get("Total", 0)
+                    enrichment["power_factor"] = energy.get("Factor", 0)
+
+        return enrichment
+
+    # ============================================================
+    # Plex Enrichment
+    # ============================================================
+
+    def enrich_plex(ip: str) -> dict:
+        """Get Plex server details."""
+        enrichment = {}
+
+        # Get server identity
+        identity = http_get(f"{PLEX_MCP}/api/status")
+        if identity:
+            enrichment["plex_version"] = identity.get("version", "")
+            enrichment["plex_platform"] = identity.get("platform", "")
+            enrichment["plex_claimed"] = identity.get("claimed", False)
+
+        # Get libraries
+        libraries = http_get(f"{PLEX_MCP}/api/libraries")
+        if libraries and "result" in libraries:
+            libs = libraries["result"]
+            enrichment["plex_libraries"] = [
+                {"title": lib.get("title"), "type": lib.get("type")}
+                for lib in libs
+            ]
+            enrichment["plex_library_count"] = len(libs)
+
+        return enrichment
+
+    # ============================================================
+    # Entity Description Generator
+    # ============================================================
+
+    def generate_rich_description(entity: dict) -> str:
+        """Generate comprehensive description for embedding."""
+        parts = []
+
+        # Identity
+        if entity.get("friendly_name"):
+            parts.append(f"{entity['friendly_name']}")
+        elif entity.get("hostname"):
+            parts.append(f"Device {entity['hostname']}")
+
+        # Type and category
+        if entity.get("type") and entity["type"] != "unknown":
+            parts.append(f"is a {entity['type'].replace('_', ' ')}")
+        if entity.get("category"):
+            parts.append(f"({entity['category']})")
+
+        # Manufacturer and model
+        if entity.get("manufacturer") and entity["manufacturer"] != "unknown":
+            parts.append(f"made by {entity['manufacturer']}")
+        if entity.get("model"):
+            parts.append(f"model {entity['model']}")
+
+        # Location
+        if entity.get("location"):
+            parts.append(f"located in {entity['location'].replace('_', ' ')}")
+
+        # Firmware/version
+        if entity.get("firmware_version"):
+            parts.append(f"running firmware {entity['firmware_version']}")
+        if entity.get("plex_version"):
+            parts.append(f"Plex version {entity['plex_version']}")
+
+        # Capabilities
+        if entity.get("relay_count"):
+            parts.append(f"with {entity['relay_count']} relay(s)")
+        if entity.get("capabilities"):
+            parts.append(f"capabilities: {', '.join(entity['capabilities'])}")
+
+        # Power monitoring
+        if entity.get("power_watts") is not None:
+            parts.append(f"currently using {entity['power_watts']}W")
+
+        # Network context
+        if entity.get("network"):
+            network_names = {
+                "prod": "production network",
+                "agentic": "AI platform network",
+                "monit": "monitoring network",
+            }
+            net_desc = network_names.get(entity["network"], f"{entity['network']} network")
+            parts.append(f"on {net_desc}")
+
+        # WiFi details
+        if entity.get("wifi_ssid"):
+            parts.append(f"connected to WiFi '{entity['wifi_ssid']}'")
+        if entity.get("wifi_signal"):
+            parts.append(f"signal {entity['wifi_signal']}%")
+
+        # Management relationships
+        if entity.get("managed_by"):
+            parts.append(f"managed by {entity['managed_by']}")
+        if entity.get("controlled_by_automations"):
+            parts.append(f"automated by: {', '.join(entity['controlled_by_automations'][:3])}")
+
+        # IP for reference
+        if entity.get("ip"):
+            parts.append(f"at {entity['ip']}")
+
+        description = " ".join(parts)
+        return description if description else f"Network device at {entity.get('ip', 'unknown')}"
+
+    # ============================================================
+    # Neo4j Relationship Updates
+    # ============================================================
+
+    def update_neo4j_entity(entity: dict) -> bool:
+        """Update Neo4j with enriched entity data."""
+        ip = entity.get("ip")
+        if not ip:
+            return False
+
+        # Update host node with all enriched properties
+        props_to_set = []
+        params = {"ip": ip}
+
+        enrichment_fields = [
+            "friendly_name", "location", "type", "category", "manufacturer",
+            "model", "firmware_version", "relay_count", "power_watts",
+            "plex_version", "plex_library_count", "wifi_ssid", "wifi_signal",
+            "ha_entity_id", "uptime"
+        ]
+
+        for field in enrichment_fields:
+            if entity.get(field) is not None:
+                props_to_set.append(f"h.{field} = ${field}")
+                params[field] = entity[field]
+
+        if not props_to_set:
+            return True  # Nothing to update
+
+        props_to_set.append("h.enriched_at = datetime()")
+        props_to_set.append("h.enrichment_version = 1")
+
+        cypher = f"""
+        MATCH (h:Host {{ip: $ip}})
+        SET {', '.join(props_to_set)}
+        RETURN h.ip
+        """
+
+        result = neo4j_query(cypher, params)
+
+        # Create location relationship if we have location
+        if entity.get("location"):
+            loc_cypher = """
+            MATCH (h:Host {ip: $ip})
+            MERGE (loc:Location {name: $location})
+            MERGE (h)-[:LOCATED_IN]->(loc)
+            RETURN loc.name
+            """
+            neo4j_query(loc_cypher, {"ip": ip, "location": entity["location"]})
+
+        # Create MANAGED_BY relationship for HA-controlled devices
+        if entity.get("ha_entity_id"):
+            ha_cypher = """
+            MATCH (h:Host {ip: $ip})
+            MATCH (ha:Host {hostname: 'homeassistant'})
+            MERGE (h)-[:MANAGED_BY]->(ha)
+            RETURN h.ip
+            """
+            neo4j_query(ha_cypher, {"ip": ip})
+
+        return not result.get("errors")
+
+    # ============================================================
+    # Main Enrichment Pipeline
+    # ============================================================
+
+    def run_enrichment():
+        """Main enrichment pipeline."""
+        logger.info("Starting entity enrichment pipeline...")
+        start_time = datetime.now(timezone.utc)
+
+        stats = {
+            "entities_processed": 0,
+            "ha_matches": 0,
+            "tasmota_enriched": 0,
+            "plex_enriched": 0,
+            "locations_added": 0,
+            "errors": 0,
+        }
+
+        # Step 1: Load Home Assistant entities
+        logger.info("Loading Home Assistant entities...")
+        ha_entities = get_ha_entities()
+        logger.info(f"Loaded {len(ha_entities)} HA entities")
+        ha_lookup = build_ha_lookup(ha_entities)
+
+        # Step 2: Load entities from Qdrant that need enrichment
+        logger.info("Loading entities from Qdrant...")
+        entities = qdrant_scroll("entities", limit=500)
+        logger.info(f"Loaded {len(entities)} entities to process")
+
+        # Step 3: Enrich each entity
+        enriched_points = []
+
+        for point in entities:
+            entity = point.get("payload", {})
+            point_id = point.get("id")
+
+            if not entity.get("ip"):
+                continue
+
+            stats["entities_processed"] += 1
+            original_type = entity.get("type", "unknown")
+
+            # Try Home Assistant match
+            ha_match = match_entity_to_ha(entity, ha_lookup)
+            if ha_match:
+                stats["ha_matches"] += 1
+                entity["ha_entity_id"] = ha_match.get("ha_entity_id")
+                entity["friendly_name"] = ha_match.get("friendly_name")
+                entity["ha_domain"] = ha_match.get("ha_domain")
+
+                # Update type if we got a better one
+                if ha_match.get("device_type_hint") and original_type == "unknown":
+                    entity["type"] = ha_match["device_type_hint"]
+
+                # Add location
+                if ha_match.get("location"):
+                    entity["location"] = ha_match["location"]
+                    stats["locations_added"] += 1
+
+            # Tasmota-specific enrichment
+            if entity.get("type") in ["tasmota", "smart_light", "smart_switch"] or \
+               "tasmota" in entity.get("hostname", "").lower():
+                try:
+                    tasmota_data = enrich_tasmota(entity["ip"])
+                    if tasmota_data:
+                        entity.update(tasmota_data)
+                        stats["tasmota_enriched"] += 1
+                        # Refine type based on relay count
+                        if tasmota_data.get("relay_count", 0) > 0:
+                            if "light" in entity.get("friendly_name", "").lower():
+                                entity["type"] = "tasmota_light"
+                            else:
+                                entity["type"] = "tasmota_switch"
+                except Exception as e:
+                    logger.warning(f"Tasmota enrichment failed for {entity['ip']}: {e}")
+
+            # Plex enrichment
+            if entity.get("hostname", "").lower() == "plex" or \
+               entity.get("type") == "plex_server":
+                try:
+                    plex_data = enrich_plex(entity["ip"])
+                    if plex_data:
+                        entity.update(plex_data)
+                        entity["type"] = "plex_server"
+                        entity["category"] = "media"
+                        stats["plex_enriched"] += 1
+                except Exception as e:
+                    logger.warning(f"Plex enrichment failed for {entity['ip']}: {e}")
+
+            # Special case: Home Assistant itself
+            if entity.get("hostname", "").lower() == "homeassistant":
+                entity["type"] = "home_assistant"
+                entity["category"] = "automation_hub"
+                entity["managed_devices"] = stats["ha_matches"]
+
+            # Update timestamps
+            entity["enriched_at"] = datetime.now(timezone.utc).isoformat()
+            entity["enrichment_version"] = 1
+
+            # Generate new embedding with rich description
+            description = generate_rich_description(entity)
+            try:
+                vector = get_embedding(description)
+                if vector:
+                    enriched_points.append({
+                        "id": point_id,
+                        "vector": vector,
+                        "payload": entity
+                    })
+            except Exception as e:
+                logger.error(f"Embedding failed for {entity['ip']}: {e}")
+                stats["errors"] += 1
+
+            # Update Neo4j
+            try:
+                update_neo4j_entity(entity)
+            except Exception as e:
+                logger.warning(f"Neo4j update failed for {entity['ip']}: {e}")
+
+        # Step 4: Batch upsert to Qdrant
+        if enriched_points:
+            logger.info(f"Upserting {len(enriched_points)} enriched entities to Qdrant...")
+            batch_size = 50
+            for i in range(0, len(enriched_points), batch_size):
+                batch = enriched_points[i:i+batch_size]
+                if qdrant_upsert("entities", batch):
+                    logger.info(f"Upserted batch {i//batch_size + 1}")
+                else:
+                    logger.error(f"Failed to upsert batch {i//batch_size + 1}")
+                    stats["errors"] += 1
+
+        # Summary
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.info(f"""
+        ========================================
+        Enrichment Complete in {elapsed:.1f}s
+        ========================================
+        Entities processed: {stats['entities_processed']}
+        Home Assistant matches: {stats['ha_matches']}
+        Tasmota devices enriched: {stats['tasmota_enriched']}
+        Plex servers enriched: {stats['plex_enriched']}
+        Locations added: {stats['locations_added']}
+        Errors: {stats['errors']}
+        ========================================
+        """)
+
+        return 0 if stats["errors"] == 0 else 1
+
+    if __name__ == "__main__":
+        exit(run_enrichment())
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: entity-enrichment
+  namespace: ai-platform
+  labels:
+    app: entity-enrichment
+    component: discovery
+spec:
+  schedule: "30 */4 * * *"  # 30 min after discovery
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600  # 10 minute timeout
+      template:
+        metadata:
+          labels:
+            app: entity-enrichment
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: enrichment
+            image: python:3.11-slim
+            command:
+            - python
+            - /scripts/enrich.py
+            env:
+            - name: QDRANT_URL
+              value: "http://qdrant:6333"
+            - name: LITELLM_URL
+              value: "http://litellm:4000"
+            - name: NEO4J_URL
+              value: "http://neo4j:7474"
+            - name: NEO4J_USER
+              value: "neo4j"
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: NEO4J_PASSWORD
+            - name: HOME_ASSISTANT_MCP_URL
+              value: "http://home-assistant-mcp:8000"
+            - name: PLEX_MCP_URL
+              value: "http://plex-mcp:8000"
+            - name: UNIFI_MCP_URL
+              value: "http://unifi-mcp:8000"
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+          volumes:
+          - name: script
+            configMap:
+              name: entity-enrichment-script
+              defaultMode: 0755
