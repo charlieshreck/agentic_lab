@@ -43,6 +43,7 @@ Claude Code / Agents
 | browser-automation-mcp | 31094 | Playwright browser automation |
 | plex-mcp | 31096 | Plex Media Server (31095 reserved) |
 | vikunja-mcp | 31097 | Vikunja task management |
+| neo4j-mcp | 31099 | Neo4j knowledge graph (relationships, dependencies) |
 
 ## Health Checks
 
