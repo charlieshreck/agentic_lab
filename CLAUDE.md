@@ -58,6 +58,7 @@ This repository contains the infrastructure and application code for a **self-im
 | `proxmox-mcp` | Hypervisor management | list_vms, start_vm, stop_vm, get_vm_status |
 | `truenas-mcp` | Storage management | list_pools, list_datasets, list_shares, get_disk_status |
 | `home-assistant-mcp` | Smart home control | list_lights, turn_on_light, list_climate, get_sensors |
+| `tasmota-mcp` | Tasmota device control | tasmota_power, tasmota_status, tasmota_wifi_config, tasmota_mqtt_config |
 | `web-search-mcp` | Web search via SearXNG | web_search, get_page_content, search_news |
 | `browser-automation-mcp` | Headless browser (Playwright) | navigate, screenshot, click, type_text |
 | `infisical-mcp` | Secrets management | list_secrets, get_secret (read-only) |
@@ -86,6 +87,7 @@ This repository contains the infrastructure and application code for a **self-im
 | plex-mcp | 31096 | `curl http://10.20.0.40:31096/health` |
 | vikunja-mcp | 31097 | `curl http://10.20.0.40:31097/health` |
 | neo4j-mcp | 31098 | `curl http://10.20.0.40:31098/health` |
+| tasmota-mcp | 31100 | `curl http://10.20.0.40:31100/health` |
 
 **IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
 
@@ -152,6 +154,35 @@ Web interface for browsing entities, exploring the knowledge graph, and searchin
 **Tech Stack:** Next.js 14, Tailwind CSS, standalone Docker build
 
 **Source:** `/home/agentic_lab/fumadocs/`
+
+#### 3e. Tasmota Device Control (via tasmota-mcp)
+
+Direct HTTP API control of **26 Tasmota smart devices** (lights, switches, plugs) on the prod network.
+
+| Tool | Purpose |
+|------|---------|
+| `tasmota_list_devices` | List registered devices |
+| `tasmota_add_device(ip, name)` | Register a device by IP |
+| `tasmota_discover(network)` | Scan network for Tasmota devices |
+| `tasmota_power(ip, action)` | Control power: on, off, toggle, blink |
+| `tasmota_power_all(action)` | Control all registered devices |
+| `tasmota_status(ip)` | Get device status (power, WiFi, uptime) |
+| `tasmota_wifi_config(ip, ssid, password)` | Configure WiFi settings |
+| `tasmota_mqtt_config(ip, host, topic)` | Configure MQTT settings |
+| `tasmota_command(ip, command)` | Execute any raw Tasmota command |
+| `tasmota_restart(ip)` | Restart device |
+| `tasmota_upgrade(ip, url)` | Trigger OTA firmware upgrade |
+
+**Device Inventory (26 devices on 10.10.0.0/24):**
+- Living Room: Sockets (4-relay), Lamp, Main Light
+- Kitchen: Pendants, Spots
+- Bedrooms: Study Pendant, Bedroom Light, Bedside, Vienna's, Albie's
+- Bathrooms: EnSuite Spots, Shower Spots, Loo Lights, Cloakroom Spots
+- Other: Hall, Stairs, Dining Room (Pendant + Spots), Laundry, Garage, Patio, Door Lights, Play Room (Pendants + Wall), RF Bridge, Macerator
+
+**API Access:** All devices have HTTP API enabled by default (`WebServer 2`). No authentication required.
+
+**Source:** `/home/agentic_lab/mcp-servers/tasmota/`
 
 #### 4. Human-in-the-Loop
 - **Interface**: Matrix/Element (self-hosted Conduit server)
