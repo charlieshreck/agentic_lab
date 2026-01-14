@@ -332,7 +332,7 @@ spec:
     spec:
       initContainers:
         - name: install-deps
-          image: mcr.microsoft.com/playwright/python:v1.49.0-jammy
+          image: mcr.microsoft.com/playwright/python:v1.57.0-jammy
           command:
             - sh
             - -c
@@ -345,7 +345,7 @@ spec:
               mountPath: /app/deps
       containers:
         - name: mcp-server
-          image: mcr.microsoft.com/playwright/python:v1.49.0-jammy
+          image: mcr.microsoft.com/playwright/python:v1.57.0-jammy
           command:
             - sh
             - -c

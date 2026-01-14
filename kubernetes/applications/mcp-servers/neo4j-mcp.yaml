@@ -82,7 +82,7 @@ data:
     async def _get_entity_context_impl(entity_id: str, entity_type: str = "Host") -> dict:
         cypher = f"""
         MATCH (e:{entity_type})
-        WHERE e.ip = $id OR e.hostname = $id OR e.mac = $id OR e.name = $id OR e.vmid = $id
+        WHERE e.ip = $id OR e.hostname = $id OR e.mac = $id OR e.name = $id OR e.vmid = $id OR e.title = $id
         WITH e LIMIT 1
         OPTIONAL MATCH (e)-[r]->(related)
         OPTIONAL MATCH (e)<-[r2]-(related2)

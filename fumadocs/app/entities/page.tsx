@@ -146,7 +146,7 @@ export default function EntitiesPage() {
                         </td>
                         <td className="px-4 py-3">
                           <Link
-                            href={`/entities/${encodeURIComponent(entity.ip || entity.title || entity.name || String(idx))}`}
+                            href={`/entities/${encodeURIComponent(entity.ip || entity.title || entity.name || String(idx))}?type=${selectedType}`}
                             className="text-blue-400 hover:text-blue-300"
                           >
                             View

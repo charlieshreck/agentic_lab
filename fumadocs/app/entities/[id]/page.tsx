@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 
 interface Entity {
@@ -26,12 +27,14 @@ interface EntityContext {
 }
 
 export default function EntityDetailPage({ params }: { params: { id: string } }) {
+  const searchParams = useSearchParams();
   const [context, setContext] = useState<EntityContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`/api/entities/${encodeURIComponent(params.id)}?diagram=true`)
+    const entityType = searchParams.get('type') || 'Host';
+    fetch(`/api/entities/${encodeURIComponent(params.id)}?diagram=true&type=${entityType}`)
       .then((res) => {
         if (!res.ok) throw new Error('Entity not found');
         return res.json();
@@ -51,7 +54,7 @@ export default function EntityDetailPage({ params }: { params: { id: string } })
         setError(err.message);
         setLoading(false);
       });
-  }, [params.id]);
+  }, [params.id, searchParams]);
 
   // Mermaid diagram rendering disabled - add dependency to re-enable
   // useEffect(() => {
