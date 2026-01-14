@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 
 interface Entity {
@@ -27,13 +26,20 @@ interface EntityContext {
 }
 
 export default function EntityDetailPage({ params }: { params: { id: string } }) {
-  const searchParams = useSearchParams();
   const [context, setContext] = useState<EntityContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [entityType, setEntityType] = useState<string | null>(null);
+
+  // Read type from URL on mount - avoids Next.js useSearchParams hydration timing issues
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    setEntityType(urlParams.get('type') || 'Host');
+  }, []);
 
   useEffect(() => {
-    const entityType = searchParams.get('type') || 'Host';
+    if (!entityType) return; // Wait for type to be read from URL
+
     fetch(`/api/entities/${encodeURIComponent(params.id)}?diagram=true&type=${entityType}`)
       .then((res) => {
         if (!res.ok) throw new Error('Entity not found');
@@ -54,7 +60,7 @@ export default function EntityDetailPage({ params }: { params: { id: string } })
         setError(err.message);
         setLoading(false);
       });
-  }, [params.id, searchParams]);
+  }, [params.id, entityType]);
 
   // Mermaid diagram rendering disabled - add dependency to re-enable
   // useEffect(() => {

@@ -19,11 +19,17 @@ interface Entity {
   last_seen?: string;
 }
 
+// Entity types that don't have status (documents, decisions, etc.)
+const DOCUMENT_TYPES = ['RunbookDocument', 'Decision', 'Documentation', 'Event'];
+
 export default function EntitiesPage() {
   const [entityTypes, setEntityTypes] = useState<EntityType[]>([]);
   const [selectedType, setSelectedType] = useState<string | null>(null);
   const [entities, setEntities] = useState<Entity[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Check if current type should show status column
+  const showStatus = selectedType ? !DOCUMENT_TYPES.includes(selectedType) : true;
 
   useEffect(() => {
     fetch('/api/entities')
@@ -103,9 +109,9 @@ export default function EntitiesPage() {
                   <thead className="bg-gray-700">
                     <tr>
                       <th className="px-4 py-3 text-left">Name/IP</th>
-                      <th className="px-4 py-3 text-left">Status</th>
-                      <th className="px-4 py-3 text-left">Network</th>
-                      <th className="px-4 py-3 text-left">Last Seen</th>
+                      {showStatus && <th className="px-4 py-3 text-left">Status</th>}
+                      {showStatus && <th className="px-4 py-3 text-left">Network</th>}
+                      {showStatus && <th className="px-4 py-3 text-left">Last Seen</th>}
                       <th className="px-4 py-3 text-left">Actions</th>
                     </tr>
                   </thead>
@@ -123,27 +129,33 @@ export default function EntitiesPage() {
                             <div className="text-sm text-gray-400">{entity.ip}</div>
                           )}
                         </td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`px-2 py-1 rounded text-sm ${
-                              entity.status === 'online'
-                                ? 'bg-green-900 text-green-300'
-                                : entity.status === 'offline'
-                                ? 'bg-red-900 text-red-300'
-                                : 'bg-gray-600 text-gray-300'
-                            }`}
-                          >
-                            {entity.status || 'unknown'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-gray-400">
-                          {entity.network || '-'}
-                        </td>
-                        <td className="px-4 py-3 text-gray-400 text-sm">
-                          {entity.last_seen
-                            ? new Date(entity.last_seen).toLocaleString()
-                            : '-'}
-                        </td>
+                        {showStatus && (
+                          <td className="px-4 py-3">
+                            <span
+                              className={`px-2 py-1 rounded text-sm ${
+                                entity.status === 'online'
+                                  ? 'bg-green-900 text-green-300'
+                                  : entity.status === 'offline'
+                                  ? 'bg-red-900 text-red-300'
+                                  : 'bg-gray-600 text-gray-300'
+                              }`}
+                            >
+                              {entity.status || 'unknown'}
+                            </span>
+                          </td>
+                        )}
+                        {showStatus && (
+                          <td className="px-4 py-3 text-gray-400">
+                            {entity.network || '-'}
+                          </td>
+                        )}
+                        {showStatus && (
+                          <td className="px-4 py-3 text-gray-400 text-sm">
+                            {entity.last_seen
+                              ? new Date(entity.last_seen).toLocaleString()
+                              : '-'}
+                          </td>
+                        )}
                         <td className="px-4 py-3">
                           <Link
                             href={`/entities/${encodeURIComponent(entity.ip || entity.title || entity.name || String(idx))}?type=${selectedType}`}
