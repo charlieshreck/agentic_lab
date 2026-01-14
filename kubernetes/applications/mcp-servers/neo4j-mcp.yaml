@@ -322,25 +322,29 @@ data:
             """
             result = await neo4j_query(cypher, {"id": entity_id})
 
-            # Fallback if APOC not available
+            # Fallback if APOC not available - use UNWIND for multi-depth traversal
             if result.get("errors"):
-                # Simpler query without APOC
                 cypher = f"""
                 MATCH (e:{entity_type})
                 WHERE e.ip = $id OR e.hostname = $id OR e.name = $id OR e.title = $id
                 WITH e LIMIT 1
-                OPTIONAL MATCH (e)-[r]-(connected)
-                WITH e, collect(DISTINCT {{
-                    id: coalesce(connected.ip, connected.name, connected.title, toString(connected.vmid)),
-                    name: coalesce(connected.hostname, connected.name, connected.title),
-                    type: labels(connected)[0]
-                }}) as nodes,
-                collect(DISTINCT {{
-                    source: coalesce(startNode(r).ip, startNode(r).name, startNode(r).title),
-                    target: coalesce(endNode(r).ip, endNode(r).name, endNode(r).title),
-                    type: type(r)
-                }}) as edges
-                RETURN e as center, nodes, edges
+                OPTIONAL MATCH path = (e)-[*1..{depth}]-(connected)
+                WITH e, path, connected
+                UNWIND CASE WHEN path IS NOT NULL THEN relationships(path) ELSE [null] END as r
+                WITH e,
+                     collect(DISTINCT connected) as allNodes,
+                     collect(DISTINCT r) as allRels
+                RETURN e as center,
+                       [n IN allNodes WHERE n IS NOT NULL | {{
+                           id: coalesce(n.ip, n.name, n.title, toString(n.vmid)),
+                           name: coalesce(n.hostname, n.name, n.title),
+                           type: labels(n)[0]
+                       }}] as nodes,
+                       [rel IN allRels WHERE rel IS NOT NULL | {{
+                           source: coalesce(startNode(rel).ip, startNode(rel).name, startNode(rel).title),
+                           target: coalesce(endNode(rel).ip, endNode(rel).name, endNode(rel).title),
+                           type: type(rel)
+                       }}] as edges
                 """
                 result = await neo4j_query(cypher, {"id": entity_id})
 
