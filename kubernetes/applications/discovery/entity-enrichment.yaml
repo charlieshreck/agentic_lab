@@ -55,6 +55,7 @@ data:
     HOME_ASSISTANT_MCP = os.environ.get("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000")
     PLEX_MCP = os.environ.get("PLEX_MCP_URL", "http://plex-mcp:8000")
     UNIFI_MCP = os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000")
+    PROXMOX_MCP = os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000")
 
     # Room extraction patterns - parse location from Home Assistant entity names
     ROOM_PATTERNS = [
@@ -362,6 +363,97 @@ data:
         return enrichment
 
     # ============================================================
+    # Proxmox VM Enrichment
+    # ============================================================
+
+    # Cache for Proxmox VMs (populated once per run)
+    _proxmox_vm_cache = None
+
+    def get_proxmox_vms() -> List[dict]:
+        """Fetch Proxmox VMs (cached)."""
+        global _proxmox_vm_cache
+        if _proxmox_vm_cache is not None:
+            return _proxmox_vm_cache
+
+        result = http_get(f"{PROXMOX_MCP}/api/vms")
+        if result and "data" in result:
+            _proxmox_vm_cache = result["data"]
+            return _proxmox_vm_cache
+
+        # Try alternate response format
+        if result and isinstance(result, dict) and "result" in result:
+            try:
+                parsed = json.loads(result["result"]) if isinstance(result["result"], str) else result["result"]
+                _proxmox_vm_cache = parsed.get("vms", [])
+                return _proxmox_vm_cache
+            except:
+                pass
+
+        _proxmox_vm_cache = []
+        return []
+
+    def enrich_from_proxmox(entity: dict, proxmox_vms: List[dict]) -> dict:
+        """Enrich entity with Proxmox VM data if it matches."""
+        enrichment = {}
+        hostname = entity.get("hostname", "").lower()
+
+        for vm in proxmox_vms:
+            vm_name = vm.get("name", "").lower()
+            # Match by hostname
+            if hostname and (hostname == vm_name or hostname in vm_name or vm_name in hostname):
+                # Basic VM info
+                enrichment["vm_id"] = vm.get("vmid")
+                enrichment["vm_name"] = vm.get("name")
+                enrichment["vm_status"] = vm.get("status")
+                enrichment["vm_node"] = vm.get("node")
+
+                # Resources
+                enrichment["vm_cpus"] = vm.get("cpus")
+                maxmem = vm.get("maxmem", 0)
+                mem = vm.get("mem", 0)
+                enrichment["vm_memory_gb"] = round(maxmem / (1024**3), 1) if maxmem else 0
+                enrichment["vm_memory_used_gb"] = round(mem / (1024**3), 1) if mem else 0
+                enrichment["vm_memory_pct"] = round((mem / maxmem) * 100, 1) if maxmem else 0
+
+                # Disk
+                maxdisk = vm.get("maxdisk", 0)
+                enrichment["vm_disk_gb"] = round(maxdisk / (1024**3), 1) if maxdisk else 0
+
+                # CPU usage
+                enrichment["vm_cpu_pct"] = round(vm.get("cpu", 0) * 100, 1)
+
+                # Network I/O
+                netin = vm.get("netin", 0)
+                netout = vm.get("netout", 0)
+                enrichment["vm_net_in_gb"] = round(netin / (1024**3), 1) if netin else 0
+                enrichment["vm_net_out_gb"] = round(netout / (1024**3), 1) if netout else 0
+
+                # Uptime
+                uptime = vm.get("uptime", 0)
+                if uptime:
+                    days = uptime // 86400
+                    hours = (uptime % 86400) // 3600
+                    enrichment["vm_uptime"] = f"{days}d {hours}h"
+
+                # Update category based on VM type
+                if "talos" in vm_name:
+                    enrichment["category"] = "kubernetes"
+                    enrichment["type"] = "talos_node"
+                elif "truenas" in vm_name:
+                    enrichment["category"] = "storage"
+                    enrichment["type"] = "truenas_server"
+                elif "pbs" in vm_name:
+                    enrichment["category"] = "backup"
+                    enrichment["type"] = "proxmox_backup"
+                elif "unifi" in vm_name:
+                    enrichment["category"] = "network"
+                    enrichment["type"] = "unifi_controller"
+
+                break
+
+        return enrichment
+
+    # ============================================================
     # Entity Description Generator
     # ============================================================
 
@@ -396,6 +488,17 @@ data:
             parts.append(f"running firmware {entity['firmware_version']}")
         if entity.get("plex_version"):
             parts.append(f"Plex version {entity['plex_version']}")
+
+        # VM context
+        if entity.get("vm_name"):
+            vm_info = f"running as Proxmox VM '{entity['vm_name']}'"
+            if entity.get("vm_cpus"):
+                vm_info += f" with {entity['vm_cpus']} CPUs"
+            if entity.get("vm_memory_gb"):
+                vm_info += f" and {entity['vm_memory_gb']}GB RAM"
+            if entity.get("vm_node"):
+                vm_info += f" on node {entity['vm_node']}"
+            parts.append(vm_info)
 
         # Capabilities
         if entity.get("relay_count"):
@@ -454,7 +557,10 @@ data:
             "friendly_name", "location", "type", "category", "manufacturer",
             "model", "firmware_version", "relay_count", "power_watts",
             "plex_version", "plex_library_count", "wifi_ssid", "wifi_signal",
-            "ha_entity_id", "uptime"
+            "ha_entity_id", "uptime",
+            # Proxmox VM fields
+            "vm_id", "vm_name", "vm_status", "vm_node", "vm_cpus",
+            "vm_memory_gb", "vm_memory_pct", "vm_disk_gb", "vm_cpu_pct", "vm_uptime"
         ]
 
         for field in enrichment_fields:
@@ -512,6 +618,7 @@ data:
             "ha_matches": 0,
             "tasmota_enriched": 0,
             "plex_enriched": 0,
+            "proxmox_enriched": 0,
             "locations_added": 0,
             "errors": 0,
         }
@@ -521,6 +628,11 @@ data:
         ha_entities = get_ha_entities()
         logger.info(f"Loaded {len(ha_entities)} HA entities")
         ha_lookup = build_ha_lookup(ha_entities)
+
+        # Step 1b: Load Proxmox VMs for enrichment
+        logger.info("Loading Proxmox VMs...")
+        proxmox_vms = get_proxmox_vms()
+        logger.info(f"Loaded {len(proxmox_vms)} Proxmox VMs")
 
         # Step 2: Load entities from Qdrant that need enrichment
         logger.info("Loading entities from Qdrant...")
@@ -587,6 +699,17 @@ data:
                 except Exception as e:
                     logger.warning(f"Plex enrichment failed for {entity['ip']}: {e}")
 
+            # Proxmox VM enrichment - match any entity to VM by hostname
+            if proxmox_vms:
+                try:
+                    proxmox_data = enrich_from_proxmox(entity, proxmox_vms)
+                    if proxmox_data:
+                        entity.update(proxmox_data)
+                        stats["proxmox_enriched"] += 1
+                        logger.debug(f"Proxmox enriched: {entity.get('hostname')} -> VM {proxmox_data.get('vm_name')}")
+                except Exception as e:
+                    logger.warning(f"Proxmox enrichment failed for {entity.get('ip')}: {e}")
+
             # Special case: Home Assistant itself
             if entity.get("hostname", "").lower() == "homeassistant":
                 entity["type"] = "home_assistant"
@@ -639,6 +762,7 @@ data:
         Home Assistant matches: {stats['ha_matches']}
         Tasmota devices enriched: {stats['tasmota_enriched']}
         Plex servers enriched: {stats['plex_enriched']}
+        Proxmox VMs enriched: {stats['proxmox_enriched']}
         Locations added: {stats['locations_added']}
         Errors: {stats['errors']}
         ========================================
@@ -699,6 +823,8 @@ spec:
               value: "http://plex-mcp:8000"
             - name: UNIFI_MCP_URL
               value: "http://unifi-mcp:8000"
+            - name: PROXMOX_MCP_URL
+              value: "http://proxmox-mcp:8000"
             volumeMounts:
             - name: script
               mountPath: /scripts
