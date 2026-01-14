@@ -562,6 +562,110 @@ data:
         return enrichment
 
     # ============================================================
+    # UniFi Client Enrichment
+    # ============================================================
+
+    # Cache for UniFi clients (populated once per run)
+    _unifi_client_cache = None
+
+    def get_unifi_clients() -> List[dict]:
+        """Fetch UniFi clients (cached)."""
+        global _unifi_client_cache
+        if _unifi_client_cache is not None:
+            return _unifi_client_cache
+
+        result = http_get(f"{UNIFI_MCP}/api/clients")
+        if not result:
+            _unifi_client_cache = []
+            return []
+
+        # Direct clients array
+        if "clients" in result:
+            _unifi_client_cache = result["clients"]
+            return _unifi_client_cache
+
+        # Wrapped in data key
+        if "data" in result:
+            _unifi_client_cache = result["data"]
+            return _unifi_client_cache
+
+        # List directly
+        if isinstance(result, list):
+            _unifi_client_cache = result
+            return _unifi_client_cache
+
+        _unifi_client_cache = []
+        return []
+
+    def enrich_from_unifi(entity: dict, unifi_clients: List[dict]) -> dict:
+        """Enrich entity with UniFi client data if it matches."""
+        enrichment = {}
+        entity_mac = entity.get("mac", "").lower().replace("-", ":").replace(".", ":")
+        entity_ip = entity.get("ip", "")
+
+        for client in unifi_clients:
+            client_mac = client.get("mac", "").lower()
+            client_ip = client.get("ip", "")
+
+            # Match by MAC (preferred) or IP
+            if (entity_mac and entity_mac == client_mac) or \
+               (entity_ip and entity_ip == client_ip):
+
+                # WiFi signal quality
+                if client.get("rssi"):
+                    enrichment["wifi_rssi"] = client.get("rssi")
+                if client.get("signal"):
+                    enrichment["wifi_signal"] = client.get("signal")
+                if client.get("satisfaction"):
+                    enrichment["wifi_satisfaction"] = client.get("satisfaction")
+
+                # Connection details
+                if client.get("essid"):
+                    enrichment["wifi_ssid"] = client.get("essid")
+                if client.get("channel"):
+                    enrichment["wifi_channel"] = client.get("channel")
+                if client.get("radio"):
+                    enrichment["wifi_radio"] = client.get("radio")  # e.g., "na" for 5GHz
+
+                # Access point info
+                if client.get("ap_mac"):
+                    enrichment["wifi_ap_mac"] = client.get("ap_mac")
+                if client.get("last_uplink_name"):
+                    enrichment["wifi_ap_name"] = client.get("last_uplink_name")
+
+                # Bandwidth usage
+                if client.get("tx_bytes"):
+                    tx_gb = client.get("tx_bytes", 0) / (1024**3)
+                    enrichment["wifi_tx_gb"] = round(tx_gb, 2)
+                if client.get("rx_bytes"):
+                    rx_gb = client.get("rx_bytes", 0) / (1024**3)
+                    enrichment["wifi_rx_gb"] = round(rx_gb, 2)
+
+                # Connection time
+                if client.get("uptime"):
+                    uptime = client.get("uptime", 0)
+                    days = uptime // 86400
+                    hours = (uptime % 86400) // 3600
+                    enrichment["wifi_uptime"] = f"{days}d {hours}h"
+
+                # Device identification from UniFi
+                if client.get("oui"):
+                    enrichment["manufacturer"] = client.get("oui")
+                if client.get("hostname") and not entity.get("hostname"):
+                    enrichment["hostname"] = client.get("hostname")
+                if client.get("name"):
+                    enrichment["unifi_alias"] = client.get("name")
+
+                # Mark as WiFi connected
+                enrichment["connection_type"] = "wifi"
+                if client.get("is_guest"):
+                    enrichment["is_guest"] = True
+
+                break
+
+        return enrichment
+
+    # ============================================================
     # Entity Description Generator
     # ============================================================
 
@@ -642,6 +746,10 @@ data:
             parts.append(f"connected to WiFi '{entity['wifi_ssid']}'")
         if entity.get("wifi_signal"):
             parts.append(f"signal {entity['wifi_signal']}%")
+        if entity.get("wifi_satisfaction"):
+            parts.append(f"({entity['wifi_satisfaction']}% satisfaction)")
+        if entity.get("wifi_ap_name"):
+            parts.append(f"via AP {entity['wifi_ap_name']}")
 
         # Management relationships
         if entity.get("managed_by"):
@@ -679,7 +787,11 @@ data:
             "vm_id", "vm_name", "vm_status", "vm_node", "vm_cpus",
             "vm_memory_gb", "vm_memory_pct", "vm_disk_gb", "vm_cpu_pct", "vm_uptime",
             # Kubernetes fields
-            "k8s_cluster", "k8s_ready", "k8s_version", "k8s_role", "k8s_pod_count", "k8s_node_name"
+            "k8s_cluster", "k8s_ready", "k8s_version", "k8s_role", "k8s_pod_count", "k8s_node_name",
+            # UniFi WiFi fields
+            "wifi_rssi", "wifi_satisfaction", "wifi_channel", "wifi_radio",
+            "wifi_ap_name", "wifi_ap_mac", "wifi_tx_gb", "wifi_rx_gb", "wifi_uptime",
+            "unifi_alias", "connection_type", "is_guest"
         ]
 
         for field in enrichment_fields:
@@ -739,6 +851,7 @@ data:
             "plex_enriched": 0,
             "proxmox_enriched": 0,
             "k8s_enriched": 0,
+            "unifi_enriched": 0,
             "locations_added": 0,
             "errors": 0,
         }
@@ -759,6 +872,11 @@ data:
         k8s_nodes = get_k8s_nodes()
         k8s_pod_counts = get_k8s_pod_counts()
         logger.info(f"Loaded {len(k8s_nodes)} K8s nodes from {len(K8S_CLUSTERS)} clusters")
+
+        # Step 1d: Load UniFi clients for WiFi enrichment
+        logger.info("Loading UniFi clients...")
+        unifi_clients = get_unifi_clients()
+        logger.info(f"Loaded {len(unifi_clients)} UniFi clients")
 
         # Step 2: Load entities from Qdrant that need enrichment
         logger.info("Loading entities from Qdrant...")
@@ -847,6 +965,19 @@ data:
                 except Exception as e:
                     logger.warning(f"K8s enrichment failed for {entity.get('ip')}: {e}")
 
+            # UniFi enrichment - WiFi signal, connection quality, bandwidth
+            if unifi_clients:
+                try:
+                    unifi_data = enrich_from_unifi(entity, unifi_clients)
+                    if unifi_data:
+                        entity.update(unifi_data)
+                        stats["unifi_enriched"] += 1
+                        signal = unifi_data.get('wifi_signal', '?')
+                        ssid = unifi_data.get('wifi_ssid', '?')
+                        logger.debug(f"UniFi enriched: {entity.get('hostname')} -> {ssid} ({signal}% signal)")
+                except Exception as e:
+                    logger.warning(f"UniFi enrichment failed for {entity.get('ip')}: {e}")
+
             # Special case: Home Assistant itself
             if entity.get("hostname", "").lower() == "homeassistant":
                 entity["type"] = "home_assistant"
@@ -901,6 +1032,7 @@ data:
         Plex servers enriched: {stats['plex_enriched']}
         Proxmox VMs enriched: {stats['proxmox_enriched']}
         K8s nodes enriched: {stats['k8s_enriched']}
+        UniFi clients enriched: {stats['unifi_enriched']}
         Locations added: {stats['locations_added']}
         Errors: {stats['errors']}
         ========================================
