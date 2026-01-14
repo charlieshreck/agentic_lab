@@ -26,7 +26,7 @@ data:
     logger = logging.getLogger(__name__)
 
     COROOT_URL = os.environ.get("COROOT_URL", "http://10.30.0.20:32702")  # Monit cluster NodePort
-    COROOT_PROJECT = os.environ.get("COROOT_PROJECT", "default")
+    COROOT_PROJECT = os.environ.get("COROOT_PROJECT", "all-clusters")  # Multi-cluster view
 
     mcp = FastMCP(
         name="coroot-mcp",
@@ -66,17 +66,23 @@ data:
 
     async def _get_overview_internal() -> dict:
         """Get infrastructure overview."""
-        data = await _coroot_request("GET", "overview")
+        # Coroot API: /project/{project}/overview/{view} - use 'health' view for service status
+        data = await _coroot_request("GET", "overview/health")
         if "error" in data:
             return {"error": data["error"]}
         overview = {"total_services": 0, "healthy": 0, "warning": 0, "critical": 0, "services": {}}
-        for name, svc in data.get("services", {}).items():
-            health = svc.get("health", "unknown")
+        # Parse the health overview response
+        apps = data.get("applications", data.get("apps", []))
+        if isinstance(apps, dict):
+            apps = list(apps.values())
+        for app in apps:
+            name = app.get("name", app.get("id", "unknown"))
+            status = app.get("status", app.get("health", "unknown"))
             overview["total_services"] += 1
-            if health == "healthy": overview["healthy"] += 1
-            elif health == "warning": overview["warning"] += 1
-            elif health == "critical": overview["critical"] += 1
-            overview["services"][name] = {"health": health, "anomalies": svc.get("anomaly_count", 0)}
+            if status in ("ok", "healthy"): overview["healthy"] += 1
+            elif status == "warning": overview["warning"] += 1
+            elif status in ("critical", "error"): overview["critical"] += 1
+            overview["services"][name] = {"health": status, "anomalies": app.get("incident_count", 0)}
         return overview
 
     async def _get_anomalies_internal(hours: int = 24, severity: Optional[str] = None) -> List[dict]:
@@ -265,7 +271,7 @@ spec:
             - name: COROOT_URL
               value: "http://10.30.0.20:32702"  # Monit cluster NodePort (cross-cluster access)
             - name: COROOT_PROJECT
-              value: "default"
+              value: "all-clusters"  # Multi-cluster aggregated view
           volumeMounts:
             - name: code
               mountPath: /code
