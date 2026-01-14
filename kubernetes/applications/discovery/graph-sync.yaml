@@ -7,7 +7,7 @@ metadata:
     app: graph-sync
     component: discovery
 spec:
-  schedule: "*/5 * * * *"  # Every 5 minutes
+  schedule: "15 */4 * * *"  # Every 4 hours, 15 min after discovery
   concurrencyPolicy: Forbid  # Prevent overlapping runs
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -47,6 +47,8 @@ spec:
               value: "http://knowledge-mcp:8000"
             - name: COROOT_MCP_URL
               value: "http://coroot-mcp:8000"
+            - name: HOME_ASSISTANT_MCP_URL
+              value: "http://home-assistant-mcp:8000"
             - name: GATUS_URL
               value: "http://10.30.0.20:32080"  # Monit cluster NodePort
             resources:
@@ -85,6 +87,7 @@ spec:
                   "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
                   "knowledge": os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000"),
                   "coroot": os.environ.get("COROOT_MCP_URL", "http://coroot-mcp:8000"),
+                  "home_assistant": os.environ.get("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000"),
               }
 
               # Direct API access (cross-cluster)
@@ -699,14 +702,71 @@ spec:
                   logger.info(f"Synced {count} endpoints from Gatus")
                   return count
 
+              def sync_ha_areas():
+                  """Sync area/location data from Home Assistant to Neo4j.
+
+                  Graceful degradation: If HA-MCP fails, log warning and continue.
+                  Discovery/graph-sync should not fail due to HA being unavailable.
+                  """
+                  logger.info("Syncing Home Assistant areas...")
+
+                  # Get entities from HA via REST API
+                  try:
+                      entities_response = call_rest_api(MCP_SERVERS["home_assistant"], "/api/entities")
+                      if not entities_response:
+                          logger.warning("HA-MCP unavailable or returned empty response, skipping area sync")
+                          return 0
+                  except Exception as e:
+                      logger.warning(f"HA-MCP unavailable, skipping area sync: {e}")
+                      return 0
+
+                  entities = entities_response.get("entities", [])
+                  if not entities:
+                      logger.info("No entities returned from HA, skipping area sync")
+                      return 0
+
+                  synced_count = 0
+                  for entity in entities:
+                      area = entity.get("area", entity.get("area_id", ""))
+                      # Try to extract IP from entity_id or attributes
+                      entity_id = entity.get("entity_id", "")
+                      attributes = entity.get("attributes", {})
+                      ip = attributes.get("ip", attributes.get("ip_address", ""))
+
+                      # Skip if no area or no IP to match
+                      if not area or not ip:
+                          continue
+
+                      try:
+                          # Update Neo4j Host node with location and create Location relationship
+                          cypher = """
+                          MATCH (h:Host {ip: $ip})
+                          SET h.location = $area
+                          WITH h
+                          MERGE (loc:Location {name: $area})
+                          MERGE (h)-[:LOCATED_IN]->(loc)
+                          RETURN h.ip
+                          """
+                          result = neo4j_query(cypher, {"ip": ip, "area": area})
+
+                          if result.get("results") and result["results"][0].get("data"):
+                              synced_count += 1
+                              logger.debug(f"Synced location '{area}' for {ip}")
+                      except Exception as e:
+                          logger.warning(f"Failed to sync area for {ip}: {e}")
+                          continue
+
+                  logger.info(f"HA area sync complete: {synced_count} entities updated")
+                  return synced_count
+
               def run_lifecycle_management():
                   """Update entity lifecycle status."""
                   logger.info("Running lifecycle management...")
 
-                  # Mark entities not seen in 30 minutes as stale
+                  # Mark entities not seen in 8 hours as stale (2x discovery interval)
                   stale_result = neo4j_query("""
                       MATCH (h:Host)
-                      WHERE h.last_seen < datetime() - duration('PT30M')
+                      WHERE h.last_seen < datetime() - duration('PT8H')
                         AND h.status = 'online'
                       SET h.status = 'stale'
                       RETURN count(h) as stale_count
@@ -718,10 +778,10 @@ spec:
                       if data:
                           stale_count = data[0].get("row", [0])[0]
 
-                  # Mark entities stale for 24h as offline
+                  # Mark entities stale for 48h as offline
                   offline_result = neo4j_query("""
                       MATCH (h:Host {status: 'stale'})
-                      WHERE h.last_seen < datetime() - duration('P1D')
+                      WHERE h.last_seen < datetime() - duration('P2D')
                       SET h.status = 'offline'
                       RETURN count(h) as offline_count
                   """)
@@ -732,10 +792,10 @@ spec:
                       if data:
                           offline_count = data[0].get("row", [0])[0]
 
-                  # Archive entities offline for 7 days
+                  # Archive entities offline for 14 days
                   archive_result = neo4j_query("""
                       MATCH (h:Host {status: 'offline'})
-                      WHERE h.last_seen < datetime() - duration('P7D')
+                      WHERE h.last_seen < datetime() - duration('P14D')
                       SET h:ArchivedHost
                       REMOVE h:Host
                       RETURN count(h) as archived_count
@@ -805,6 +865,12 @@ spec:
                   except Exception as e:
                       logger.error(f"Gatus sync failed: {e}")
                       results["gatus_health"] = 0
+
+                  try:
+                      results["ha_areas"] = sync_ha_areas()
+                  except Exception as e:
+                      logger.error(f"HA area sync failed: {e}")
+                      results["ha_areas"] = 0
 
                   # Run lifecycle management
                   try:

@@ -752,28 +752,60 @@ data:
         return entities
 
 
-    async def fingerprint_device(ip: str, existing_data: dict) -> dict:
-        """Deep fingerprint a device via HTTP probing."""
-        updates = {}
+    # Fingerprint cache to avoid re-probing recently seen devices
+    _fingerprint_cache = {}
+    _CACHE_TTL_HOURS = 4  # Match discovery interval
 
+    async def _probe_endpoint(ip: str, probe_name: str, probe: dict, endpoint: str) -> tuple:
+        """Probe a single endpoint and return (probe_name, result) or None."""
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:  # Reduced from 5s to 2s
+                response = await client.get(f"http://{ip}{endpoint}")
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                    except:
+                        data = response.text
+                    if probe["identifier"](data):
+                        return (probe_name, probe["extract"](data))
+        except:
+            pass
+        return None
+
+    async def fingerprint_device(ip: str, existing_data: dict) -> dict:
+        """Deep fingerprint a device via HTTP probing with parallel requests."""
+        # Check cache - skip if recently probed and still online
+        cache_key = ip
+        if cache_key in _fingerprint_cache:
+            cached = _fingerprint_cache[cache_key]
+            cache_age = (datetime.now(timezone.utc) - cached["time"]).total_seconds() / 3600
+            if cache_age < _CACHE_TTL_HOURS:
+                logger.debug(f"Using cached fingerprint for {ip}")
+                return cached["result"]
+
+        # Build list of all probe tasks
+        tasks = []
         for probe_name, probe in FINGERPRINT_PROBES.items():
             for endpoint in probe["endpoints"]:
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        response = await client.get(f"http://{ip}{endpoint}")
-                        if response.status_code == 200:
-                            try:
-                                data = response.json()
-                            except:
-                                data = response.text
+                tasks.append(_probe_endpoint(ip, probe_name, probe, endpoint))
 
-                            if probe["identifier"](data):
-                                extracted = probe["extract"](data)
-                                updates.update(extracted)
-                                logger.debug(f"Fingerprinted {ip} as {probe_name}")
-                                return updates
-                except:
-                    pass
+        # Run all probes in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Return first successful match
+        updates = {}
+        for result in results:
+            if result and isinstance(result, tuple):
+                probe_name, extracted = result
+                updates.update(extracted)
+                logger.debug(f"Fingerprinted {ip} as {probe_name}")
+                break
+
+        # Cache result
+        _fingerprint_cache[cache_key] = {
+            "time": datetime.now(timezone.utc),
+            "result": updates
+        }
 
         return updates
 
@@ -1178,13 +1210,14 @@ metadata:
   labels:
     app: discovery
 spec:
-  schedule: "*/15 * * * *"  # Every 15 minutes
+  schedule: "0 */4 * * *"  # Every 4 hours
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       ttlSecondsAfterFinished: 300
+      activeDeadlineSeconds: 1800  # 30 min max timeout
       template:
         spec:
           restartPolicy: OnFailure
