@@ -506,15 +506,18 @@ spec:
                   """Link runbooks to alerts in Neo4j."""
                   logger.info("Syncing runbook relationships...")
 
-                  # Get runbooks from knowledge MCP
-                  runbooks_response = call_mcp_tool("knowledge", "search_runbooks", {"query": "*", "limit": 100})
-                  runbooks = runbooks_response.get("runbooks", [])
+                  # Get runbooks from knowledge MCP via REST API (MCP protocol requires session)
+                  runbooks_response = call_rest_api(MCP_SERVERS["knowledge"], "/api/search?collection=runbooks&q=*&limit=100")
+                  runbooks = runbooks_response.get("data", [])
 
                   count = 0
-                  for runbook in runbooks:
-                      title = runbook.get("title", "")
-                      qdrant_id = runbook.get("id", "")
-                      resolves_alerts = runbook.get("resolves_alerts", [])
+                  for runbook_entry in runbooks:
+                      # REST API returns {id, payload: {...}} format
+                      qdrant_id = runbook_entry.get("id", "")
+                      payload = runbook_entry.get("payload", runbook_entry)  # Fallback to entry itself
+                      title = payload.get("name", payload.get("title", ""))
+                      triggers = payload.get("triggers", {})
+                      resolves_alerts = triggers.get("alert_patterns", [])
 
                       if not title:
                           continue
@@ -530,11 +533,12 @@ spec:
                       RETURN r.title
                       """
 
+                      metadata = payload.get("metadata", {})
                       result = neo4j_query(cypher, {
                           "qdrant_id": qdrant_id,
                           "title": title,
-                          "path": runbook.get("path", ""),
-                          "automation_level": runbook.get("automation_level", "manual")
+                          "path": payload.get("path", metadata.get("path", "")),
+                          "automation_level": "auto" if metadata.get("auto_approve_eligible") else "manual"
                       })
 
                       if not result.get("errors"):
