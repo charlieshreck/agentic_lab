@@ -12,6 +12,8 @@ interface Entity {
   ip?: string;
   hostname?: string;
   name?: string;
+  title?: string;
+  path?: string;
   status?: string;
   network?: string;
   last_seen?: string;
@@ -112,8 +114,11 @@ export default function EntitiesPage() {
                       <tr key={idx} className="border-t border-gray-700 hover:bg-gray-750">
                         <td className="px-4 py-3">
                           <div className="font-medium">
-                            {entity.hostname || entity.name || entity.ip || 'Unknown'}
+                            {entity.title || entity.hostname || entity.name || entity.ip || 'Unknown'}
                           </div>
+                          {entity.path && (
+                            <div className="text-sm text-gray-400">{entity.path}</div>
+                          )}
                           {entity.ip && entity.hostname && (
                             <div className="text-sm text-gray-400">{entity.ip}</div>
                           )}
@@ -141,7 +146,7 @@ export default function EntitiesPage() {
                         </td>
                         <td className="px-4 py-3">
                           <Link
-                            href={`/entities/${entity.ip || entity.name || idx}`}
+                            href={`/entities/${encodeURIComponent(entity.ip || entity.title || entity.name || String(idx))}`}
                             className="text-blue-400 hover:text-blue-300"
                           >
                             View
