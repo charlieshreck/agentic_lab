@@ -26,7 +26,24 @@ data:
     logger = logging.getLogger(__name__)
 
     COROOT_URL = os.environ.get("COROOT_URL", "http://10.30.0.20:32702")  # Monit cluster NodePort
-    COROOT_PROJECT = os.environ.get("COROOT_PROJECT", "all-clusters")  # Multi-cluster view
+    COROOT_PROJECT_NAME = os.environ.get("COROOT_PROJECT", "all-clusters")  # Multi-cluster view
+    _PROJECT_ID_CACHE = {}
+
+    async def _get_project_id(project_name: str) -> str:
+        """Resolve project name to internal ID. Coroot API uses IDs not names."""
+        if project_name in _PROJECT_ID_CACHE:
+            return _PROJECT_ID_CACHE[project_name]
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{COROOT_URL}/api/user")
+                response.raise_for_status()
+                data = response.json()
+                for proj in data.get("projects", []):
+                    _PROJECT_ID_CACHE[proj["name"]] = proj["id"]
+                return _PROJECT_ID_CACHE.get(project_name, project_name)
+        except Exception as e:
+            logger.error(f"Failed to get project ID: {e}")
+            return project_name  # Fallback to name
 
     mcp = FastMCP(
         name="coroot-mcp",
@@ -54,9 +71,11 @@ data:
     # ============================================================================
 
     async def _coroot_request(method: str, endpoint: str, **kwargs) -> dict:
+        project_id = await _get_project_id(COROOT_PROJECT_NAME)
         async with httpx.AsyncClient(timeout=30.0) as client:
-            url = f"{COROOT_URL}/api/project/{COROOT_PROJECT}/{endpoint}"
+            url = f"{COROOT_URL}/api/project/{project_id}/{endpoint}"
             try:
+                logger.info(f"Coroot request: {method} {url}")
                 response = await client.request(method, url, **kwargs)
                 response.raise_for_status()
                 return response.json()
@@ -71,18 +90,20 @@ data:
         if "error" in data:
             return {"error": data["error"]}
         overview = {"total_services": 0, "healthy": 0, "warning": 0, "critical": 0, "services": {}}
-        # Parse the health overview response
-        apps = data.get("applications", data.get("apps", []))
-        if isinstance(apps, dict):
-            apps = list(apps.values())
+        # Parse the health overview response - structure is context.search.applications
+        context = data.get("context", {})
+        apps = context.get("search", {}).get("applications", [])
         for app in apps:
-            name = app.get("name", app.get("id", "unknown"))
-            status = app.get("status", app.get("health", "unknown"))
+            app_id = app.get("id", "unknown")
+            # Extract short name from ID format: "project:namespace:kind:name"
+            parts = app_id.split(":")
+            name = parts[-1] if parts else app_id
+            status = app.get("status", "unknown")
             overview["total_services"] += 1
-            if status in ("ok", "healthy"): overview["healthy"] += 1
+            if status == "ok": overview["healthy"] += 1
             elif status == "warning": overview["warning"] += 1
             elif status in ("critical", "error"): overview["critical"] += 1
-            overview["services"][name] = {"health": status, "anomalies": app.get("incident_count", 0)}
+            overview["services"][name] = {"health": status, "id": app_id}
         return overview
 
     async def _get_anomalies_internal(hours: int = 24, severity: Optional[str] = None) -> List[dict]:
