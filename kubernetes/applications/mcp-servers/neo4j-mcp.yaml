@@ -326,23 +326,27 @@ data:
             primary_results = result.get("results", [])
             primary_data = primary_results[0].get("data", []) if primary_results else []
             if result.get("errors") or not primary_data:
+                # Filter out Network/Host nodes to keep visualization clean
                 cypher = f"""
                 MATCH (e:{entity_type})
                 WHERE e.ip = $id OR e.hostname = $id OR e.name = $id OR e.title = $id
                 WITH e LIMIT 1
                 OPTIONAL MATCH path = (e)-[*1..{depth}]-(connected)
+                WHERE NOT labels(connected)[0] IN ['Network', 'Host']
                 WITH e, path, connected
                 UNWIND CASE WHEN path IS NOT NULL THEN relationships(path) ELSE [null] END as r
                 WITH e,
                      collect(DISTINCT connected) as allNodes,
                      collect(DISTINCT r) as allRels
                 RETURN e as center,
-                       [n IN allNodes WHERE n IS NOT NULL | {{
+                       [n IN allNodes WHERE n IS NOT NULL AND NOT labels(n)[0] IN ['Network', 'Host'] | {{
                            id: coalesce(n.ip, n.name, n.title, toString(n.vmid)),
                            name: coalesce(n.hostname, n.name, n.title),
                            type: labels(n)[0]
                        }}] as nodes,
-                       [rel IN allRels WHERE rel IS NOT NULL | {{
+                       [rel IN allRels WHERE rel IS NOT NULL
+                        AND NOT labels(startNode(rel))[0] IN ['Network', 'Host']
+                        AND NOT labels(endNode(rel))[0] IN ['Network', 'Host'] | {{
                            source: coalesce(startNode(rel).ip, startNode(rel).name, startNode(rel).title),
                            target: coalesce(endNode(rel).ip, endNode(rel).name, endNode(rel).title),
                            type: type(rel)
