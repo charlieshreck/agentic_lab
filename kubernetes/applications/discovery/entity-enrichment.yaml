@@ -376,12 +376,22 @@ data:
             return _proxmox_vm_cache
 
         result = http_get(f"{PROXMOX_MCP}/api/vms")
-        if result and "data" in result:
+        if not result:
+            _proxmox_vm_cache = []
+            return []
+
+        # Direct vms array (actual API format)
+        if "vms" in result:
+            _proxmox_vm_cache = result["vms"]
+            return _proxmox_vm_cache
+
+        # Wrapped in data key
+        if "data" in result:
             _proxmox_vm_cache = result["data"]
             return _proxmox_vm_cache
 
-        # Try alternate response format
-        if result and isinstance(result, dict) and "result" in result:
+        # Wrapped in result key (stringified JSON)
+        if "result" in result:
             try:
                 parsed = json.loads(result["result"]) if isinstance(result["result"], str) else result["result"]
                 _proxmox_vm_cache = parsed.get("vms", [])
