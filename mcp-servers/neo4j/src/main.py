@@ -618,9 +618,95 @@ async def get_stale_entities(hours: int = 24) -> List[Dict[str, Any]]:
 
 
 # ============================================================================
+# REST API Endpoints
+# ============================================================================
+
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route, Mount
+
+
+async def api_health(request):
+    """Health check endpoint with Neo4j connectivity test."""
+    try:
+        result = await neo4j_query("RETURN 1 as test")
+        if result.get("errors"):
+            return JSONResponse({"status": "unhealthy", "neo4j": "error", "error": str(result["errors"])})
+        return JSONResponse({"status": "healthy", "neo4j": "connected"})
+    except Exception as e:
+        return JSONResponse({"status": "unhealthy", "neo4j": "disconnected", "error": str(e)})
+
+
+async def api_overview(request):
+    """REST endpoint for infrastructure overview."""
+    try:
+        data = await get_infrastructure_overview()
+        return JSONResponse({"status": "ok", "data": data})
+    except Exception as e:
+        logger.error(f"REST api_overview error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_query(request):
+    """REST endpoint for Cypher queries."""
+    try:
+        q = request.query_params.get("q", "")
+        if not q:
+            return JSONResponse({"status": "error", "error": "Missing 'q' parameter"}, status_code=400)
+        data = await query_graph(q)
+        return JSONResponse({"status": "ok", "data": data.model_dump()})
+    except Exception as e:
+        logger.error(f"REST api_query error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+async def api_entity(request):
+    """REST endpoint for entity context."""
+    try:
+        entity_id = request.query_params.get("id", "")
+        entity_type = request.query_params.get("type", "Host")
+        if not entity_id:
+            return JSONResponse({"status": "error", "error": "Missing 'id' parameter"}, status_code=400)
+        data = await get_entity_context(entity_id, entity_type)
+        return JSONResponse({"status": "ok", "data": data.model_dump()})
+    except Exception as e:
+        logger.error(f"REST api_entity error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
-if __name__ == "__main__":
+def main():
     import uvicorn
-    uvicorn.run(mcp.get_app(), host="0.0.0.0", port=8000)
+    from starlette.middleware.cors import CORSMiddleware
+
+    port = int(os.environ.get("PORT", "8000"))
+    logger.info(f"Starting neo4j MCP server on port {port}")
+
+    # REST routes
+    rest_routes = [
+        Route("/health", api_health),
+        Route("/api/overview", api_overview),
+        Route("/api/query", api_query),
+        Route("/api/entity", api_entity),
+    ]
+
+    # Combine REST routes with MCP app using http_app() for proper HTTP transport
+    mcp_app = mcp.http_app()
+    app = Starlette(routes=rest_routes + [Mount("/mcp", app=mcp_app)])
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    main()
