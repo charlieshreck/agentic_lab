@@ -62,6 +62,7 @@ This repository contains the infrastructure and application code for a **self-im
 | `web-search-mcp` | Web search via SearXNG | web_search, get_page_content, search_news |
 | `browser-automation-mcp` | Headless browser (Playwright) | navigate, screenshot, click, type_text |
 | `infisical-mcp` | Secrets management | list_secrets, get_secret (read-only) |
+| `monitoring-mcp` | Monitoring stack (monit cluster) | query_metrics, list_alerts, query_logs, list_dashboards, get_endpoint_status |
 
 **Usage**: MCP servers are configured in `.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
 
@@ -88,6 +89,7 @@ This repository contains the infrastructure and application code for a **self-im
 | vikunja-mcp | 31097 | `curl http://10.20.0.40:31097/health` |
 | neo4j-mcp | 31098 | `curl http://10.20.0.40:31098/health` |
 | tasmota-mcp | 31100 | `curl http://10.20.0.40:31100/health` |
+| monitoring-mcp | 31101 | `curl http://10.20.0.40:31101/health` |
 
 **IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
 
