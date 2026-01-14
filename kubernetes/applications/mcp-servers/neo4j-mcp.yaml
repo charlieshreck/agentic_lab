@@ -322,8 +322,9 @@ data:
             """
             result = await neo4j_query(cypher, {"id": entity_id})
 
-            # Fallback if APOC not available - use UNWIND for multi-depth traversal
-            if result.get("errors"):
+            # Fallback if APOC not available OR primary query returns empty (CALL subquery may not work via HTTP)
+            primary_data = result.get("results", [{}])[0].get("data", [])
+            if result.get("errors") or not primary_data:
                 cypher = f"""
                 MATCH (e:{entity_type})
                 WHERE e.ip = $id OR e.hostname = $id OR e.name = $id OR e.title = $id
