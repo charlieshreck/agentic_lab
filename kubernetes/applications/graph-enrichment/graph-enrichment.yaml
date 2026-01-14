@@ -148,66 +148,69 @@ data:
         """Link Pools to TrueNAS instances and their disks."""
         logger.info("Enriching TrueNAS pools...")
 
-        for instance in ["hdd", "media"]:
-            pools_resp = mcp_call(TRUENAS_MCP, "truenas_list_pools", {"instance": instance})
-            if not pools_resp:
-                continue
-
-            result = json.loads(pools_resp.get("result", "{}")) if isinstance(pools_resp.get("result"), str) else pools_resp
-            instance_name = f"TrueNAS-{instance.upper()}"
-
-            for pool in result.get("pools", []):
-                pool_name = pool.get("name")
-                pool_status = pool.get("status", "UNKNOWN")
-                pool_size = pool.get("size", 0)
-                pool_free = pool.get("free", 0)
-
-                # Create/update pool node and link to NAS
-                neo4j_write(f"""
-                    MERGE (p:StoragePool {{name: '{pool_name}'}})
-                    SET p.status = '{pool_status}',
-                        p.size_bytes = {pool_size},
-                        p.free_bytes = {pool_free},
-                        p.last_seen = datetime()
-                    WITH p
-                    MATCH (n:NAS {{name: '{instance_name}'}})
-                    MERGE (p)-[:HOSTED_ON]->(n)
-                """)
-
-                # Link pool to its disks
-                topology = pool.get("topology", {})
-                for vdev in topology.get("data", []):
-                    for child in vdev.get("children", []):
-                        disk = child.get("disk", child.get("device", "unknown"))
-                        disk_status = child.get("status", "UNKNOWN")
-
-                        neo4j_write(f"""
-                            MERGE (d:Disk {{name: '{disk}'}})
-                            SET d.status = '{disk_status}', d.last_seen = datetime()
-                            WITH d
-                            MATCH (p:StoragePool {{name: '{pool_name}'}})
-                            MERGE (p)-[:COMPOSED_OF]->(d)
-                        """)
-
-                logger.info(f"  Linked pool {pool_name} to {instance_name}")
-
-    def enrich_proxmox_vms():
-        """Link VMs to Proxmox nodes."""
-        logger.info("Enriching Proxmox VMs...")
-
-        vms_resp = mcp_call(PROXMOX_MCP, "proxmox_list_vms", {})
-        if not vms_resp:
+        # Use REST endpoint - returns all pools from all instances
+        pools_resp = rest_get(TRUENAS_MCP, "/api/pools")
+        if not pools_resp:
+            logger.warning("Could not get pools from TrueNAS MCP")
             return
 
-        result = json.loads(vms_resp.get("result", "{}")) if isinstance(vms_resp.get("result"), str) else vms_resp
+        for pool in pools_resp.get("pools", []):
+            instance = pool.get("instance", "hdd")
+            instance_name = f"TrueNAS-{instance.upper()}"
+            pool_name = pool.get("name")
+            pool_status = pool.get("status", "UNKNOWN")
+            pool_size = pool.get("size", 0) or 0
+            pool_free = pool.get("free", 0) or 0
 
-        for vm in result.get("vms", []):
+            # Ensure NAS node exists
+            neo4j_write(f"""
+                MERGE (n:NAS {{name: '{instance_name}', instance: '{instance}'}})
+                SET n.last_seen = datetime()
+            """)
+
+            # Create/update pool node and link to NAS
+            neo4j_write(f"""
+                MERGE (p:StoragePool {{name: '{pool_name}'}})
+                SET p.status = '{pool_status}',
+                    p.size_bytes = {pool_size},
+                    p.free_bytes = {pool_free},
+                    p.instance = '{instance}',
+                    p.last_seen = datetime()
+                WITH p
+                MATCH (n:NAS {{name: '{instance_name}'}})
+                MERGE (p)-[:HOSTED_ON]->(n)
+            """)
+
+            logger.info(f"  Linked pool {pool_name} to {instance_name}")
+
+    def enrich_proxmox_vms():
+        """Link VMs to Proxmox nodes and create service links."""
+        logger.info("Enriching Proxmox VMs...")
+
+        # Use REST endpoint
+        vms_resp = rest_get(PROXMOX_MCP, "/api/vms")
+        if not vms_resp:
+            logger.warning("Could not get VMs from Proxmox MCP")
+            return
+
+        # VM name to service mapping
+        vm_service_map = {
+            "plex": ["plex"],
+            "truenas-hdd": ["TrueNAS-HDD"],
+            "truenas-media": ["TrueNAS-MEDIA"],
+        }
+
+        for vm in vms_resp.get("vms", []):
             vm_name = vm.get("name", "")
             vm_id = vm.get("vmid")
             node = vm.get("node", "")
             status = vm.get("status", "unknown")
-            cpus = vm.get("cpus", 0)
-            mem_bytes = vm.get("maxmem", 0)
+            cpus = vm.get("cpus", 0) or 0
+            mem_bytes = vm.get("maxmem", 0) or 0
+            vm_ip = vm.get("ip", "")
+
+            if not vm_id:
+                continue
 
             # Create/update VM node
             neo4j_write(f"""
@@ -216,10 +219,11 @@ data:
                     v.status = '{status}',
                     v.cpus = {cpus},
                     v.memory_bytes = {mem_bytes},
+                    v.ip = '{vm_ip}',
                     v.last_seen = datetime()
             """)
 
-            # Create Proxmox node and link
+            # Create Proxmox node and link VM
             neo4j_write(f"""
                 MERGE (n:ProxmoxNode {{name: '{node}'}})
                 SET n.last_seen = datetime()
@@ -228,17 +232,31 @@ data:
                 MERGE (v)-[:RUNS_ON]->(n)
             """)
 
+            # Link VM to services it hosts
+            vm_name_lower = vm_name.lower()
+            for vm_key, services in vm_service_map.items():
+                if vm_key in vm_name_lower:
+                    for svc in services:
+                        neo4j_write(f"""
+                            MATCH (v:VM {{vmid: {vm_id}}})
+                            MERGE (s:Service {{name: '{svc}'}})
+                            SET s.last_seen = datetime()
+                            MERGE (s)-[:RUNS_ON_VM]->(v)
+                        """)
+                        # If it's a NAS, also link NAS node to VM
+                        if "truenas" in vm_key:
+                            neo4j_write(f"""
+                                MATCH (v:VM {{vmid: {vm_id}}})
+                                MATCH (n:NAS {{name: '{svc}'}})
+                                MERGE (n)-[:RUNS_ON_VM]->(v)
+                            """)
+                        logger.info(f"    Linked service {svc} to VM {vm_name}")
+
             logger.info(f"  Linked VM {vm_name} (ID:{vm_id}) to node {node}")
 
     def enrich_home_assistant_locations():
         """Link devices to rooms based on Home Assistant entity names."""
         logger.info("Enriching Home Assistant device locations...")
-
-        entities_resp = mcp_call(HOME_ASSISTANT_MCP, "list_entities", {"domain": "light"})
-        if not entities_resp:
-            return
-
-        result = entities_resp.get("result", [])
 
         # Room extraction patterns
         room_patterns = {
@@ -260,52 +278,24 @@ data:
             r"vienna": "viennas_room",
         }
 
-        for entity in result:
-            entity_id = entity.get("entity_id", "")
-            name = entity.get("name", "")
-
-            if not name:
+        # Process lights and switches via REST API
+        for domain in ["light", "switch"]:
+            entities_resp = rest_get(HOME_ASSISTANT_MCP, f"/api/entities", {"domain": domain})
+            if not entities_resp:
+                logger.warning(f"Could not get {domain} entities from Home Assistant MCP")
                 continue
 
-            # Extract room from name
-            name_lower = name.lower()
-            room = None
-            for pattern, room_name in room_patterns.items():
-                if re.search(pattern, name_lower):
-                    room = room_name
-                    break
+            entities = entities_resp.get("data", [])
+            logger.info(f"  Processing {len(entities)} {domain} entities")
 
-            if room:
-                # Create device node (Tasmota light)
-                safe_name = name.replace("'", "\\'")
-                neo4j_write(f"""
-                    MERGE (d:SmartDevice {{entity_id: '{entity_id}'}})
-                    SET d.name = '{safe_name}',
-                        d.type = 'light',
-                        d.last_seen = datetime()
-                """)
-
-                # Create room and link
-                neo4j_write(f"""
-                    MERGE (r:Location {{name: '{room}'}})
-                    SET r.type = 'room', r.last_seen = datetime()
-                    WITH r
-                    MATCH (d:SmartDevice {{entity_id: '{entity_id}'}})
-                    MERGE (d)-[:LOCATED_IN]->(r)
-                """)
-
-                logger.info(f"  Linked {name} to room {room}")
-
-        # Also process switches
-        switches_resp = mcp_call(HOME_ASSISTANT_MCP, "list_entities", {"domain": "switch"})
-        if switches_resp:
-            for entity in switches_resp.get("result", []):
+            for entity in entities:
                 entity_id = entity.get("entity_id", "")
                 name = entity.get("name", "")
 
                 if not name:
                     continue
 
+                # Extract room from name
                 name_lower = name.lower()
                 room = None
                 for pattern, room_name in room_patterns.items():
@@ -314,14 +304,25 @@ data:
                         break
 
                 if room:
-                    safe_name = name.replace("'", "\\'")
+                    # Create device node
+                    safe_name = name.replace("'", "\\'").replace('"', '\\"')
                     neo4j_write(f"""
                         MERGE (d:SmartDevice {{entity_id: '{entity_id}'}})
-                        SET d.name = '{safe_name}', d.type = 'switch', d.last_seen = datetime()
-                        WITH d
+                        SET d.name = '{safe_name}',
+                            d.type = '{domain}',
+                            d.last_seen = datetime()
+                    """)
+
+                    # Create room and link
+                    neo4j_write(f"""
                         MERGE (r:Location {{name: '{room}'}})
+                        SET r.type = 'room', r.last_seen = datetime()
+                        WITH r
+                        MATCH (d:SmartDevice {{entity_id: '{entity_id}'}})
                         MERGE (d)-[:LOCATED_IN]->(r)
                     """)
+
+                    logger.info(f"    Linked {name} to room {room}")
 
     def enrich_service_storage():
         """Link services to storage they use (Plex -> Shares, etc.)."""
@@ -389,6 +390,142 @@ data:
             MERGE (h)-[:CONNECTED_TO]->(n)
         """)
 
+    def enrich_plex_full_chain():
+        """Create the full Plex relationship chain as a reference example.
+
+        This demonstrates all relationships that should exist:
+        - Plex (Service) → USES_STORAGE → Shares
+        - Shares → EXPORTED_BY → NAS
+        - Shares → ON_POOL → StoragePool
+        - NAS → RUNS_ON_VM → VM
+        - VM → RUNS_ON → ProxmoxNode
+        - VM → CONNECTED_TO → Network
+        """
+        logger.info("Creating full Plex relationship chain...")
+
+        # 1. Create Plex service node with rich metadata
+        neo4j_write("""
+            MERGE (svc:Service {name: 'plex'})
+            SET svc.type = 'media_server',
+                svc.description = 'Plex Media Server',
+                svc.url = 'https://plex.kernow.io',
+                svc.port = 32400,
+                svc.last_seen = datetime()
+        """)
+
+        # 2. Plex shares with specific TrueNAS instances
+        plex_storage = [
+            {"share": "Pleximetry", "nas": "TrueNAS-HDD", "pool": "Taupo", "type": "nfs"},
+            {"share": "Plexopathy", "nas": "TrueNAS-MEDIA", "pool": "Truro", "type": "nfs"},
+        ]
+
+        for storage in plex_storage:
+            share_name = storage["share"]
+            nas_name = storage["nas"]
+            pool_name = storage["pool"]
+            share_type = storage["type"]
+
+            # Create share with metadata
+            neo4j_write(f"""
+                MERGE (s:Share {{name: '{share_name}'}})
+                SET s.type = '{share_type}',
+                    s.last_seen = datetime()
+            """)
+
+            # Link Plex to share
+            neo4j_write(f"""
+                MATCH (svc:Service {{name: 'plex'}})
+                MATCH (s:Share {{name: '{share_name}'}})
+                MERGE (svc)-[:USES_STORAGE]->(s)
+            """)
+
+            # Link share to NAS
+            neo4j_write(f"""
+                MERGE (n:NAS {{name: '{nas_name}'}})
+                SET n.last_seen = datetime()
+                WITH n
+                MATCH (s:Share {{name: '{share_name}'}})
+                MERGE (s)-[:EXPORTED_BY]->(n)
+            """)
+
+            # Link share to pool
+            neo4j_write(f"""
+                MERGE (p:StoragePool {{name: '{pool_name}'}})
+                SET p.last_seen = datetime()
+                WITH p
+                MATCH (s:Share {{name: '{share_name}'}})
+                MERGE (s)-[:ON_POOL]->(p)
+            """)
+
+            # Link pool to NAS
+            neo4j_write(f"""
+                MATCH (p:StoragePool {{name: '{pool_name}'}})
+                MATCH (n:NAS {{name: '{nas_name}'}})
+                MERGE (p)-[:HOSTED_ON]->(n)
+            """)
+
+            logger.info(f"  {share_name} → {nas_name} → {pool_name}")
+
+        # 3. Link TrueNAS instances to their VMs
+        nas_vms = [
+            {"nas": "TrueNAS-HDD", "vmid": 500, "vm_name": "truenas-hdd", "node": "Ruapehu"},
+            {"nas": "TrueNAS-MEDIA", "vmid": 600, "vm_name": "truenas-media", "node": "Ruapehu"},
+        ]
+
+        for item in nas_vms:
+            neo4j_write(f"""
+                MERGE (v:VM {{vmid: {item['vmid']}}})
+                SET v.name = '{item['vm_name']}', v.last_seen = datetime()
+                WITH v
+                MATCH (n:NAS {{name: '{item['nas']}'}})
+                MERGE (n)-[:RUNS_ON_VM]->(v)
+            """)
+
+            neo4j_write(f"""
+                MERGE (pn:ProxmoxNode {{name: '{item['node']}'}})
+                SET pn.last_seen = datetime()
+                WITH pn
+                MATCH (v:VM {{vmid: {item['vmid']}}})
+                MERGE (v)-[:RUNS_ON]->(pn)
+            """)
+
+        # 4. Plex VM (ID 450)
+        neo4j_write("""
+            MERGE (v:VM {vmid: 450})
+            SET v.name = 'plex',
+                v.ip = '10.10.0.50',
+                v.last_seen = datetime()
+            WITH v
+            MATCH (svc:Service {name: 'plex'})
+            MERGE (svc)-[:RUNS_ON_VM]->(v)
+        """)
+
+        neo4j_write("""
+            MERGE (pn:ProxmoxNode {name: 'Ruapehu'})
+            SET pn.last_seen = datetime()
+            WITH pn
+            MATCH (v:VM {vmid: 450})
+            MERGE (v)-[:RUNS_ON]->(pn)
+        """)
+
+        # 5. Connect VMs to prod network
+        neo4j_write("""
+            MERGE (net:Network {name: 'prod', cidr: '10.10.0.0/24'})
+            SET net.last_seen = datetime()
+            WITH net
+            MATCH (v:VM) WHERE v.vmid IN [450, 500, 600]
+            MERGE (v)-[:CONNECTED_TO]->(net)
+        """)
+
+        # 6. Link NFS shares to prod network (they're accessible from prod)
+        neo4j_write("""
+            MATCH (net:Network {name: 'prod'})
+            MATCH (s:Share) WHERE s.name IN ['Pleximetry', 'Plexopathy']
+            MERGE (s)-[:ACCESSIBLE_FROM]->(net)
+        """)
+
+        logger.info("  Full Plex chain complete: Service → Shares → NAS → VMs → ProxmoxNode")
+
     def enrich_alert_runbook_links():
         """Link alerts to their resolving runbooks."""
         logger.info("Enriching alert-runbook links...")
@@ -439,6 +576,7 @@ data:
         enrich_home_assistant_locations()
         enrich_service_storage()
         enrich_network_topology()
+        enrich_plex_full_chain()  # Full Plex example with all relationships
         enrich_alert_runbook_links()
 
         # Log summary
