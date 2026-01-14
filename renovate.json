@@ -9,9 +9,25 @@
   "automergeType": "pr",
   "automergeStrategy": "squash",
   "platformAutomerge": true,
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "prCreation": "not-pending",
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"]
+  },
+  "kubernetes": {
+    "fileMatch": ["kubernetes/.+\\.ya?ml$"]
+  },
+  "pep621": {
+    "fileMatch": ["mcp-servers/.+/pyproject\\.toml$", "pyproject\\.toml$"]
+  },
+  "npm": {
+    "fileMatch": ["fumadocs/package\\.json$", "package\\.json$"]
+  },
   "packageRules": [
     {
-      "description": "Auto-merge patch and minor updates",
+      "description": "Auto-merge patch and minor updates after stability period",
       "matchUpdateTypes": ["patch", "minor"],
       "automerge": true
     },
@@ -24,31 +40,43 @@
     {
       "description": "Group Kubernetes platform updates",
       "matchManagers": ["kubernetes"],
-      "matchPaths": ["kubernetes/platform/**"],
+      "matchFileNames": ["kubernetes/platform/**"],
       "groupName": "kubernetes-platform"
     },
     {
       "description": "Group AI platform application updates",
       "matchManagers": ["kubernetes"],
-      "matchPaths": ["kubernetes/applications/**"],
+      "matchFileNames": ["kubernetes/applications/**"],
       "groupName": "kubernetes-apps"
     },
     {
-      "description": "Group MCP server Docker images",
+      "description": "Group MCP server container images",
       "matchManagers": ["kubernetes"],
-      "matchPaths": ["kubernetes/applications/mcp-servers/**"],
-      "groupName": "mcp-servers"
+      "matchFileNames": ["kubernetes/applications/mcp-servers/**"],
+      "groupName": "mcp-server-images"
+    },
+    {
+      "description": "Group MCP server Python dependencies",
+      "matchManagers": ["pep621"],
+      "matchFileNames": ["mcp-servers/**"],
+      "groupName": "mcp-python-deps"
     },
     {
       "description": "Group MCP server Dockerfile updates",
       "matchManagers": ["dockerfile"],
-      "matchPaths": ["mcp-servers/**"],
+      "matchFileNames": ["mcp-servers/**"],
       "groupName": "mcp-dockerfiles"
     },
     {
       "description": "Group Terraform updates",
       "matchManagers": ["terraform"],
       "groupName": "terraform"
+    },
+    {
+      "description": "Group fumadocs/Next.js dependencies",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["fumadocs/**"],
+      "groupName": "fumadocs-deps"
     }
   ],
   "schedule": [
