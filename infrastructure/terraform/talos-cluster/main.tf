@@ -72,6 +72,8 @@ data "talos_machine_configuration" "this" {
           # Optimize for AI workloads
           "vm.max_map_count" = "262144"  # For Qdrant
           "fs.inotify.max_user_watches" = "524288"
+          # Required for Coroot node agent eBPF tracing
+          "net.netfilter.nf_conntrack_events" = "1"
         }
       }
       cluster = {
