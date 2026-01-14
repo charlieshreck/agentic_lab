@@ -132,6 +132,17 @@ data:
             logger.warning(f"HTTP POST {url} failed: {e}")
             return None
 
+    def http_put(url: str, data: dict) -> Optional[dict]:
+        """HTTP PUT with JSON body and response (required for Qdrant upsert)."""
+        hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
+        req = Request(url, data=json.dumps(data).encode(), headers=hdrs, method="PUT")
+        try:
+            with urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            logger.warning(f"HTTP PUT {url} failed: {e}")
+            return None
+
     def neo4j_query(cypher: str, params: dict = None) -> dict:
         """Execute Cypher query."""
         url = f"{NEO4J_URL}/db/neo4j/tx/commit"
@@ -166,9 +177,9 @@ data:
         return []
 
     def qdrant_upsert(collection: str, points: List[dict]) -> bool:
-        """Upsert points to Qdrant."""
+        """Upsert points to Qdrant using PUT (required by Qdrant API)."""
         url = f"{QDRANT_URL}/collections/{collection}/points"
-        result = http_post(url, {"points": points}, headers={"Content-Type": "application/json"})
+        result = http_put(url, {"points": points})
         return result is not None
 
     def get_embedding(text: str) -> Optional[List[float]]:
@@ -189,9 +200,11 @@ data:
         """Fetch all Home Assistant entities."""
         # Use the REST API endpoint
         result = http_get(f"{HOME_ASSISTANT_MCP}/api/entities")
+        if result and "data" in result:
+            return result["data"]
+        # Fallback: check for 'result' key (older format)
         if result and "result" in result:
             return result["result"]
-        # Fallback: try MCP tool call
         return []
 
     def extract_room(name: str) -> Optional[str]:
@@ -330,22 +343,21 @@ data:
         """Get Plex server details."""
         enrichment = {}
 
-        # Get server identity
-        identity = http_get(f"{PLEX_MCP}/api/status")
-        if identity:
-            enrichment["plex_version"] = identity.get("version", "")
-            enrichment["plex_platform"] = identity.get("platform", "")
-            enrichment["plex_claimed"] = identity.get("claimed", False)
+        # Get server status from plex-mcp API
+        status = http_get(f"{PLEX_MCP}/api/status")
+        if status and "data" in status:
+            data = status["data"]
+            enrichment["plex_version"] = data.get("version", "")
+            enrichment["plex_platform"] = data.get("platform", "")
+            enrichment["plex_claimed"] = data.get("claimed", False)
+            enrichment["plex_machine_id"] = data.get("machine_id", "")[:20] + "..." if data.get("machine_id") else ""
 
-        # Get libraries
-        libraries = http_get(f"{PLEX_MCP}/api/libraries")
-        if libraries and "result" in libraries:
-            libs = libraries["result"]
-            enrichment["plex_libraries"] = [
-                {"title": lib.get("title"), "type": lib.get("type")}
-                for lib in libs
-            ]
-            enrichment["plex_library_count"] = len(libs)
+        # Get active sessions
+        sessions = http_get(f"{PLEX_MCP}/api/sessions")
+        if sessions and "data" in sessions:
+            data = sessions["data"]
+            enrichment["plex_active_streams"] = data.get("stream_count", 0)
+            enrichment["plex_transcodes"] = data.get("transcode_count", 0)
 
         return enrichment
 
