@@ -6,7 +6,7 @@
 variable "node_ip" {
   description = "Static IP address for Talos node"
   type        = string
-  default     = "10.20.0.109"
+  default     = "10.20.0.40"
 }
 
 variable "network_gateway" {
