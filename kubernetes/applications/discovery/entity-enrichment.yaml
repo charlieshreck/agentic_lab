@@ -56,6 +56,10 @@ data:
     PLEX_MCP = os.environ.get("PLEX_MCP_URL", "http://plex-mcp:8000")
     UNIFI_MCP = os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000")
     PROXMOX_MCP = os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000")
+    INFRASTRUCTURE_MCP = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
+
+    # Kubernetes clusters to query
+    K8S_CLUSTERS = ["prod", "agentic"]
 
     # Room extraction patterns - parse location from Home Assistant entity names
     ROOM_PATTERNS = [
@@ -464,6 +468,92 @@ data:
         return enrichment
 
     # ============================================================
+    # Kubernetes Enrichment
+    # ============================================================
+
+    # Cache for K8s node data (populated once per run)
+    _k8s_node_cache = None
+    _k8s_pod_counts = None
+
+    def get_k8s_nodes() -> List[dict]:
+        """Fetch K8s nodes from all clusters (cached)."""
+        global _k8s_node_cache
+        if _k8s_node_cache is not None:
+            return _k8s_node_cache
+
+        _k8s_node_cache = []
+        for cluster in K8S_CLUSTERS:
+            result = http_get(f"{INFRASTRUCTURE_MCP}/api/nodes?cluster={cluster}")
+            if result and "nodes" in result:
+                for node in result["nodes"]:
+                    node["cluster"] = cluster
+                    _k8s_node_cache.append(node)
+
+        return _k8s_node_cache
+
+    def get_k8s_pod_counts() -> dict:
+        """Get pod counts per node across all clusters (cached)."""
+        global _k8s_pod_counts
+        if _k8s_pod_counts is not None:
+            return _k8s_pod_counts
+
+        _k8s_pod_counts = {}
+        for cluster in K8S_CLUSTERS:
+            result = http_get(f"{INFRASTRUCTURE_MCP}/api/pods?cluster={cluster}")
+            if result and "pods" in result:
+                for pod in result["pods"]:
+                    node_name = pod.get("node", "")
+                    if node_name:
+                        key = f"{cluster}:{node_name}"
+                        _k8s_pod_counts[key] = _k8s_pod_counts.get(key, 0) + 1
+
+        return _k8s_pod_counts
+
+    def enrich_from_k8s(entity: dict, k8s_nodes: List[dict], pod_counts: dict) -> dict:
+        """Enrich entity with Kubernetes node data if it matches."""
+        enrichment = {}
+        hostname = entity.get("hostname", "").lower()
+        ip = entity.get("ip", "")
+
+        for node in k8s_nodes:
+            node_name = node.get("name", "").lower()
+            node_ip = node.get("internal_ip", "")
+
+            # Match by hostname or IP
+            if (hostname and hostname == node_name) or (ip and ip == node_ip):
+                cluster = node.get("cluster", "unknown")
+
+                # Basic K8s info
+                enrichment["k8s_cluster"] = cluster
+                enrichment["k8s_ready"] = node.get("ready", False)
+                enrichment["k8s_version"] = node.get("version", "")
+
+                # Node role
+                roles = node.get("roles", [])
+                if roles:
+                    enrichment["k8s_role"] = ",".join(roles)
+                else:
+                    enrichment["k8s_role"] = "worker"
+
+                # Pod count for this node
+                key = f"{cluster}:{node.get('name', '')}"
+                pod_count = pod_counts.get(key, 0)
+                enrichment["k8s_pod_count"] = pod_count
+
+                # Update category/type if not already set by Proxmox
+                if not entity.get("category"):
+                    enrichment["category"] = "kubernetes"
+                if not entity.get("type") or entity.get("type") == "unknown":
+                    if "control-plane" in roles:
+                        enrichment["type"] = "k8s_control_plane"
+                    else:
+                        enrichment["type"] = "k8s_worker"
+
+                break
+
+        return enrichment
+
+    # ============================================================
     # Entity Description Generator
     # ============================================================
 
@@ -509,6 +599,15 @@ data:
             if entity.get("vm_node"):
                 vm_info += f" on node {entity['vm_node']}"
             parts.append(vm_info)
+
+        # Kubernetes context
+        if entity.get("k8s_cluster"):
+            k8s_info = f"Kubernetes {entity.get('k8s_role', 'node')} in {entity['k8s_cluster']} cluster"
+            if entity.get("k8s_pod_count"):
+                k8s_info += f" running {entity['k8s_pod_count']} pods"
+            if entity.get("k8s_version"):
+                k8s_info += f" (K8s {entity['k8s_version']})"
+            parts.append(k8s_info)
 
         # Capabilities
         if entity.get("relay_count"):
@@ -570,7 +669,9 @@ data:
             "ha_entity_id", "uptime",
             # Proxmox VM fields
             "vm_id", "vm_name", "vm_status", "vm_node", "vm_cpus",
-            "vm_memory_gb", "vm_memory_pct", "vm_disk_gb", "vm_cpu_pct", "vm_uptime"
+            "vm_memory_gb", "vm_memory_pct", "vm_disk_gb", "vm_cpu_pct", "vm_uptime",
+            # Kubernetes fields
+            "k8s_cluster", "k8s_ready", "k8s_version", "k8s_role", "k8s_pod_count"
         ]
 
         for field in enrichment_fields:
@@ -629,6 +730,7 @@ data:
             "tasmota_enriched": 0,
             "plex_enriched": 0,
             "proxmox_enriched": 0,
+            "k8s_enriched": 0,
             "locations_added": 0,
             "errors": 0,
         }
@@ -643,6 +745,12 @@ data:
         logger.info("Loading Proxmox VMs...")
         proxmox_vms = get_proxmox_vms()
         logger.info(f"Loaded {len(proxmox_vms)} Proxmox VMs")
+
+        # Step 1c: Load Kubernetes nodes and pod counts
+        logger.info("Loading Kubernetes nodes...")
+        k8s_nodes = get_k8s_nodes()
+        k8s_pod_counts = get_k8s_pod_counts()
+        logger.info(f"Loaded {len(k8s_nodes)} K8s nodes from {len(K8S_CLUSTERS)} clusters")
 
         # Step 2: Load entities from Qdrant that need enrichment
         logger.info("Loading entities from Qdrant...")
@@ -720,6 +828,17 @@ data:
                 except Exception as e:
                     logger.warning(f"Proxmox enrichment failed for {entity.get('ip')}: {e}")
 
+            # Kubernetes enrichment - match any entity to K8s node
+            if k8s_nodes:
+                try:
+                    k8s_data = enrich_from_k8s(entity, k8s_nodes, k8s_pod_counts)
+                    if k8s_data:
+                        entity.update(k8s_data)
+                        stats["k8s_enriched"] += 1
+                        logger.debug(f"K8s enriched: {entity.get('hostname')} -> {k8s_data.get('k8s_cluster')}/{k8s_data.get('k8s_role')} ({k8s_data.get('k8s_pod_count')} pods)")
+                except Exception as e:
+                    logger.warning(f"K8s enrichment failed for {entity.get('ip')}: {e}")
+
             # Special case: Home Assistant itself
             if entity.get("hostname", "").lower() == "homeassistant":
                 entity["type"] = "home_assistant"
@@ -773,6 +892,7 @@ data:
         Tasmota devices enriched: {stats['tasmota_enriched']}
         Plex servers enriched: {stats['plex_enriched']}
         Proxmox VMs enriched: {stats['proxmox_enriched']}
+        K8s nodes enriched: {stats['k8s_enriched']}
         Locations added: {stats['locations_added']}
         Errors: {stats['errors']}
         ========================================
@@ -835,6 +955,8 @@ spec:
               value: "http://unifi-mcp:8000"
             - name: PROXMOX_MCP_URL
               value: "http://proxmox-mcp:8000"
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp:8000"
             volumeMounts:
             - name: script
               mountPath: /scripts
