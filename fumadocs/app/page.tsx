@@ -11,7 +11,7 @@ export default function HomePage() {
           </p>
         </div>
 
-        <div className="grid md:grid-cols-3 gap-8 max-w-4xl mx-auto">
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8 max-w-5xl mx-auto">
           <Link
             href="/entities"
             className="block p-8 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors border border-gray-700"
@@ -35,13 +35,24 @@ export default function HomePage() {
           </Link>
 
           <Link
+            href="/runbooks"
+            className="block p-8 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors border border-gray-700"
+          >
+            <div className="text-3xl mb-4">📋</div>
+            <h2 className="text-xl font-semibold mb-2">Runbooks</h2>
+            <p className="text-gray-400">
+              Operational procedures and troubleshooting guides
+            </p>
+          </Link>
+
+          <Link
             href="/search"
             className="block p-8 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors border border-gray-700"
           >
             <div className="text-3xl mb-4">🔍</div>
             <h2 className="text-xl font-semibold mb-2">Search</h2>
             <p className="text-gray-400">
-              Semantic search across documentation and runbooks
+              Semantic search across documentation
             </p>
           </Link>
         </div>

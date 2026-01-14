@@ -592,6 +592,21 @@ data:
         except Exception as e:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
+    async def rest_api_runbooks(request: Request):
+        """List all runbooks."""
+        try:
+            limit = int(request.query_params.get("limit", "100"))
+            results = await qdrant_scroll("runbooks", limit=limit)
+            runbooks = [{
+                "id": str(r.get("id")),
+                "title": r.get("payload", {}).get("title", ""),
+                "path": r.get("payload", {}).get("path", ""),
+                "trigger_pattern": r.get("payload", {}).get("trigger_pattern", "")
+            } for r in results]
+            return JSONResponse({"status": "ok", "runbooks": runbooks})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
     # ============================================================================
     # MAIN
     # ============================================================================
@@ -609,6 +624,7 @@ data:
             Route("/api/collections", rest_api_collections, methods=["GET"]),
             Route("/api/entity", rest_api_entity, methods=["GET"]),
             Route("/api/runbook", rest_api_runbook, methods=["GET"]),
+            Route("/api/runbooks", rest_api_runbooks, methods=["GET"]),
         ]
 
         mcp_app = mcp.http_app()
