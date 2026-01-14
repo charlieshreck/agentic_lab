@@ -273,6 +273,102 @@ data:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def rest_write(request: Request):
+        """Execute write Cypher query (for enrichment jobs only)."""
+        try:
+            body = await request.json()
+            cypher = body.get("cypher", "")
+            if not cypher:
+                return JSONResponse({"error": "Missing 'cypher' in body"}, status_code=400)
+            result = await neo4j_query(cypher)
+            if result.get("errors"):
+                return JSONResponse({"status": "error", "errors": result["errors"]}, status_code=400)
+            stats = result.get("results", [{}])[0].get("stats", {})
+            return JSONResponse({"status": "ok", "stats": stats})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def rest_relationship_graph(request: Request):
+        """Get entity with all relationships for visualization (spider graph)."""
+        try:
+            entity_id = request.query_params.get("id", "")
+            entity_type = request.query_params.get("type", "Host")
+            depth = int(request.query_params.get("depth", "2"))
+            if not entity_id:
+                return JSONResponse({"error": "Missing 'id' parameter"}, status_code=400)
+
+            # Get all connected nodes up to specified depth
+            cypher = f"""
+            MATCH (e:{entity_type})
+            WHERE e.ip = $id OR e.hostname = $id OR e.name = $id OR e.title = $id OR e.vmid = $id
+            WITH e LIMIT 1
+            CALL {{
+                WITH e
+                MATCH path = (e)-[*1..{depth}]-(connected)
+                RETURN e, connected, relationships(path) as rels
+            }}
+            WITH e, collect(DISTINCT connected) as nodes, collect(rels) as all_rels
+            RETURN e as center,
+                   [n IN nodes | {{
+                       id: coalesce(n.ip, n.name, n.title, toString(n.vmid)),
+                       name: coalesce(n.hostname, n.name, n.title),
+                       type: labels(n)[0]
+                   }}] as nodes,
+                   [r IN apoc.coll.flatten(all_rels) | {{
+                       source: coalesce(startNode(r).ip, startNode(r).name, startNode(r).title),
+                       target: coalesce(endNode(r).ip, endNode(r).name, endNode(r).title),
+                       type: type(r)
+                   }}] as edges
+            """
+            result = await neo4j_query(cypher, {"id": entity_id})
+
+            # Fallback if APOC not available
+            if result.get("errors"):
+                # Simpler query without APOC
+                cypher = f"""
+                MATCH (e:{entity_type})
+                WHERE e.ip = $id OR e.hostname = $id OR e.name = $id OR e.title = $id
+                WITH e LIMIT 1
+                OPTIONAL MATCH (e)-[r]-(connected)
+                WITH e, collect(DISTINCT {{
+                    id: coalesce(connected.ip, connected.name, connected.title, toString(connected.vmid)),
+                    name: coalesce(connected.hostname, connected.name, connected.title),
+                    type: labels(connected)[0]
+                }}) as nodes,
+                collect(DISTINCT {{
+                    source: coalesce(startNode(r).ip, startNode(r).name, startNode(r).title),
+                    target: coalesce(endNode(r).ip, endNode(r).name, endNode(r).title),
+                    type: type(r)
+                }}) as edges
+                RETURN e as center, nodes, edges
+                """
+                result = await neo4j_query(cypher, {"id": entity_id})
+
+            if result.get("errors") or not result.get("results", [{}])[0].get("data"):
+                return JSONResponse({"error": "Entity not found", "id": entity_id}, status_code=404)
+
+            data = result["results"][0]["data"][0]["row"]
+            center_props = data[0] or {}
+            nodes = [n for n in (data[1] or []) if n.get("id")]
+            edges = [e for e in (data[2] or []) if e.get("source") and e.get("target")]
+
+            # Add center node to nodes list
+            center_node = {
+                "id": entity_id,
+                "name": center_props.get("hostname") or center_props.get("name") or center_props.get("title") or entity_id,
+                "type": entity_type,
+                "isCenter": True
+            }
+
+            return JSONResponse({
+                "center": center_node,
+                "nodes": [center_node] + nodes,
+                "edges": edges
+            })
+        except Exception as e:
+            logger.error(f"Graph query failed: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     def main():
         port = int(os.environ.get("PORT", "8000"))
         logger.info(f"Starting neo4j-mcp on port {port}")
@@ -283,6 +379,8 @@ data:
             Route("/api/query", rest_query, methods=["GET"]),
             Route("/api/entity", rest_entity, methods=["GET"]),
             Route("/api/overview", rest_overview, methods=["GET"]),
+            Route("/api/write", rest_write, methods=["POST"]),
+            Route("/api/graph", rest_relationship_graph, methods=["GET"]),
         ]
 
         mcp_app = mcp.http_app()

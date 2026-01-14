@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import SpiderGraph from '../../components/SpiderGraph';
 
 interface Entity {
   ip?: string;
@@ -164,13 +165,14 @@ export default function EntityDetailPage({ params }: { params: { id: string } })
           </div>
         </div>
 
-        {/* Relationship Diagram - Mermaid disabled */}
-        {diagram && (
-          <div className="mt-8 bg-gray-800 rounded-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">Relationship Graph</h2>
-            <pre className="bg-gray-900 rounded-lg p-4 overflow-x-auto text-sm text-gray-300">
-              {diagram}
-            </pre>
+        {/* Spider Graph Visualization */}
+        {entityType && (
+          <div className="mt-8">
+            <SpiderGraph
+              entityId={params.id}
+              entityType={entityType}
+              depth={2}
+            />
           </div>
         )}
       </div>

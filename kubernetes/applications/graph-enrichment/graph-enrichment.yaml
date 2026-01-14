@@ -1,0 +1,524 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: graph-enrichment-code
+  namespace: ai-platform
+  labels:
+    app: graph-enrichment
+data:
+  enrich.py: |
+    #!/usr/bin/env python3
+    """
+    Graph Enrichment Pipeline
+
+    Creates relationships in Neo4j from multiple data sources:
+    - TrueNAS: Shares, Pools, Network access
+    - Proxmox: VMs on Nodes
+    - Home Assistant: Devices in Rooms
+    - Cloudflare: Services exposed via Tunnels
+    - Kubernetes: Services, PVCs, mounts
+    """
+    import os
+    import re
+    import json
+    import logging
+    import httpx
+    from typing import Optional, Dict, List, Any
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
+    # Configuration
+    NEO4J_MCP = os.environ.get("NEO4J_MCP_URL", "http://neo4j-mcp:8000")
+    TRUENAS_MCP = os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000")
+    PROXMOX_MCP = os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000")
+    HOME_ASSISTANT_MCP = os.environ.get("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000")
+    CLOUDFLARE_MCP = os.environ.get("CLOUDFLARE_MCP_URL", "http://cloudflare-mcp:8000")
+
+    client = httpx.Client(timeout=30.0)
+
+    def neo4j_query(cypher: str) -> Dict:
+        """Execute a Cypher query via neo4j-mcp."""
+        try:
+            resp = client.get(f"{NEO4J_MCP}/api/query", params={"q": cypher})
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Neo4j query failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    def neo4j_write(cypher: str) -> bool:
+        """Execute a write query via neo4j-mcp."""
+        try:
+            resp = client.post(f"{NEO4J_MCP}/api/write", json={"cypher": cypher})
+            result = resp.json()
+            return result.get("status") == "ok"
+        except Exception as e:
+            logger.error(f"Neo4j write failed: {e}")
+            return False
+
+    def mcp_call(base_url: str, tool: str, params: Dict = None) -> Optional[Dict]:
+        """Call an MCP tool."""
+        try:
+            resp = client.post(f"{base_url}/mcp", json={
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": params or {}}
+            })
+            result = resp.json()
+            if "result" in result:
+                content = result["result"].get("content", [])
+                if content and "text" in content[0]:
+                    return json.loads(content[0]["text"])
+            return result
+        except Exception as e:
+            logger.error(f"MCP call to {tool} failed: {e}")
+            return None
+
+    # ============================================================
+    # ENRICHMENT FUNCTIONS
+    # ============================================================
+
+    def enrich_truenas_shares():
+        """Link Shares to TrueNAS instances and accessible networks."""
+        logger.info("Enriching TrueNAS shares...")
+
+        for instance in ["hdd", "media"]:
+            # Get shares
+            shares_resp = mcp_call(TRUENAS_MCP, "truenas_list_shares", {"instance": instance})
+            if not shares_resp:
+                continue
+
+            result = json.loads(shares_resp.get("result", "{}")) if isinstance(shares_resp.get("result"), str) else shares_resp
+
+            instance_name = f"TrueNAS-{instance.upper()}"
+
+            # Create TrueNAS instance node
+            neo4j_write(f"""
+                MERGE (n:NAS {{name: '{instance_name}', instance: '{instance}'}})
+                SET n.last_seen = datetime()
+            """)
+
+            # Process NFS shares
+            for share in result.get("nfs", []):
+                share_path = share.get("path", "")
+                share_name = share_path.split("/")[-1] if share_path else f"nfs-{share.get('id')}"
+                networks = share.get("networks", [])
+
+                # Link share to NAS
+                neo4j_write(f"""
+                    MATCH (s:Share {{path: '{share_path}'}})
+                    MATCH (n:NAS {{name: '{instance_name}'}})
+                    MERGE (s)-[:EXPORTED_BY]->(n)
+                """)
+
+                # Link share to accessible networks
+                for network in networks:
+                    net_name = network.replace("/", "_").replace(".", "_")
+                    neo4j_write(f"""
+                        MERGE (net:Network {{cidr: '{network}', name: '{net_name}'}})
+                        WITH net
+                        MATCH (s:Share {{path: '{share_path}'}})
+                        MERGE (s)-[:ACCESSIBLE_FROM]->(net)
+                    """)
+
+                logger.info(f"  Linked share {share_name} to {instance_name}, networks: {networks}")
+
+            # Process SMB shares
+            for share in result.get("smb", []):
+                share_path = share.get("path", "")
+                share_name = share.get("name", "")
+
+                neo4j_write(f"""
+                    MERGE (s:Share {{name: '{share_name}', path: '{share_path}', type: 'smb'}})
+                    SET s.last_seen = datetime()
+                    WITH s
+                    MATCH (n:NAS {{name: '{instance_name}'}})
+                    MERGE (s)-[:EXPORTED_BY]->(n)
+                """)
+                logger.info(f"  Linked SMB share {share_name} to {instance_name}")
+
+    def enrich_truenas_pools():
+        """Link Pools to TrueNAS instances and their disks."""
+        logger.info("Enriching TrueNAS pools...")
+
+        for instance in ["hdd", "media"]:
+            pools_resp = mcp_call(TRUENAS_MCP, "truenas_list_pools", {"instance": instance})
+            if not pools_resp:
+                continue
+
+            result = json.loads(pools_resp.get("result", "{}")) if isinstance(pools_resp.get("result"), str) else pools_resp
+            instance_name = f"TrueNAS-{instance.upper()}"
+
+            for pool in result.get("pools", []):
+                pool_name = pool.get("name")
+                pool_status = pool.get("status", "UNKNOWN")
+                pool_size = pool.get("size", 0)
+                pool_free = pool.get("free", 0)
+
+                # Create/update pool node and link to NAS
+                neo4j_write(f"""
+                    MERGE (p:StoragePool {{name: '{pool_name}'}})
+                    SET p.status = '{pool_status}',
+                        p.size_bytes = {pool_size},
+                        p.free_bytes = {pool_free},
+                        p.last_seen = datetime()
+                    WITH p
+                    MATCH (n:NAS {{name: '{instance_name}'}})
+                    MERGE (p)-[:HOSTED_ON]->(n)
+                """)
+
+                # Link pool to its disks
+                topology = pool.get("topology", {})
+                for vdev in topology.get("data", []):
+                    for child in vdev.get("children", []):
+                        disk = child.get("disk", child.get("device", "unknown"))
+                        disk_status = child.get("status", "UNKNOWN")
+
+                        neo4j_write(f"""
+                            MERGE (d:Disk {{name: '{disk}'}})
+                            SET d.status = '{disk_status}', d.last_seen = datetime()
+                            WITH d
+                            MATCH (p:StoragePool {{name: '{pool_name}'}})
+                            MERGE (p)-[:COMPOSED_OF]->(d)
+                        """)
+
+                logger.info(f"  Linked pool {pool_name} to {instance_name}")
+
+    def enrich_proxmox_vms():
+        """Link VMs to Proxmox nodes."""
+        logger.info("Enriching Proxmox VMs...")
+
+        vms_resp = mcp_call(PROXMOX_MCP, "proxmox_list_vms", {})
+        if not vms_resp:
+            return
+
+        result = json.loads(vms_resp.get("result", "{}")) if isinstance(vms_resp.get("result"), str) else vms_resp
+
+        for vm in result.get("vms", []):
+            vm_name = vm.get("name", "")
+            vm_id = vm.get("vmid")
+            node = vm.get("node", "")
+            status = vm.get("status", "unknown")
+            cpus = vm.get("cpus", 0)
+            mem_bytes = vm.get("maxmem", 0)
+
+            # Create/update VM node
+            neo4j_write(f"""
+                MERGE (v:VM {{vmid: {vm_id}}})
+                SET v.name = '{vm_name}',
+                    v.status = '{status}',
+                    v.cpus = {cpus},
+                    v.memory_bytes = {mem_bytes},
+                    v.last_seen = datetime()
+            """)
+
+            # Create Proxmox node and link
+            neo4j_write(f"""
+                MERGE (n:ProxmoxNode {{name: '{node}'}})
+                SET n.last_seen = datetime()
+                WITH n
+                MATCH (v:VM {{vmid: {vm_id}}})
+                MERGE (v)-[:RUNS_ON]->(n)
+            """)
+
+            logger.info(f"  Linked VM {vm_name} (ID:{vm_id}) to node {node}")
+
+    def enrich_home_assistant_locations():
+        """Link devices to rooms based on Home Assistant entity names."""
+        logger.info("Enriching Home Assistant device locations...")
+
+        entities_resp = mcp_call(HOME_ASSISTANT_MCP, "list_entities", {"domain": "light"})
+        if not entities_resp:
+            return
+
+        result = entities_resp.get("result", [])
+
+        # Room extraction patterns
+        room_patterns = {
+            r"living.?room": "living_room",
+            r"kitchen": "kitchen",
+            r"bedroom": "bedroom",
+            r"dining.?room": "dining_room",
+            r"play.?room": "play_room",
+            r"study": "study",
+            r"garage": "garage",
+            r"laundry": "laundry",
+            r"hall": "hall",
+            r"stair": "stairs",
+            r"ensuite": "ensuite",
+            r"shower": "shower_room",
+            r"loo|toilet|cloakroom": "toilet",
+            r"patio|door.?light": "entrance",
+            r"albie": "albies_room",
+            r"vienna": "viennas_room",
+        }
+
+        for entity in result:
+            entity_id = entity.get("entity_id", "")
+            name = entity.get("name", "")
+
+            if not name:
+                continue
+
+            # Extract room from name
+            name_lower = name.lower()
+            room = None
+            for pattern, room_name in room_patterns.items():
+                if re.search(pattern, name_lower):
+                    room = room_name
+                    break
+
+            if room:
+                # Create device node (Tasmota light)
+                safe_name = name.replace("'", "\\'")
+                neo4j_write(f"""
+                    MERGE (d:SmartDevice {{entity_id: '{entity_id}'}})
+                    SET d.name = '{safe_name}',
+                        d.type = 'light',
+                        d.last_seen = datetime()
+                """)
+
+                # Create room and link
+                neo4j_write(f"""
+                    MERGE (r:Location {{name: '{room}'}})
+                    SET r.type = 'room', r.last_seen = datetime()
+                    WITH r
+                    MATCH (d:SmartDevice {{entity_id: '{entity_id}'}})
+                    MERGE (d)-[:LOCATED_IN]->(r)
+                """)
+
+                logger.info(f"  Linked {name} to room {room}")
+
+        # Also process switches
+        switches_resp = mcp_call(HOME_ASSISTANT_MCP, "list_entities", {"domain": "switch"})
+        if switches_resp:
+            for entity in switches_resp.get("result", []):
+                entity_id = entity.get("entity_id", "")
+                name = entity.get("name", "")
+
+                if not name:
+                    continue
+
+                name_lower = name.lower()
+                room = None
+                for pattern, room_name in room_patterns.items():
+                    if re.search(pattern, name_lower):
+                        room = room_name
+                        break
+
+                if room:
+                    safe_name = name.replace("'", "\\'")
+                    neo4j_write(f"""
+                        MERGE (d:SmartDevice {{entity_id: '{entity_id}'}})
+                        SET d.name = '{safe_name}', d.type = 'switch', d.last_seen = datetime()
+                        WITH d
+                        MERGE (r:Location {{name: '{room}'}})
+                        MERGE (d)-[:LOCATED_IN]->(r)
+                    """)
+
+    def enrich_service_storage():
+        """Link services to storage they use (Plex -> Shares, etc.)."""
+        logger.info("Enriching service storage relationships...")
+
+        # Known service-to-storage mappings
+        service_storage = {
+            "plex": ["Pleximetry", "Plexopathy"],
+            "sonarr": ["Tarriance"],
+            "radarr": ["Tarriance"],
+            "transmission": ["Tarriance"],
+            "sabnzbd": ["Tarriance"],
+            "minio": ["MinIO"],
+            "pbs": ["pbs"],
+        }
+
+        for service, shares in service_storage.items():
+            for share in shares:
+                neo4j_write(f"""
+                    MERGE (svc:Service {{name: '{service}'}})
+                    SET svc.last_seen = datetime()
+                    WITH svc
+                    MATCH (s:Share {{name: '{share}'}})
+                    MERGE (svc)-[:USES_STORAGE]->(s)
+                """)
+                logger.info(f"  Linked service {service} to share {share}")
+
+    def enrich_network_topology():
+        """Create network topology relationships."""
+        logger.info("Enriching network topology...")
+
+        # Define networks
+        networks = [
+            {"name": "prod", "cidr": "10.10.0.0/24", "purpose": "Production services"},
+            {"name": "agentic", "cidr": "10.20.0.0/24", "purpose": "AI platform"},
+            {"name": "monitoring", "cidr": "10.30.0.0/24", "purpose": "Monitoring stack"},
+            {"name": "iot", "cidr": "10.40.0.0/24", "purpose": "IoT devices"},
+        ]
+
+        for net in networks:
+            neo4j_write(f"""
+                MERGE (n:Network {{cidr: '{net["cidr"]}'}})
+                SET n.name = '{net["name"]}',
+                    n.purpose = '{net["purpose"]}',
+                    n.last_seen = datetime()
+            """)
+
+        # Link hosts to networks based on IP
+        neo4j_write("""
+            MATCH (h:Host)
+            WHERE h.ip STARTS WITH '10.10.0'
+            MATCH (n:Network {name: 'prod'})
+            MERGE (h)-[:CONNECTED_TO]->(n)
+        """)
+        neo4j_write("""
+            MATCH (h:Host)
+            WHERE h.ip STARTS WITH '10.20.0'
+            MATCH (n:Network {name: 'agentic'})
+            MERGE (h)-[:CONNECTED_TO]->(n)
+        """)
+        neo4j_write("""
+            MATCH (h:Host)
+            WHERE h.ip STARTS WITH '10.30.0'
+            MATCH (n:Network {name: 'monitoring'})
+            MERGE (h)-[:CONNECTED_TO]->(n)
+        """)
+
+    def enrich_alert_runbook_links():
+        """Link alerts to their resolving runbooks."""
+        logger.info("Enriching alert-runbook links...")
+
+        # Query existing alerts and runbooks
+        alerts = neo4j_query("MATCH (a:Alert) RETURN a.name as name")
+        runbooks = neo4j_query("MATCH (r:RunbookDocument) RETURN r.title as title, r.path as path")
+
+        if alerts.get("status") != "ok" or runbooks.get("status") != "ok":
+            return
+
+        # Simple keyword matching
+        for alert_row in alerts.get("data", []):
+            alert_name = alert_row[0] if alert_row else None
+            if not alert_name:
+                continue
+
+            alert_lower = alert_name.lower()
+            for runbook_row in runbooks.get("data", []):
+                title = runbook_row[0] if runbook_row else ""
+                if not title:
+                    continue
+
+                title_lower = title.lower()
+                # Check for keyword overlap
+                alert_words = set(re.findall(r'\w+', alert_lower))
+                title_words = set(re.findall(r'\w+', title_lower))
+
+                if len(alert_words & title_words) >= 2:
+                    safe_title = title.replace("'", "\\'")
+                    safe_alert = alert_name.replace("'", "\\'")
+                    neo4j_write(f"""
+                        MATCH (a:Alert {{name: '{safe_alert}'}})
+                        MATCH (r:RunbookDocument {{title: '{safe_title}'}})
+                        MERGE (a)-[:RESOLVED_BY]->(r)
+                    """)
+                    logger.info(f"  Linked alert '{alert_name}' to runbook '{title}'")
+
+    def main():
+        logger.info("=" * 60)
+        logger.info("Starting Graph Enrichment Pipeline")
+        logger.info("=" * 60)
+
+        # Run all enrichment functions
+        enrich_truenas_shares()
+        enrich_truenas_pools()
+        enrich_proxmox_vms()
+        enrich_home_assistant_locations()
+        enrich_service_storage()
+        enrich_network_topology()
+        enrich_alert_runbook_links()
+
+        # Log summary
+        summary = neo4j_query("""
+            MATCH ()-[r]->()
+            RETURN type(r) as rel, count(*) as cnt
+            ORDER BY cnt DESC
+        """)
+
+        logger.info("=" * 60)
+        logger.info("Enrichment Complete - Relationship Summary:")
+        if summary.get("status") == "ok":
+            for row in summary.get("data", []):
+                logger.info(f"  {row[0]}: {row[1]}")
+        logger.info("=" * 60)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    httpx>=0.28.0
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: graph-enrichment
+  namespace: ai-platform
+  labels:
+    app: graph-enrichment
+spec:
+  schedule: "*/15 * * * *"  # Every 15 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: graph-enrichment
+        spec:
+          restartPolicy: OnFailure
+          initContainers:
+            - name: install-deps
+              image: python:3.12-slim
+              command:
+                - sh
+                - -c
+                - pip install --target=/app/deps -r /code/requirements.txt
+              volumeMounts:
+                - name: code
+                  mountPath: /code
+                - name: deps
+                  mountPath: /app/deps
+          containers:
+            - name: enrichment
+              image: python:3.12-slim
+              command:
+                - sh
+                - -c
+                - PYTHONPATH=/app/deps python /code/enrich.py
+              env:
+                - name: NEO4J_MCP_URL
+                  value: "http://neo4j-mcp:8000"
+                - name: TRUENAS_MCP_URL
+                  value: "http://truenas-mcp:8000"
+                - name: PROXMOX_MCP_URL
+                  value: "http://proxmox-mcp:8000"
+                - name: HOME_ASSISTANT_MCP_URL
+                  value: "http://home-assistant-mcp:8000"
+                - name: CLOUDFLARE_MCP_URL
+                  value: "http://cloudflare-mcp:8000"
+              volumeMounts:
+                - name: code
+                  mountPath: /code
+                - name: deps
+                  mountPath: /app/deps
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
+          volumes:
+            - name: code
+              configMap:
+                name: graph-enrichment-code
+            - name: deps
+              emptyDir: {}
