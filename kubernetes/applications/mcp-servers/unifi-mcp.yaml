@@ -37,6 +37,8 @@ data:
     # Configuration
     UNIFI_HOST = os.environ.get("UNIFI_HOST", "https://10.10.0.154:11443")
     UNIFI_API_KEY = os.environ.get("UNIFI_API_KEY", "")
+    UNIFI_USER = os.environ.get("UNIFI_USER", "")
+    UNIFI_PASSWORD = os.environ.get("UNIFI_PASSWORD", "")
     UNIFI_SITE = os.environ.get("UNIFI_SITE", "default")
 
     def _get_ssl_context():
@@ -47,6 +49,40 @@ data:
         return ctx
 
     SSL_CONTEXT = _get_ssl_context()
+
+    # Session manager for operations requiring CSRF token
+    class UniFiSession:
+        def __init__(self):
+            self.cookies = None
+            self.csrf_token = None
+
+        async def login(self) -> bool:
+            """Login with username/password to get session cookies and CSRF token."""
+            if not UNIFI_USER or not UNIFI_PASSWORD:
+                logger.warning("UNIFI_USER/PASSWORD not set, session auth unavailable")
+                return False
+            try:
+                async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
+                    response = await client.post(
+                        f"{UNIFI_HOST}/api/auth/login",
+                        json={"username": UNIFI_USER, "password": UNIFI_PASSWORD}
+                    )
+                    response.raise_for_status()
+                    self.cookies = response.cookies
+                    self.csrf_token = response.headers.get("X-CSRF-Token", "")
+                    logger.info("UniFi session auth successful")
+                    return True
+            except Exception as e:
+                logger.error(f"Session login failed: {e}")
+                return False
+
+        async def ensure_session(self) -> bool:
+            """Ensure we have a valid session, login if needed."""
+            if not self.cookies:
+                return await self.login()
+            return True
+
+    session_manager = UniFiSession()
 
     mcp = FastMCP(
         name="unifi_mcp",
@@ -151,6 +187,23 @@ data:
         headers = {"X-API-KEY": UNIFI_API_KEY, "Content-Type": "application/json"}
         async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
             r = await client.put(f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}", headers=headers, json=data)
+            r.raise_for_status()
+            return r.json()
+
+    async def _api_put_session(endpoint: str, data: dict) -> Any:
+        """PUT using session auth with CSRF token (required for site settings)."""
+        if not await session_manager.ensure_session():
+            raise Exception("Session auth required but UNIFI_USER/PASSWORD not configured")
+        headers = {"Content-Type": "application/json"}
+        if session_manager.csrf_token:
+            headers["X-CSRF-Token"] = session_manager.csrf_token
+        async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
+            r = await client.put(
+                f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}",
+                headers=headers,
+                cookies=session_manager.cookies,
+                json=data
+            )
             r.raise_for_status()
             return r.json()
 
@@ -699,7 +752,8 @@ data:
                 update_payload["auto_enabled"] = params.enabled
 
             # UniFi API requires: PUT /rest/setting/{key}/{_id}
-            await _api_put(f"/rest/setting/{setting_key}/{setting_id}", update_payload)
+            # Site settings require session auth with CSRF token (API key not sufficient)
+            await _api_put_session(f"/rest/setting/{setting_key}/{setting_id}", update_payload)
 
             result_status = "enabled" if params.enabled else "disabled"
             return f"# RF Setting Updated \n\n- **Setting**: {params.setting}\n- **Status**: {result_status}\n\nChanges will take effect within 30 seconds.\n"
@@ -799,6 +853,18 @@ spec:
                 secretKeyRef:
                   name: mcp-unifi
                   key: UNIFI_API_KEY
+            - name: UNIFI_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-unifi
+                  key: UNIFI_USER
+                  optional: true
+            - name: UNIFI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-unifi
+                  key: UNIFI_PASSWORD
+                  optional: true
           volumeMounts:
             - name: code
               mountPath: /app
