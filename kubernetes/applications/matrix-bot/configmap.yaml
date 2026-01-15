@@ -28,7 +28,7 @@ data:
         InviteMemberEvent,
         JoinError,
     )
-    from fastapi import FastAPI, BackgroundTasks
+    from fastapi import FastAPI, BackgroundTasks, Request
     from pydantic import BaseModel
     import uvicorn
     from contextlib import asynccontextmanager
@@ -590,6 +590,91 @@ data:
             return {"status": "sent", "room_id": req.room_id}
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
+            return {"status": "error", "message": str(e)}
+
+    @app.post("/approval")
+    async def request_approval(request: Request):
+        """Receive approval request from LangGraph and post to Matrix.
+
+        Accepts flexible JSON payload - extracts what it can.
+        """
+        if not bot_instance or not bot_instance.client.logged_in:
+            return {"status": "error", "message": "Bot not logged in"}
+
+        try:
+            payload = await request.json()
+        except Exception as e:
+            logger.error(f"Failed to parse approval payload: {e}")
+            return {"status": "error", "message": str(e)}
+
+        logger.info(f"Received approval request payload: {json.dumps(payload)[:500]}")
+
+        # Extract fields flexibly - handle various payload formats
+        alert_name = (
+            payload.get("alert_name") or
+            payload.get("alertname") or
+            payload.get("name") or
+            payload.get("title") or
+            "Unknown Alert"
+        )
+        severity = (
+            payload.get("severity") or
+            payload.get("level") or
+            "info"
+        )
+        description = (
+            payload.get("description") or
+            payload.get("message") or
+            payload.get("summary") or
+            ""
+        )
+        assessment = (
+            payload.get("assessment") or
+            payload.get("analysis") or
+            payload.get("ai_response") or
+            ""
+        )
+        suggested_action = (
+            payload.get("suggested_action") or
+            payload.get("action") or
+            payload.get("recommendation") or
+            payload.get("suggested_fix") or
+            None
+        )
+        runbook = (
+            payload.get("runbook") or
+            payload.get("runbook_url") or
+            None
+        )
+        room_id = payload.get("room_id") or ALERT_ROOM_ID
+
+        severity_emoji = {"critical": "\U0001F534", "warning": "\U0001F7E1", "info": "\U0001F535"}
+        emoji = severity_emoji.get(severity, "\U0001F535")
+
+        # Build approval request message
+        message = f"{emoji} **Approval Needed: {alert_name}**\n\n"
+        message += f"**Severity:** {severity}\n\n"
+
+        if description:
+            message += f"**Description:**\n{description}\n\n"
+
+        if assessment:
+            message += f"**AI Assessment:**\n{assessment}\n\n"
+
+        if suggested_action:
+            message += f"**Suggested Action:**\n{suggested_action}\n\n"
+
+        if runbook:
+            message += f"**Runbook:** {runbook}\n\n"
+
+        message += "_React \u2705 to approve, \u274c to reject_"
+
+        try:
+            await bot_instance.send_message(room_id, message)
+            logger.info(f"Approval request sent to {room_id}: {alert_name}")
+            return {"status": "sent", "room_id": room_id, "alert_name": alert_name}
+        except Exception as e:
+            logger.error(f"Failed to send approval request: {e}")
             return {"status": "error", "message": str(e)}
 
     if __name__ == "__main__":

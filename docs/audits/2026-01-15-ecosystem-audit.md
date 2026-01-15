@@ -10,7 +10,7 @@
 
 The Kernow Homelab has solid foundations but critical gaps in the learning feedback loop. The infrastructure (MCP servers, LLMs, vector DB, knowledge graph) is built, but the nervous system (alerts → decisions → outcomes → learning) isn't fully connected.
 
-**Overall Progress: ~55%** toward self-maintaining ecosystem
+**Overall Progress: ~60%** toward self-maintaining ecosystem
 
 ---
 
@@ -23,7 +23,7 @@ The Kernow Homelab has solid foundations but critical gaps in the learning feedb
 | **4** | Vector Knowledge Base (Qdrant) | ⚠️ Partial | 40% |
 | **5** | MCP Servers (20 integrations) | ✅ Complete | 100% |
 | **6** | Orchestration + Human-in-Loop | ⚠️ Partial | 35% |
-| **7** | Go Live - Alert Routing | ❌ Not Started | 5% |
+| **7** | Go Live - Alert Routing | ⚠️ Partial | 50% |
 | **8** | Progressive Autonomy | ❌ Not Started | 0% |
 
 ---
@@ -80,23 +80,24 @@ The Kernow Homelab has solid foundations but critical gaps in the learning feedb
 
 ---
 
-### 4. Alerting Pipeline 🚨 (Broken)
+### 4. Alerting Pipeline ✅ (Fixed 2026-01-15)
 
 **Current State:**
-- 30+ active alerts firing in AlertManager
-- All alerts route to **"null"** receiver → no notifications
-- alerting-pipeline deployed but not receiving webhooks
-- Matrix bot running but not getting alerts
+- AlertManager routing to alerting-pipeline webhook ✅
+- alerting-pipeline receiving and processing alerts ✅
+- Alerts forwarding to LangGraph for AI triage ✅
+- End-to-end chain operational
 
-**Fix Required:**
-```yaml
-route:
-  receiver: 'alerting-pipeline'
-receivers:
-  - name: 'alerting-pipeline'
-    webhook_configs:
-      - url: 'http://alerting-pipeline.ai-platform:8000/alert'
+**Verified Working:**
 ```
+AlertManager (monit:10.30.0.20)
+    → alerting-pipeline (agentic:31102/alert)
+    → LangGraph/Claude-Agent
+```
+
+**Recent Alerts Processed:**
+- KubeDeploymentReplicasMismatch, KubePodNotReady, KubeJobFailed
+- NodeMemoryHighUtilization, KubeSchedulerDown, TargetDown
 
 ---
 
@@ -137,7 +138,7 @@ receivers:
 
 ### 🔴 CRITICAL (This Week)
 
-1. **Fix AlertManager Routing** - Alerts go to null receiver
+1. ~~**Fix AlertManager Routing**~~ - ✅ DONE (2026-01-15)
 2. **Fix Node Memory** - 10.10.0.42 at 93.54%
 3. **Fix Claude Validator** - Daily jobs failing
 
@@ -188,12 +189,12 @@ receivers:
                         ▼
 ┌─────────────────────────────────────────────────┐
 │            ORCHESTRATION (LangGraph)             │
-│  ✅ Deployed  ❌ Not receiving alerts           │
+│  ✅ Deployed  ✅ Receiving alerts from AM      │
 └─────────────────────────────────────────────────┘
                         ▼
 ┌─────────────────────────────────────────────────┐
 │           HUMAN-IN-THE-LOOP (Matrix)            │
-│  ⚠️ Running  ❌ Not receiving notifications    │
+│  ⚠️ Running  ⚠️ Needs verification            │
 └─────────────────────────────────────────────────┘
                         ▼
 ┌─────────────────────────────────────────────────┐
