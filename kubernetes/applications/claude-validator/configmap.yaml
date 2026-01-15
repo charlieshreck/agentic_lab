@@ -58,6 +58,19 @@ data:
         'claude_validator_auto_fixes_total',
         'Automatic fixes applied by validator'
     )
+    SKILL_GAPS_DETECTED = Counter(
+        'claude_validator_skill_gaps_detected_total',
+        'Skill gaps identified for potential skill generation',
+        ['gap_type']  # repeated_query, multi_step_operation, capability_gap
+    )
+    SKILLS_GENERATED = Counter(
+        'claude_validator_skills_generated_total',
+        'Skills generated from detected patterns'
+    )
+    MCPS_SUGGESTED = Counter(
+        'claude_validator_mcps_suggested_total',
+        'MCP servers suggested from capability gaps'
+    )
 
     # ============================================================================
     # Configuration
@@ -148,6 +161,34 @@ data:
         include_recent_decisions: bool = True
         include_pending_validations: bool = True
         include_system_health: bool = True
+
+    class SkillGapAnalysisRequest(BaseModel):
+        """Request for skill gap analysis (Phase 5.2)."""
+        days: int = 7              # Look back period
+        min_pattern_count: int = 3  # Minimum occurrences to suggest skill
+        similarity_threshold: float = 0.85  # Embedding similarity threshold
+        auto_generate: bool = False  # Auto-generate skills for top candidates
+
+    class SkillGapAnalysisResult(BaseModel):
+        """Result of skill gap analysis."""
+        id: str
+        analyzed_at: str
+        events_analyzed: int
+        patterns_found: List[dict]
+        capability_gaps: List[dict]
+        skills_suggested: List[dict]
+        skills_generated: List[dict]
+        mcps_suggested: List[dict]
+
+    class SkillCandidate(BaseModel):
+        """A candidate for skill generation."""
+        pattern_key: str
+        occurrence_count: int
+        representative_prompt: str
+        avg_score: Optional[float]
+        suggested_skill_name: str
+        suggested_description: str
+        priority: str  # high, medium, low
 
     class FeedbackRequest(BaseModel):
         """Request to submit feedback on a previous execution (Forever Learning System)."""
@@ -266,6 +307,178 @@ data:
                 )
             except Exception as e:
                 logger.warning(f"Failed to store validation result: {e}")
+
+    # ============================================================================
+    # Skill Gap Detection Helpers (Phase 5.2 - Forever Learning System)
+    # ============================================================================
+
+    async def get_recent_events(days: int = 7, event_types: List[str] = None) -> List[dict]:
+        """Fetch recent events from knowledge-mcp for pattern analysis."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                params = {"days": days}
+                if event_types:
+                    params["event_types"] = ",".join(event_types)
+                response = await client.get(
+                    f"{KNOWLEDGE_MCP_URL}/api/events",
+                    params=params
+                )
+                if response.status_code == 200:
+                    return response.json().get("events", [])
+                logger.warning(f"Failed to fetch events: {response.status_code}")
+                return []
+            except Exception as e:
+                logger.error(f"Error fetching recent events: {e}")
+                return []
+
+    async def find_similar_prompts(threshold: float = 0.85, min_count: int = 3) -> List[dict]:
+        """Find groups of similar prompts that could become skills."""
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/find_similar_prompts",
+                    json={"threshold": threshold, "min_count": min_count}
+                )
+                if response.status_code == 200:
+                    return response.json().get("groups", [])
+                logger.warning(f"Similar prompts query failed: {response.status_code}")
+                return []
+            except Exception as e:
+                logger.error(f"Error finding similar prompts: {e}")
+                return []
+
+    async def get_failed_events(days: int = 7) -> List[dict]:
+        """Get events that resulted in failures or errors."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.get(
+                    f"{KNOWLEDGE_MCP_URL}/api/events",
+                    params={
+                        "days": days,
+                        "event_types": "agent.error,task.failed",
+                        "resolution": "failed,error"
+                    }
+                )
+                if response.status_code == 200:
+                    return response.json().get("events", [])
+                return []
+            except Exception as e:
+                logger.error(f"Error fetching failed events: {e}")
+                return []
+
+    async def get_low_score_events(days: int = 30, max_score: float = 0.5) -> List[dict]:
+        """Get events that received low feedback scores."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.get(
+                    f"{KNOWLEDGE_MCP_URL}/api/events",
+                    params={
+                        "days": days,
+                        "max_score": max_score
+                    }
+                )
+                if response.status_code == 200:
+                    return response.json().get("events", [])
+                return []
+            except Exception as e:
+                logger.error(f"Error fetching low score events: {e}")
+                return []
+
+    def analyze_prompt_patterns(events: List[dict]) -> List[dict]:
+        """
+        Analyze events to find repeated prompt patterns.
+
+        Groups events by semantic similarity and identifies candidates for skills.
+        Returns list of pattern groups with counts and representative prompts.
+        """
+        from collections import defaultdict
+        import hashlib
+
+        # Simple pattern extraction: group by prompt prefix
+        patterns = defaultdict(list)
+        for event in events:
+            desc = event.get("description", "")
+            metadata = event.get("metadata", {})
+            prompt = metadata.get("prompt", desc)[:200]
+
+            # Create a normalized key for grouping
+            # (In production, use embedding similarity)
+            key = hashlib.md5(prompt.lower()[:100].encode()).hexdigest()[:8]
+            patterns[key].append({
+                "event_id": event.get("id"),
+                "prompt": prompt,
+                "event_type": event.get("event_type"),
+                "resolution": event.get("resolution"),
+                "score": event.get("score")
+            })
+
+        # Filter to patterns with multiple occurrences
+        result = []
+        for key, group in patterns.items():
+            if len(group) >= 2:
+                # Calculate average score if available
+                scores = [e["score"] for e in group if e["score"] is not None]
+                avg_score = sum(scores) / len(scores) if scores else None
+
+                result.append({
+                    "pattern_key": key,
+                    "count": len(group),
+                    "representative_prompt": group[0]["prompt"],
+                    "avg_score": avg_score,
+                    "event_ids": [e["event_id"] for e in group[:10]]
+                })
+
+        return sorted(result, key=lambda x: x["count"], reverse=True)
+
+    def identify_capability_gaps(failed_events: List[dict]) -> List[dict]:
+        """
+        Analyze failed events to identify missing capabilities.
+
+        Returns list of potential capability gaps with suggestions.
+        """
+        gaps = []
+
+        # Group failures by type/pattern
+        from collections import Counter
+        error_patterns = Counter()
+
+        for event in failed_events:
+            desc = event.get("description", "")
+            metadata = event.get("metadata", {})
+            error = metadata.get("error", desc)
+
+            # Extract key phrases that indicate capability gaps
+            if "not found" in error.lower() or "missing" in error.lower():
+                error_patterns["missing_resource"] += 1
+            elif "permission" in error.lower() or "denied" in error.lower():
+                error_patterns["permission_issue"] += 1
+            elif "timeout" in error.lower():
+                error_patterns["timeout_issue"] += 1
+            elif "unknown tool" in error.lower() or "no such tool" in error.lower():
+                error_patterns["missing_tool"] += 1
+            else:
+                error_patterns["other"] += 1
+
+        for pattern, count in error_patterns.most_common(10):
+            if count >= 2:
+                gaps.append({
+                    "gap_type": pattern,
+                    "occurrence_count": count,
+                    "suggested_action": get_gap_suggestion(pattern)
+                })
+
+        return gaps
+
+    def get_gap_suggestion(gap_type: str) -> str:
+        """Get suggested action for a capability gap type."""
+        suggestions = {
+            "missing_resource": "Create runbook for resource provisioning",
+            "permission_issue": "Review RBAC and create permission escalation runbook",
+            "timeout_issue": "Investigate slow operations, consider async handling",
+            "missing_tool": "Generate new MCP server for missing capability",
+            "other": "Manual review required to identify pattern"
+        }
+        return suggestions.get(gap_type, "Manual review required")
 
     # ============================================================================
     # Endpoints
@@ -814,55 +1027,233 @@ data:
             "response_preview": response.get("result", "")[:300]
         }
 
+    @app.post("/analyze-skill-gaps", response_model=SkillGapAnalysisResult)
+    async def analyze_skill_gaps(
+        request: SkillGapAnalysisRequest = None,
+        background_tasks: BackgroundTasks = None
+    ):
+        """
+        Analyze execution patterns to identify skill generation opportunities.
+
+        Phase 5.2 of Forever Learning System:
+        1. Fetch recent events from agent_events collection
+        2. Find repeated prompts using embedding similarity
+        3. Identify capability gaps from failed events
+        4. Suggest (or auto-generate) skills for high-frequency patterns
+        5. Suggest MCP servers for missing tool capabilities
+
+        Returns detailed analysis with actionable suggestions.
+        """
+        request = request or SkillGapAnalysisRequest()
+        analysis_id = f"gap-{uuid4().hex[:8]}"
+        logger.info(f"[{analysis_id}] Starting skill gap analysis (days={request.days})")
+
+        # Fetch all recent events
+        all_events = await get_recent_events(days=request.days)
+        failed_events = await get_failed_events(days=request.days)
+        low_score_events = await get_low_score_events(days=30, max_score=0.5)
+
+        logger.info(f"[{analysis_id}] Found {len(all_events)} events, {len(failed_events)} failures, {len(low_score_events)} low scores")
+
+        # Analyze patterns
+        patterns = analyze_prompt_patterns(all_events)
+        capability_gaps = identify_capability_gaps(failed_events)
+
+        # Generate skill suggestions from patterns
+        skills_suggested = []
+        for pattern in patterns[:10]:  # Top 10 patterns
+            if pattern["count"] >= request.min_pattern_count:
+                # Determine priority based on count and score
+                if pattern["count"] >= 10 or (pattern.get("avg_score") and pattern["avg_score"] < 0.6):
+                    priority = "high"
+                elif pattern["count"] >= 5:
+                    priority = "medium"
+                else:
+                    priority = "low"
+
+                # Suggest a skill name from the prompt
+                prompt_preview = pattern["representative_prompt"][:50].lower()
+                skill_name = "-".join(prompt_preview.split()[:4])
+                skill_name = "".join(c if c.isalnum() or c == "-" else "" for c in skill_name)
+
+                skills_suggested.append({
+                    "pattern_key": pattern["pattern_key"],
+                    "occurrence_count": pattern["count"],
+                    "representative_prompt": pattern["representative_prompt"],
+                    "avg_score": pattern.get("avg_score"),
+                    "suggested_skill_name": skill_name or f"skill-{pattern['pattern_key']}",
+                    "priority": priority
+                })
+
+                # Track metric
+                SKILL_GAPS_DETECTED.labels(gap_type="repeated_query").inc()
+
+        # Generate MCP suggestions from capability gaps
+        mcps_suggested = []
+        for gap in capability_gaps:
+            if gap["gap_type"] == "missing_tool":
+                mcps_suggested.append({
+                    "gap_type": gap["gap_type"],
+                    "occurrence_count": gap["occurrence_count"],
+                    "suggested_action": gap["suggested_action"],
+                    "priority": "high" if gap["occurrence_count"] >= 5 else "medium"
+                })
+                SKILL_GAPS_DETECTED.labels(gap_type="capability_gap").inc()
+
+        # Auto-generate top skills if requested
+        skills_generated = []
+        if request.auto_generate and skills_suggested:
+            for skill in skills_suggested[:3]:  # Top 3 only
+                if skill["priority"] == "high":
+                    try:
+                        result = await generate_skill(SkillGap(
+                            description=f"Automate: {skill['representative_prompt'][:100]}",
+                            triggering_patterns=[skill["representative_prompt"]],
+                            type="repeated_query",
+                            output_path=f"/workspace/skills/{skill['suggested_skill_name']}.md"
+                        ), background_tasks)
+                        if result.get("status") == "generated":
+                            skills_generated.append({
+                                "skill_name": skill["suggested_skill_name"],
+                                "output_path": result.get("output_path"),
+                                "status": "generated"
+                            })
+                            SKILLS_GENERATED.inc()
+                    except Exception as e:
+                        logger.error(f"Failed to generate skill {skill['suggested_skill_name']}: {e}")
+
+        # Notify about findings
+        if skills_suggested or mcps_suggested:
+            notification = f"📊 Skill Gap Analysis [{analysis_id}]\n"
+            notification += f"- Events analyzed: {len(all_events)}\n"
+            notification += f"- Patterns found: {len(patterns)}\n"
+            notification += f"- Skills suggested: {len(skills_suggested)}\n"
+            notification += f"- MCPs suggested: {len(mcps_suggested)}\n"
+            if skills_generated:
+                notification += f"- Skills auto-generated: {len(skills_generated)}"
+
+            background_tasks.add_task(notify_matrix, notification)
+
+        result = SkillGapAnalysisResult(
+            id=analysis_id,
+            analyzed_at=datetime.utcnow().isoformat(),
+            events_analyzed=len(all_events),
+            patterns_found=patterns[:20],
+            capability_gaps=capability_gaps,
+            skills_suggested=skills_suggested,
+            skills_generated=skills_generated,
+            mcps_suggested=mcps_suggested
+        )
+
+        logger.info(f"[{analysis_id}] Analysis complete: {len(skills_suggested)} skills, {len(mcps_suggested)} MCPs suggested")
+        return result
+
     @app.post("/self-improve")
     async def trigger_self_improvement(background_tasks: BackgroundTasks):
         """
-        Analyze recent failures and generate improvements.
+        Comprehensive self-improvement analysis combining:
+        1. Skill gap detection (Phase 5.2)
+        2. Runbook validation and fixes
+        3. Capability gap identification
+        4. Auto-generation of improvements
 
-        Claude will:
-        1. Review recent validation failures
-        2. Identify patterns
-        3. Generate runbook/skill improvements
-        4. Queue them for validation
+        This is the main entry point for the Forever Learning System's
+        self-evolution capabilities.
         """
-        prompt = """Analyze the system for improvement opportunities.
+        analysis_id = f"improve-{uuid4().hex[:8]}"
+        logger.info(f"[{analysis_id}] Starting comprehensive self-improvement")
 
-    Your task:
-    1. Search for recent validation failures and issues:
-    - Use mcp__knowledge__search_runbooks with "failed" or "issues"
-    - Look for patterns in what's failing
+        # Step 1: Run skill gap analysis
+        gap_analysis = await analyze_skill_gaps(
+            SkillGapAnalysisRequest(days=7, min_pattern_count=3, auto_generate=False),
+            background_tasks
+        )
 
-    2. Identify improvement opportunities:
-    - Runbooks that frequently fail validation
-    - Missing capabilities (repeated manual interventions)
-    - Common error patterns
+        # Step 2: Use Claude to review patterns and suggest improvements
+        prompt = f"""Analyze the system for improvement opportunities.
 
-    3. For each improvement opportunity:
-    - Draft the fix (runbook update, new skill, etc.)
-    - Write it to the appropriate location
-    - Add a note explaining the improvement
+    ## Skill Gap Analysis Results
+    - Events analyzed: {gap_analysis.events_analyzed}
+    - Patterns found: {len(gap_analysis.patterns_found)}
+    - Skills suggested: {len(gap_analysis.skills_suggested)}
+    - Capability gaps: {len(gap_analysis.capability_gaps)}
 
-    4. Return JSON summary:
+    Top patterns requiring skills:
+    {json.dumps(gap_analysis.skills_suggested[:5], indent=2)}
+
+    Capability gaps found:
+    {json.dumps(gap_analysis.capability_gaps[:5], indent=2)}
+
+    ## Your Tasks
+
+    1. **Review skill suggestions**: For the top 3 patterns, decide if a skill would be valuable.
+       Consider: frequency, complexity, potential for automation.
+
+    2. **Search for existing solutions**: Before generating new skills, search:
+       - Use mcp__knowledge__search_runbooks for similar runbooks
+       - Use mcp__knowledge__search_documentation for existing guides
+
+    3. **Generate improvements**:
+       - For high-priority patterns: Draft skill markdown files
+       - For capability gaps: Suggest MCP server specifications
+       - For failing runbooks: Propose fixes
+
+    4. **Write files** to appropriate locations:
+       - Skills: /workspace/skills/<name>.md
+       - Runbook fixes: Update existing runbook files
+       - MCP specs: /workspace/mcp-specs/<name>.yaml
+
+    5. Return JSON summary:
     ```json
-    {
-    "improvements_identified": 0,
-    "improvements_implemented": 0,
-    "details": [
-    {"type": "runbook", "id": "...", "change": "..."},
-    ]
-    }
-    ```"""
+    {{
+        "analysis_id": "{analysis_id}",
+        "improvements_identified": 0,
+        "improvements_implemented": 0,
+        "skills_created": [
+            {{"name": "...", "path": "...", "description": "..."}}
+        ],
+        "runbooks_fixed": [
+            {{"id": "...", "fix": "..."}}
+        ],
+        "mcps_specified": [
+            {{"name": "...", "tools": ["..."]}}
+        ],
+        "recommendations": [
+            "Human action needed for..."
+        ]
+    }}
+    ```
 
-        response = await call_claude(prompt, tools=TOOLS_FULL, model="opus", timeout=600, async_mode=True, priority=4)
+    Be thorough but focused. Only implement improvements that have clear value."""
+
+        response = await call_claude(
+            prompt,
+            tools=TOOLS_FULL,
+            model="opus",
+            timeout=600,
+            async_mode=True,
+            priority=4
+        )
 
         if response.get("task_id"):
             return {
                 "status": "queued",
+                "analysis_id": analysis_id,
                 "task_id": response.get("task_id"),
-                "message": "Self-improvement analysis queued. Poll /task/{task_id} for results."
+                "gap_analysis": {
+                    "events_analyzed": gap_analysis.events_analyzed,
+                    "skills_suggested": len(gap_analysis.skills_suggested),
+                    "capability_gaps": len(gap_analysis.capability_gaps)
+                },
+                "message": "Self-improvement analysis queued with skill gap data. Poll /task/{task_id} for results."
             }
 
-        return {"status": "started", "response": response}
+        return {
+            "status": "started",
+            "analysis_id": analysis_id,
+            "gap_analysis_id": gap_analysis.id,
+            "response": response
+        }
 
     if __name__ == "__main__":
         import uvicorn

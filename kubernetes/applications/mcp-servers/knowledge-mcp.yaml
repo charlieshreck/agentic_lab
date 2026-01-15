@@ -1113,6 +1113,174 @@ data:
                 return {"status": "error", "error": "Failed to update event"}
 
     # ============================================================================
+    # REST API - Events Query (Phase 5.2 - Skill Gap Detection)
+    # ============================================================================
+
+    async def rest_api_events(request: Request) -> JSONResponse:
+        """
+        Query agent_events collection with optional filters.
+
+        Query params:
+        - days: Look back period in days (default: 7)
+        - event_types: Comma-separated event types to filter (optional)
+        - resolution: Comma-separated resolutions to filter (optional)
+        - max_score: Maximum feedback score (optional)
+        - limit: Maximum results (default: 100)
+        """
+        try:
+            days = int(request.query_params.get("days", "7"))
+            event_types = request.query_params.get("event_types", "")
+            resolution = request.query_params.get("resolution", "")
+            max_score = request.query_params.get("max_score")
+            limit = min(int(request.query_params.get("limit", "100")), 1000)
+
+            # Build filter
+            from datetime import timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+            filter_conditions = []
+
+            # Time range filter
+            filter_conditions.append({
+                "key": "timestamp",
+                "range": {"gte": cutoff}
+            })
+
+            # Event type filter
+            if event_types:
+                types = [t.strip() for t in event_types.split(",")]
+                filter_conditions.append({
+                    "key": "event_type",
+                    "match": {"any": types}
+                })
+
+            # Resolution filter
+            if resolution:
+                resolutions = [r.strip() for r in resolution.split(",")]
+                filter_conditions.append({
+                    "key": "resolution",
+                    "match": {"any": resolutions}
+                })
+
+            # Score filter
+            if max_score:
+                filter_conditions.append({
+                    "key": "score",
+                    "range": {"lte": float(max_score)}
+                })
+
+            qdrant_filter = {"must": filter_conditions} if filter_conditions else None
+
+            # Query Qdrant
+            events = await qdrant_scroll("agent_events", qdrant_filter, limit)
+
+            # Transform results
+            result_events = []
+            for point in events:
+                payload = point.get("payload", {})
+                payload["id"] = point.get("id")
+                result_events.append(payload)
+
+            return JSONResponse({
+                "status": "ok",
+                "events": result_events,
+                "count": len(result_events),
+                "filter": {
+                    "days": days,
+                    "event_types": event_types or None,
+                    "resolution": resolution or None,
+                    "max_score": max_score
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Error querying events: {e}")
+            return JSONResponse({"status": "error", "error": str(e), "events": []}, status_code=500)
+
+    async def rest_api_find_similar_prompts(request: Request) -> JSONResponse:
+        """
+        Find groups of similar prompts using embedding similarity.
+
+        Body params:
+        - threshold: Similarity threshold (default: 0.85)
+        - min_count: Minimum group size (default: 3)
+        - days: Look back period (default: 30)
+
+        Returns groups of similar prompts that could become skills.
+        """
+        try:
+            data = await request.json()
+            threshold = float(data.get("threshold", 0.85))
+            min_count = int(data.get("min_count", 3))
+            days = int(data.get("days", 30))
+
+            # Get recent events with descriptions
+            from datetime import timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+            filter_ = {
+                "must": [
+                    {"key": "timestamp", "range": {"gte": cutoff}},
+                    {"key": "event_type", "match": {"any": ["agent.chat.complete", "task.complete"]}}
+                ]
+            }
+
+            events = await qdrant_scroll("agent_events", filter_, limit=500)
+
+            if len(events) < min_count:
+                return JSONResponse({
+                    "status": "ok",
+                    "groups": [],
+                    "message": f"Not enough events ({len(events)}) for pattern detection"
+                })
+
+            # Group by embedding similarity (simplified - use representative prompt)
+            # In production, would compare all embeddings pairwise
+            groups = []
+            seen = set()
+
+            for i, event_a in enumerate(events):
+                if event_a.get("id") in seen:
+                    continue
+
+                group = [event_a]
+                desc_a = event_a.get("payload", {}).get("description", "")
+
+                for j, event_b in enumerate(events[i+1:], start=i+1):
+                    if event_b.get("id") in seen:
+                        continue
+
+                    desc_b = event_b.get("payload", {}).get("description", "")
+
+                    # Simple similarity: check if descriptions share significant words
+                    words_a = set(desc_a.lower().split())
+                    words_b = set(desc_b.lower().split())
+                    if len(words_a) > 3 and len(words_b) > 3:
+                        overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
+                        if overlap >= threshold:
+                            group.append(event_b)
+                            seen.add(event_b.get("id"))
+
+                if len(group) >= min_count:
+                    seen.add(event_a.get("id"))
+                    groups.append({
+                        "representative_prompt": desc_a[:200],
+                        "count": len(group),
+                        "event_ids": [e.get("id") for e in group]
+                    })
+
+            return JSONResponse({
+                "status": "ok",
+                "groups": sorted(groups, key=lambda x: x["count"], reverse=True),
+                "total_events": len(events),
+                "groups_found": len(groups)
+            })
+
+        except Exception as e:
+            logger.error(f"Error finding similar prompts: {e}")
+            return JSONResponse({"status": "error", "error": str(e), "groups": []}, status_code=500)
+
+    # ============================================================================
     # MAIN
     # ============================================================================
 
@@ -1132,6 +1300,8 @@ data:
             Route("/api/runbooks", rest_api_runbooks, methods=["GET"]),
             Route("/api/log_event", rest_api_log_event, methods=["POST"]),
             Route("/api/update_event", rest_api_update_event, methods=["POST"]),
+            Route("/api/events", rest_api_events, methods=["GET"]),
+            Route("/api/find_similar_prompts", rest_api_find_similar_prompts, methods=["POST"]),
         ]
 
         mcp_app = mcp.http_app()
