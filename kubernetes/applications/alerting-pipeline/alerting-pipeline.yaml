@@ -595,8 +595,17 @@ data:
         }
 
     @app.post("/alert")
-    async def receive_alertmanager_webhook(alerts: List[dict]):
+    async def receive_alertmanager_webhook(payload: dict):
         """Receive alerts from Prometheus AlertManager webhook."""
+        # AlertManager sends: {"receiver": "...", "status": "...", "alerts": [...]}
+        # Extract alerts array from payload, or treat payload as single alert
+        if "alerts" in payload:
+            alerts = payload.get("alerts", [])
+        elif isinstance(payload, list):
+            alerts = payload
+        else:
+            alerts = [payload]  # Single alert as dict
+
         logger.info(f"Received {len(alerts)} alerts from AlertManager")
         processed = 0
 
