@@ -42,14 +42,8 @@ spec:
             secretKeyRef:
               name: openrouter-credentials
               key: OPENROUTER_API_KEY
-        # Anthropic API key for Claude models (tier3)
-        # Optional: only required if using Claude via LiteLLM
-        - name: ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: anthropic-credentials
-              key: ANTHROPIC_API_KEY
-              optional: true
+        # NOTE: Claude (tier3) is accessed via claude-agent service using
+        # Max subscription, not via LiteLLM API. No ANTHROPIC_API_KEY needed.
         resources:
           requests:
             memory: "256Mi"
