@@ -198,10 +198,11 @@ data:
     # Qdrant Operations
     # ============================================================
 
-    def generate_point_id(title: str, path: str) -> str:
+    def generate_point_id(title: str, path: str) -> int:
         """Generate consistent point ID from title and path."""
         content = f"{title}:{path}"
-        return hashlib.md5(content.encode()).hexdigest()[:16]
+        # Convert first 16 hex chars to unsigned 64-bit integer for Qdrant
+        return int(hashlib.md5(content.encode()).hexdigest()[:16], 16)
 
     def delete_existing_runbooks() -> bool:
         """Delete all existing runbooks to reindex fresh."""
