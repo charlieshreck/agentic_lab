@@ -429,8 +429,21 @@ data:
             return {"success": False, "error": str(e)}
 
     # ============================================================================
-    # EVENT HISTORY TOOLS
+    # EVENT LOGGING TOOLS - Forever Learning System
     # ============================================================================
+
+    # Valid event types for the learning system
+    EVENT_TYPES = {
+        "agent.chat.start",      # Conversation initiated
+        "agent.chat.complete",   # Conversation finished
+        "agent.tool.call",       # Tool executed
+        "agent.error",           # Error occurred
+        "validation.complete",   # Validator reviewed item
+        "runbook.executed",      # Runbook was run
+        "feedback.received",     # Human provided feedback
+        "pattern.detected",      # Pattern detector found something
+        "autonomy.upgrade",      # Runbook autonomy level changed
+    }
 
     @mcp.tool()
     async def get_similar_events(event_description: str, limit: int = 5, min_score: float = 0.7) -> List[dict]:
@@ -444,32 +457,165 @@ data:
                 "event_type": r.get("payload", {}).get("event_type", ""),
                 "description": r.get("payload", {}).get("description", ""),
                 "resolution": r.get("payload", {}).get("resolution", ""),
-                "timestamp": r.get("payload", {}).get("timestamp", "")
+                "timestamp": r.get("payload", {}).get("timestamp", ""),
+                "score_value": r.get("payload", {}).get("score"),
+                "feedback": r.get("payload", {}).get("feedback", "")
             } for r in results if r.get("score", 0) >= min_score]
         except Exception as e:
             return [{"error": str(e)}]
 
     @mcp.tool()
-    async def log_event(event_type: str, description: str, resolution: Optional[str] = None, metadata: Optional[dict] = None) -> dict:
-        """Log an event for future pattern matching."""
+    async def log_event(
+        event_type: str,
+        description: str,
+        source_agent: str = "claude-agent",
+        metadata: Optional[dict] = None,
+        resolution: Optional[str] = None
+    ) -> dict:
+        """Log an event to agent_events collection for learning.
+
+        Foundation of the Forever Learning System - every interaction is logged
+        for pattern detection, feedback tracking, and autonomy progression.
+
+        Args:
+            event_type: Type of event (agent.chat.start, agent.chat.complete,
+                       agent.tool.call, agent.error, validation.complete,
+                       runbook.executed, feedback.received, pattern.detected, autonomy.upgrade)
+            description: Natural language description of the event
+            source_agent: Source (claude-agent, claude-validator, langgraph)
+            metadata: Additional context (task_id, model, latency_ms, tools_used)
+            resolution: Outcome (completed, failed, pending)
+
+        Returns:
+            Status with event ID for later feedback
+        """
         try:
             point_id = str(uuid.uuid4())
-            vector = await get_embedding(f"{event_type}: {description}")
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            combined_text = f"{event_type}: {description}"
+            if resolution:
+                combined_text += f" - {resolution}"
+            vector = await get_embedding(combined_text)
+
             point = {
                 "id": point_id,
                 "vector": vector,
                 "payload": {
                     "event_type": event_type,
                     "description": description,
-                    "resolution": resolution or "",
+                    "source_agent": source_agent,
+                    "timestamp": timestamp,
                     "metadata": metadata or {},
-                    "timestamp": datetime.now(timezone.utc).isoformat()
+                    "resolution": resolution or "",
+                    "score": None,
+                    "feedback": None
                 }
             }
             success = await qdrant_upsert("agent_events", [point])
-            return {"success": success, "id": point_id}
+            if success:
+                logger.info(f"Logged event {event_type} with ID {point_id}")
+            return {"success": success, "id": point_id, "timestamp": timestamp}
         except Exception as e:
+            logger.error(f"log_event failed: {e}")
             return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def update_event(
+        event_id: str,
+        score: Optional[float] = None,
+        feedback: Optional[str] = None,
+        resolution: Optional[str] = None
+    ) -> dict:
+        """Update an existing event with feedback or outcome.
+
+        Used by feedback loop to record human feedback on agent actions,
+        enabling the system to learn from successes and failures.
+
+        Args:
+            event_id: UUID of the event to update
+            score: Feedback score 0.0-1.0 (0=failed, 0.5=partial, 1.0=perfect)
+            feedback: Human feedback text
+            resolution: Updated resolution (resolved, partial, failed, escalated)
+
+        Returns:
+            Status of the update operation
+        """
+        try:
+            point = await qdrant_get_point("agent_events", event_id)
+            if not point:
+                return {"success": False, "error": f"Event not found: {event_id}"}
+
+            payload = point.get("payload", {})
+
+            if score is not None:
+                if not 0.0 <= score <= 1.0:
+                    return {"success": False, "error": "Score must be between 0.0 and 1.0"}
+                payload["score"] = score
+            if feedback is not None:
+                payload["feedback"] = feedback
+            if resolution is not None:
+                payload["resolution"] = resolution
+
+            payload["feedback_at"] = datetime.now(timezone.utc).isoformat()
+
+            combined_text = f"{payload.get('event_type', '')}: {payload.get('description', '')}"
+            if payload.get("resolution"):
+                combined_text += f" - {payload['resolution']}"
+            if payload.get("feedback"):
+                combined_text += f" (feedback: {payload['feedback']})"
+            vector = await get_embedding(combined_text)
+
+            updated_point = {"id": event_id, "vector": vector, "payload": payload}
+            success = await qdrant_upsert("agent_events", [updated_point])
+            if success:
+                logger.info(f"Updated event {event_id} with score={score}, resolution={resolution}")
+            return {"success": success, "id": event_id}
+        except Exception as e:
+            logger.error(f"update_event failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    async def get_event(event_id: str) -> dict:
+        """Get a specific event by ID."""
+        try:
+            point = await qdrant_get_point("agent_events", event_id)
+            if not point:
+                return {"error": f"Event not found: {event_id}"}
+            payload = point.get("payload", {})
+            payload["id"] = event_id
+            return payload
+        except Exception as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def list_recent_events(
+        event_type: Optional[str] = None,
+        source_agent: Optional[str] = None,
+        limit: int = 50
+    ) -> List[dict]:
+        """List recent events, optionally filtered by type or source."""
+        try:
+            filter_ = None
+            must = []
+            if event_type:
+                must.append({"key": "event_type", "match": {"value": event_type}})
+            if source_agent:
+                must.append({"key": "source_agent", "match": {"value": source_agent}})
+            if must:
+                filter_ = {"must": must}
+
+            results = await qdrant_scroll("agent_events", filter_, limit=limit)
+            events = []
+            for r in results:
+                payload = r.get("payload", {})
+                payload["id"] = str(r.get("id", ""))
+                events.append(payload)
+            events.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            return events
+        except Exception as e:
+            logger.error(f"list_recent_events failed: {e}")
+            return [{"error": str(e)}]
 
     # ============================================================================
     # UNIFIED SEARCH

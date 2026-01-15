@@ -501,6 +501,240 @@ async def get_similar_events(
 
 
 # ============================================================
+# EVENT LOGGING TOOLS - Forever Learning System
+# ============================================================
+
+# Valid event types for the learning system
+EVENT_TYPES = {
+    "agent.chat.start",      # Conversation initiated
+    "agent.chat.complete",   # Conversation finished
+    "agent.tool.call",       # Tool executed
+    "agent.error",           # Error occurred
+    "validation.complete",   # Validator reviewed item
+    "runbook.executed",      # Runbook was run
+    "feedback.received",     # Human provided feedback
+    "pattern.detected",      # Pattern detector found something
+    "autonomy.upgrade",      # Runbook autonomy level changed
+}
+
+
+@mcp.tool()
+async def log_event(
+    event_type: str,
+    description: str,
+    source_agent: str = "claude-agent",
+    metadata: Optional[dict] = None,
+    resolution: Optional[str] = None
+) -> dict:
+    """
+    Log an event to the agent_events collection for learning.
+
+    This is the foundation of the Forever Learning System - every interaction
+    is logged here for pattern detection, feedback tracking, and autonomy progression.
+
+    Args:
+        event_type: Type of event. Valid types:
+            - agent.chat.start: Conversation initiated
+            - agent.chat.complete: Conversation finished
+            - agent.tool.call: Tool executed
+            - agent.error: Error occurred
+            - validation.complete: Validator reviewed item
+            - runbook.executed: Runbook was run
+            - feedback.received: Human provided feedback
+            - pattern.detected: Pattern detector found something
+            - autonomy.upgrade: Runbook autonomy level changed
+        description: Natural language description of the event
+        source_agent: Source of the event (default: claude-agent)
+        metadata: Additional context (task_id, model, latency_ms, tools_used, etc.)
+        resolution: What happened / outcome (completed, failed, pending)
+
+    Returns:
+        Status with event ID for later feedback
+    """
+    try:
+        import uuid
+
+        # Validate event type
+        if event_type not in EVENT_TYPES:
+            logger.warning(f"Unknown event type: {event_type}. Logging anyway.")
+
+        point_id = str(uuid.uuid4())
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Build combined text for embedding (description + event type for semantic search)
+        combined_text = f"{event_type}: {description}"
+        if resolution:
+            combined_text += f" - {resolution}"
+        vector = await get_embedding(combined_text)
+
+        payload = {
+            "event_type": event_type,
+            "description": description,
+            "source_agent": source_agent,
+            "timestamp": timestamp,
+            "metadata": metadata or {},
+            "resolution": resolution or "",
+            "score": None,  # Will be set by feedback
+            "feedback": None  # Will be set by feedback
+        }
+
+        point = {
+            "id": point_id,
+            "vector": vector,
+            "payload": payload
+        }
+
+        success = await qdrant_upsert("agent_events", [point])
+
+        if success:
+            logger.info(f"Logged event {event_type} with ID {point_id}")
+
+        return {"success": success, "id": point_id, "timestamp": timestamp}
+    except Exception as e:
+        logger.error(f"Log event failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def update_event(
+    event_id: str,
+    score: Optional[float] = None,
+    feedback: Optional[str] = None,
+    resolution: Optional[str] = None
+) -> dict:
+    """
+    Update an existing event with feedback or outcome.
+
+    Used by the feedback loop to record human feedback on agent actions,
+    enabling the system to learn from successes and failures.
+
+    Args:
+        event_id: UUID of the event to update
+        score: Feedback score 0.0-1.0 (0=failed, 0.5=partial, 1.0=perfect)
+        feedback: Human feedback text explaining the score
+        resolution: Updated resolution status (resolved, partial, failed, escalated)
+
+    Returns:
+        Status of the update operation
+    """
+    try:
+        # Get the existing event
+        point = await qdrant_get_by_id("agent_events", event_id)
+        if not point:
+            return {"success": False, "error": f"Event not found: {event_id}"}
+
+        payload = point.get("payload", {})
+
+        # Update fields if provided
+        if score is not None:
+            if not 0.0 <= score <= 1.0:
+                return {"success": False, "error": "Score must be between 0.0 and 1.0"}
+            payload["score"] = score
+
+        if feedback is not None:
+            payload["feedback"] = feedback
+
+        if resolution is not None:
+            payload["resolution"] = resolution
+
+        # Add feedback timestamp
+        payload["feedback_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Regenerate embedding with feedback context for better similarity matching
+        combined_text = f"{payload.get('event_type', '')}: {payload.get('description', '')}"
+        if payload.get("resolution"):
+            combined_text += f" - {payload['resolution']}"
+        if payload.get("feedback"):
+            combined_text += f" (feedback: {payload['feedback']})"
+
+        vector = await get_embedding(combined_text)
+
+        updated_point = {
+            "id": event_id,
+            "vector": vector,
+            "payload": payload
+        }
+
+        success = await qdrant_upsert("agent_events", [updated_point])
+
+        if success:
+            logger.info(f"Updated event {event_id} with score={score}, resolution={resolution}")
+
+        return {"success": success, "id": event_id}
+    except Exception as e:
+        logger.error(f"Update event failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def get_event(event_id: str) -> Optional[dict]:
+    """
+    Get a specific event by ID.
+
+    Args:
+        event_id: UUID of the event
+
+    Returns:
+        Event details or None if not found
+    """
+    try:
+        point = await qdrant_get_by_id("agent_events", event_id)
+        if not point:
+            return None
+        return point.get("payload", {})
+    except Exception as e:
+        logger.error(f"Get event failed: {e}")
+        return None
+
+
+@mcp.tool()
+async def list_recent_events(
+    event_type: Optional[str] = None,
+    source_agent: Optional[str] = None,
+    limit: int = 50
+) -> List[dict]:
+    """
+    List recent events, optionally filtered by type or source.
+
+    Args:
+        event_type: Filter by event type (optional)
+        source_agent: Filter by source agent (optional)
+        limit: Maximum events to return (default: 50)
+
+    Returns:
+        List of recent events (most recent first)
+    """
+    try:
+        filter_conditions = None
+        must_conditions = []
+
+        if event_type:
+            must_conditions.append({"key": "event_type", "match": {"value": event_type}})
+        if source_agent:
+            must_conditions.append({"key": "source_agent", "match": {"value": source_agent}})
+
+        if must_conditions:
+            filter_conditions = {"must": must_conditions}
+
+        results = await qdrant_scroll("agent_events", filter_conditions, limit=limit)
+
+        # Extract payloads and sort by timestamp (descending)
+        events = []
+        for r in results:
+            payload = r.get("payload", {})
+            payload["id"] = str(r.get("id", ""))
+            events.append(payload)
+
+        # Sort by timestamp descending
+        events.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+        return events
+    except Exception as e:
+        logger.error(f"List recent events failed: {e}")
+        return []
+
+
+# ============================================================
 # ENTITY TOOLS - Network Device Intelligence
 # ============================================================
 
