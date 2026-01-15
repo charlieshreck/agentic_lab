@@ -25,10 +25,40 @@ data:
     from typing import Optional, List, Dict, Any
     from contextlib import asynccontextmanager
 
-    from fastapi import FastAPI, HTTPException, BackgroundTasks
+    from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
     from pydantic import BaseModel
     import httpx
     import redis.asyncio as redis
+    from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+
+    # ============================================================================
+    # Prometheus Metrics (Forever Learning System - Phase 4)
+    # ============================================================================
+
+    TASKS_TOTAL = Counter(
+        'claude_agent_tasks_total',
+        'Total number of tasks processed',
+        ['status', 'model']
+    )
+    TASK_DURATION = Histogram(
+        'claude_agent_task_duration_seconds',
+        'Task execution duration in seconds',
+        ['model'],
+        buckets=[1, 5, 10, 30, 60, 120, 300, 600]
+    )
+    QUEUE_SIZE = Gauge(
+        'claude_agent_queue_size',
+        'Current number of tasks in queue'
+    )
+    ACTIVE_WORKERS = Gauge(
+        'claude_agent_active_workers',
+        'Number of active worker instances'
+    )
+    EVENTS_LOGGED = Counter(
+        'claude_agent_events_logged_total',
+        'Total events logged to knowledge system',
+        ['event_type', 'success']
+    )
 
     # Redis configuration
     REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
@@ -113,11 +143,14 @@ data:
                 if resp.status_code == 200:
                     data = resp.json()
                     print(f"[Learning] Logged event {data.get('event_id', 'unknown')}: {event_type}")
+                    EVENTS_LOGGED.labels(event_type=event_type, success="true").inc()
                 else:
                     print(f"[Learning] Failed to log event: {resp.status_code}")
+                    EVENTS_LOGGED.labels(event_type=event_type, success="false").inc()
         except Exception as e:
             # Don't fail the main task if logging fails
             print(f"[Learning] Error logging event: {e}")
+            EVENTS_LOGGED.labels(event_type=event_type, success="false").inc()
 
     # ============================================================================
     # Redis Task Queue Functions
@@ -314,6 +347,17 @@ data:
             mcp_servers=mcp_health
         )
 
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus metrics endpoint."""
+        # Update queue size gauge
+        try:
+            stats = await get_queue_stats()
+            QUEUE_SIZE.set(stats.get("queue_length", 0))
+        except Exception:
+            pass
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
     def _run_claude_sync(cmd: List[str], cwd: str, env: dict, timeout: int) -> tuple:
         """Run Claude CLI synchronously (called from thread pool)."""
         try:
@@ -372,8 +416,13 @@ data:
 
             # Calculate latency
             latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+            latency_sec = latency_ms / 1000.0
+
+            # Record Prometheus metrics
+            TASK_DURATION.labels(model=model).observe(latency_sec)
 
             if returncode == 0:
+                TASKS_TOTAL.labels(status="completed", model=model).inc()
                 await update_task_result(task_id, "completed", result=stdout)
                 # Log success to learning system
                 await log_to_knowledge(
@@ -386,6 +435,7 @@ data:
                     latency_ms=latency_ms
                 )
             else:
+                TASKS_TOTAL.labels(status="failed", model=model).inc()
                 await update_task_result(task_id, "failed", result=stdout, error=stderr or "Unknown error")
                 # Log failure to learning system
                 await log_to_knowledge(
@@ -399,6 +449,8 @@ data:
                 )
         except Exception as e:
             latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+            TASKS_TOTAL.labels(status="error", model=model).inc()
+            TASK_DURATION.labels(model=model).observe(latency_ms / 1000.0)
             await update_task_result(task_id, "failed", error=str(e))
             # Log exception to learning system
             await log_to_knowledge(
@@ -418,21 +470,29 @@ data:
         """Background worker that processes tasks from Redis queue."""
         global worker_running
         print(f"[Worker {WORKER_ID}] Starting worker loop...")
-        while worker_running:
-            try:
-                task = await dequeue_task()
-                if task:
-                    task_id, task_data = task
-                    print(f"[Worker {WORKER_ID}] Processing task {task_id}")
-                    await execute_task(task_id, task_data)
-                    print(f"[Worker {WORKER_ID}] Completed task {task_id}")
-                else:
-                    # No tasks, wait before polling again
-                    await asyncio.sleep(1)
-            except Exception as e:
-                print(f"[Worker {WORKER_ID}] Error in worker loop: {e}")
-                await asyncio.sleep(5)
-        print(f"[Worker {WORKER_ID}] Worker loop stopped")
+        ACTIVE_WORKERS.inc()  # Track active worker
+        try:
+            while worker_running:
+                try:
+                    # Update queue size periodically
+                    stats = await get_queue_stats()
+                    QUEUE_SIZE.set(stats.get("queue_length", 0))
+
+                    task = await dequeue_task()
+                    if task:
+                        task_id, task_data = task
+                        print(f"[Worker {WORKER_ID}] Processing task {task_id}")
+                        await execute_task(task_id, task_data)
+                        print(f"[Worker {WORKER_ID}] Completed task {task_id}")
+                    else:
+                        # No tasks, wait before polling again
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"[Worker {WORKER_ID}] Error in worker loop: {e}")
+                    await asyncio.sleep(5)
+        finally:
+            ACTIVE_WORKERS.dec()  # Track worker shutdown
+            print(f"[Worker {WORKER_ID}] Worker loop stopped")
 
     @app.post("/agent/run", response_model=AgentResponse)
     async def run_agent(request: AgentRequest, background_tasks: BackgroundTasks):
@@ -668,3 +728,4 @@ data:
     httpx>=0.26.0
     pydantic>=2.5.0
     redis>=5.0.0
+    prometheus-client>=0.19.0
