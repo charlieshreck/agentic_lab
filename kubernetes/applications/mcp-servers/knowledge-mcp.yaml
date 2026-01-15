@@ -1134,19 +1134,13 @@ data:
             max_score = request.query_params.get("max_score")
             limit = min(int(request.query_params.get("limit", "100")), 1000)
 
-            # Build filter
+            # Build filter conditions
             from datetime import timedelta
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
             filter_conditions = []
 
-            # Time range filter
-            filter_conditions.append({
-                "key": "timestamp",
-                "range": {"gte": cutoff}
-            })
-
-            # Event type filter
+            # Event type filter (only if specified - skip time filter as it's string-based)
             if event_types:
                 types = [t.strip() for t in event_types.split(",")]
                 filter_conditions.append({
@@ -1162,24 +1156,28 @@ data:
                     "match": {"any": resolutions}
                 })
 
-            # Score filter
-            if max_score:
-                filter_conditions.append({
-                    "key": "score",
-                    "range": {"lte": float(max_score)}
-                })
-
+            # Only apply filter if we have conditions
             qdrant_filter = {"must": filter_conditions} if filter_conditions else None
 
             # Query Qdrant
             events = await qdrant_scroll("agent_events", qdrant_filter, limit)
 
-            # Transform results
+            # Post-filter by timestamp (since range on string isn't supported)
             result_events = []
             for point in events:
                 payload = point.get("payload", {})
-                payload["id"] = point.get("id")
-                result_events.append(payload)
+                timestamp = payload.get("timestamp", "")
+
+                # Filter by timestamp (string comparison works for ISO format)
+                if timestamp >= cutoff:
+                    # Apply score filter if specified
+                    if max_score:
+                        score = payload.get("score")
+                        if score is not None and score > float(max_score):
+                            continue
+
+                    payload["id"] = point.get("id")
+                    result_events.append(payload)
 
             return JSONResponse({
                 "status": "ok",
@@ -1214,27 +1212,31 @@ data:
             min_count = int(data.get("min_count", 3))
             days = int(data.get("days", 30))
 
-            # Get recent events with descriptions
             from datetime import timedelta
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-            filter_ = {
-                "must": [
-                    {"key": "timestamp", "range": {"gte": cutoff}},
-                    {"key": "event_type", "match": {"any": ["agent.chat.complete", "task.complete"]}}
-                ]
-            }
+            # Get all events (no filter - will post-filter)
+            all_events = await qdrant_scroll("agent_events", None, limit=500)
 
-            events = await qdrant_scroll("agent_events", filter_, limit=500)
+            # Post-filter by timestamp and event type
+            events = []
+            for event in all_events:
+                payload = event.get("payload", {})
+                timestamp = payload.get("timestamp", "")
+                event_type = payload.get("event_type", "")
+
+                if timestamp >= cutoff and event_type in ["agent.chat.complete", "task.complete", "task_completed"]:
+                    events.append(event)
 
             if len(events) < min_count:
                 return JSONResponse({
                     "status": "ok",
                     "groups": [],
-                    "message": f"Not enough events ({len(events)}) for pattern detection"
+                    "message": f"Not enough matching events ({len(events)}) for pattern detection",
+                    "total_events_scanned": len(all_events)
                 })
 
-            # Group by embedding similarity (simplified - use representative prompt)
+            # Group by text similarity (simplified - use word overlap)
             # In production, would compare all embeddings pairwise
             groups = []
             seen = set()
@@ -1272,7 +1274,8 @@ data:
             return JSONResponse({
                 "status": "ok",
                 "groups": sorted(groups, key=lambda x: x["count"], reverse=True),
-                "total_events": len(events),
+                "total_events_scanned": len(all_events),
+                "matching_events": len(events),
                 "groups_found": len(groups)
             })
 
