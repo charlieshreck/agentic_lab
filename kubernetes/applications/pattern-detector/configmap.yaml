@@ -18,33 +18,57 @@ data:
     Pattern Detector - Forever Learning System Phase 5
 
     Runs daily to:
-    1. Find repeated similar prompts -> suggest skill generation
+    1. Find repeated similar events -> suggest skill generation
     2. Find failing runbooks -> queue for review
     3. Find capability gaps from errors -> suggest MCP generation
     4. Identify autonomy candidates -> notify for upgrade
+
+    Uses direct Qdrant queries for reliable batch processing.
     """
     import asyncio
     import os
-    import json
+    import uuid
     from datetime import datetime, timedelta
     from collections import defaultdict
+    from typing import List, Optional
     import httpx
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, DatetimeRange
 
     # Configuration
-    KNOWLEDGE_MCP_URL = os.getenv("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
+    QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
     MATRIX_WEBHOOK_URL = os.getenv("MATRIX_WEBHOOK_URL", "")
     DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+    # Collections
+    EVENTS_COLLECTION = "agent_events"
+    RUNBOOKS_COLLECTION = "runbooks"
+
+    # Initialize Qdrant client
+    qdrant = QdrantClient(url=QDRANT_URL)
 
 
-    async def call_knowledge_mcp(tool: str, params: dict) -> dict:
-        """Call knowledge-mcp tool."""
+    async def get_embedding(text: str) -> List[float]:
+        """Get embedding from Gemini API."""
+        if not GEMINI_API_KEY:
+            print("[WARN] No GEMINI_API_KEY configured, skipping embedding")
+            return []
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{KNOWLEDGE_MCP_URL}/tools/{tool}",
-                json=params
+                "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent",
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "model": "models/text-embedding-004",
+                    "content": {"parts": [{"text": text}]},
+                    "taskType": "RETRIEVAL_QUERY"
+                }
             )
-            response.raise_for_status()
-            return response.json()
+            if response.status_code == 200:
+                return response.json()["embedding"]["values"]
+            print(f"[WARN] Embedding API returned {response.status_code}")
+            return []
 
 
     async def notify_matrix(message: str):
@@ -63,142 +87,211 @@ data:
             print(f"[WARN] Failed to notify Matrix: {e}")
 
 
-    async def find_similar_prompts():
-        """Find repeated similar prompts that could become skills."""
-        print("\n=== Finding Similar Prompts ===")
-
+    def get_recent_events(hours: int = 24, event_type: Optional[str] = None) -> List[dict]:
+        """Get recent events from Qdrant."""
         try:
-            # Get recent events
-            result = await call_knowledge_mcp("get_similar_events", {
-                "event_description": "agent.chat.complete",
-                "limit": 100,
-                "min_score": 0.85
-            })
+            cutoff = datetime.now() - timedelta(hours=hours)
 
-            events = result.get("events", [])
-            if not events:
-                print("No similar events found")
-                return []
+            conditions = []
+            if event_type:
+                conditions.append(
+                    FieldCondition(key="event_type", match=MatchValue(value=event_type))
+                )
 
-            # Group by similarity
-            clusters = defaultdict(list)
-            for event in events:
-                desc = event.get("description", "")[:100]
-                clusters[desc].append(event)
+            filter_obj = Filter(must=conditions) if conditions else None
 
-            suggestions = []
-            for desc, cluster in clusters.items():
-                if len(cluster) >= 3:
-                    suggestions.append({
-                        "type": "skill_candidate",
-                        "pattern": desc,
-                        "occurrences": len(cluster),
-                        "suggestion": f"Consider creating a skill for: {desc}"
-                    })
-                    print(f"[SKILL CANDIDATE] {desc} (occurred {len(cluster)} times)")
+            results, _ = qdrant.scroll(
+                collection_name=EVENTS_COLLECTION,
+                scroll_filter=filter_obj,
+                limit=500,
+                with_payload=True
+            )
 
-            return suggestions
+            events = []
+            for point in results:
+                payload = point.payload or {}
+                timestamp_str = payload.get("timestamp", "")
+                if timestamp_str:
+                    try:
+                        timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+                        if timestamp.replace(tzinfo=None) >= cutoff:
+                            events.append({
+                                "id": str(point.id),
+                                **payload
+                            })
+                    except (ValueError, TypeError):
+                        pass
 
+            return events
         except Exception as e:
-            print(f"[ERROR] Failed to find similar prompts: {e}")
+            print(f"[ERROR] Failed to get events: {e}")
             return []
 
 
-    async def find_failing_runbooks():
+    def get_runbooks() -> List[dict]:
+        """Get all runbooks from Qdrant."""
+        try:
+            results, _ = qdrant.scroll(
+                collection_name=RUNBOOKS_COLLECTION,
+                limit=200,
+                with_payload=True
+            )
+            return [{
+                "id": str(point.id),
+                **(point.payload or {})
+            } for point in results]
+        except Exception as e:
+            print(f"[ERROR] Failed to get runbooks: {e}")
+            return []
+
+
+    async def find_event_patterns() -> List[dict]:
+        """Find patterns in recent events that could become skills."""
+        print("\n=== Finding Event Patterns ===")
+
+        events = get_recent_events(hours=168)  # Last 7 days
+        if not events:
+            print("No recent events found")
+            return []
+
+        print(f"Found {len(events)} events in last 7 days")
+
+        # Group by event type
+        by_type = defaultdict(list)
+        for event in events:
+            event_type = event.get("event_type", "unknown")
+            by_type[event_type].append(event)
+
+        suggestions = []
+
+        # Report event type distribution
+        for event_type, type_events in by_type.items():
+            print(f"  {event_type}: {len(type_events)} events")
+
+            # Check for high-frequency patterns
+            if len(type_events) >= 10 and event_type.startswith("agent."):
+                # Analyze descriptions for common patterns
+                desc_patterns = defaultdict(int)
+                for event in type_events:
+                    desc = event.get("description", "")[:80]  # First 80 chars
+                    desc_patterns[desc] += 1
+
+                for desc, count in desc_patterns.items():
+                    if count >= 3:
+                        suggestions.append({
+                            "type": "skill_candidate",
+                            "event_type": event_type,
+                            "pattern": desc,
+                            "occurrences": count,
+                            "suggestion": f"Consider skill for: {desc}"
+                        })
+                        print(f"[SKILL CANDIDATE] {desc} ({count} occurrences)")
+
+        return suggestions
+
+
+    async def find_failing_runbooks() -> List[dict]:
         """Find runbooks with low success rates."""
         print("\n=== Finding Failing Runbooks ===")
 
-        try:
-            # Get all runbooks
-            result = await call_knowledge_mcp("list_runbooks", {"limit": 100})
-            runbooks = result.get("runbooks", [])
-
-            failing = []
-            for runbook in runbooks:
-                # Check if runbook has execution metadata
-                execution_count = runbook.get("metadata", {}).get("execution_count", 0)
-                success_rate = runbook.get("metadata", {}).get("success_rate", 1.0)
-
-                if execution_count >= 5 and success_rate < 0.7:
-                    failing.append({
-                        "type": "failing_runbook",
-                        "runbook_id": runbook.get("id"),
-                        "title": runbook.get("title"),
-                        "success_rate": success_rate,
-                        "execution_count": execution_count,
-                        "suggestion": f"Review runbook: {runbook.get('title')} (success rate: {success_rate:.0%})"
-                    })
-                    print(f"[FAILING RUNBOOK] {runbook.get('title')} - {success_rate:.0%} success rate")
-
-            return failing
-
-        except Exception as e:
-            print(f"[ERROR] Failed to find failing runbooks: {e}")
+        runbooks = get_runbooks()
+        if not runbooks:
+            print("No runbooks found")
             return []
 
+        print(f"Checking {len(runbooks)} runbooks")
 
-    async def find_capability_gaps():
+        failing = []
+        for runbook in runbooks:
+            metadata = runbook.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            execution_count = metadata.get("execution_count", 0)
+            success_rate = metadata.get("success_rate", 1.0)
+
+            if execution_count >= 5 and success_rate < 0.7:
+                failing.append({
+                    "type": "failing_runbook",
+                    "runbook_id": runbook.get("id"),
+                    "title": runbook.get("title"),
+                    "success_rate": success_rate,
+                    "execution_count": execution_count,
+                    "suggestion": f"Review runbook: {runbook.get('title')} ({success_rate:.0%} success rate)"
+                })
+                print(f"[FAILING] {runbook.get('title')} - {success_rate:.0%} over {execution_count} executions")
+
+        if not failing:
+            print("No failing runbooks found")
+
+        return failing
+
+
+    async def find_capability_gaps() -> List[dict]:
         """Find errors that indicate missing capabilities."""
         print("\n=== Finding Capability Gaps ===")
 
-        try:
-            # Search for error events
-            result = await call_knowledge_mcp("get_similar_events", {
-                "event_description": "agent.error tool not found",
-                "limit": 50,
-                "min_score": 0.7
-            })
-
-            events = result.get("events", [])
-
-            # Analyze error patterns
-            error_patterns = defaultdict(int)
-            for event in events:
-                desc = event.get("description", "")
-                # Extract error type
-                if "tool not found" in desc.lower():
-                    error_patterns["missing_tool"] += 1
-                elif "timeout" in desc.lower():
-                    error_patterns["timeout"] += 1
-                elif "permission" in desc.lower():
-                    error_patterns["permission"] += 1
-
-            gaps = []
-            for pattern, count in error_patterns.items():
-                if count >= 3:
-                    gaps.append({
-                        "type": "capability_gap",
-                        "pattern": pattern,
-                        "occurrences": count,
-                        "suggestion": f"Consider addressing capability gap: {pattern} ({count} occurrences)"
-                    })
-                    print(f"[CAPABILITY GAP] {pattern} (occurred {count} times)")
-
-            return gaps
-
-        except Exception as e:
-            print(f"[ERROR] Failed to find capability gaps: {e}")
+        # Get error events
+        events = get_recent_events(hours=168, event_type="agent.error")
+        if not events:
+            print("No error events found")
             return []
 
+        print(f"Analyzing {len(events)} error events")
 
-    async def find_autonomy_candidates():
+        # Analyze error patterns
+        error_patterns = defaultdict(list)
+        for event in events:
+            desc = event.get("description", "").lower()
+            if "tool not found" in desc or "no tool" in desc:
+                error_patterns["missing_tool"].append(event)
+            elif "timeout" in desc:
+                error_patterns["timeout"].append(event)
+            elif "permission" in desc or "access denied" in desc:
+                error_patterns["permission"].append(event)
+            elif "connection" in desc or "unreachable" in desc:
+                error_patterns["connectivity"].append(event)
+
+        gaps = []
+        for pattern, pattern_events in error_patterns.items():
+            if len(pattern_events) >= 3:
+                gaps.append({
+                    "type": "capability_gap",
+                    "pattern": pattern,
+                    "occurrences": len(pattern_events),
+                    "recent_examples": [e.get("description", "")[:100] for e in pattern_events[:3]],
+                    "suggestion": f"Address capability gap: {pattern} ({len(pattern_events)} occurrences)"
+                })
+                print(f"[GAP] {pattern}: {len(pattern_events)} occurrences")
+
+        if not gaps:
+            print("No significant capability gaps found")
+
+        return gaps
+
+
+    async def find_autonomy_candidates() -> List[dict]:
         """Find runbooks eligible for autonomy upgrade."""
         print("\n=== Finding Autonomy Candidates ===")
 
-        try:
-            # Get all runbooks
-            result = await call_knowledge_mcp("list_runbooks", {"limit": 100})
-            runbooks = result.get("runbooks", [])
+        runbooks = get_runbooks()
+        if not runbooks:
+            print("No runbooks found")
+            return []
 
-            candidates = []
-            for runbook in runbooks:
-                metadata = runbook.get("metadata", {})
-                execution_count = metadata.get("execution_count", 0)
-                success_rate = metadata.get("success_rate", 0.0)
-                autonomy_level = metadata.get("autonomy_level", "manual")
+        candidates = []
+        for runbook in runbooks:
+            metadata = runbook.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
 
-                # Check if eligible for upgrade
-                if execution_count >= 10 and success_rate >= 0.9 and autonomy_level == "manual":
+            execution_count = metadata.get("execution_count", 0)
+            success_rate = metadata.get("success_rate", 0.0)
+            autonomy_level = metadata.get("autonomy_level", "manual")
+
+            # Check if eligible for upgrade
+            if execution_count >= 10 and success_rate >= 0.9:
+                if autonomy_level == "manual":
                     candidates.append({
                         "type": "autonomy_candidate",
                         "runbook_id": runbook.get("id"),
@@ -206,28 +299,83 @@ data:
                         "success_rate": success_rate,
                         "execution_count": execution_count,
                         "current_level": autonomy_level,
-                        "suggestion": f"Runbook '{runbook.get('title')}' eligible for autonomy upgrade (success rate: {success_rate:.0%})"
+                        "target_level": "prompted",
+                        "suggestion": f"Upgrade '{runbook.get('title')}' to prompted ({success_rate:.0%} success)"
                     })
-                    print(f"[AUTONOMY CANDIDATE] {runbook.get('title')} - {success_rate:.0%} success rate over {execution_count} executions")
+                elif autonomy_level == "prompted" and success_rate >= 0.95:
+                    candidates.append({
+                        "type": "autonomy_candidate",
+                        "runbook_id": runbook.get("id"),
+                        "title": runbook.get("title"),
+                        "success_rate": success_rate,
+                        "execution_count": execution_count,
+                        "current_level": autonomy_level,
+                        "target_level": "standard",
+                        "suggestion": f"Upgrade '{runbook.get('title')}' to standard ({success_rate:.0%} success)"
+                    })
 
-            return candidates
+        for c in candidates:
+            print(f"[AUTONOMY] {c['title']}: {c['current_level']} → {c['target_level']}")
 
+        if not candidates:
+            print("No autonomy candidates found")
+
+        return candidates
+
+
+    def get_event_stats() -> dict:
+        """Get statistics about agent_events collection."""
+        try:
+            info = qdrant.get_collection(EVENTS_COLLECTION)
+            return {
+                "total_points": info.points_count,
+                "vectors_count": info.vectors_count,
+                "status": info.status
+            }
         except Exception as e:
-            print(f"[ERROR] Failed to find autonomy candidates: {e}")
-            return []
+            return {"error": str(e)}
 
 
-    async def cleanup_old_events():
-        """Archive events older than 90 days (future implementation)."""
-        print("\n=== Event Cleanup ===")
-        # This is a placeholder for future implementation
-        # For now, just log what would be cleaned up
-        cutoff = datetime.now() - timedelta(days=90)
-        print(f"Would archive events older than {cutoff.isoformat()}")
-        print("Event cleanup not yet implemented - events are retained")
+    def log_analysis_event(findings: List[dict]) -> bool:
+        """Log the pattern analysis to agent_events."""
+        if DRY_RUN:
+            print("[DRY RUN] Would log analysis event")
+            return True
+
+        try:
+            event_id = str(uuid.uuid4())
+            timestamp = datetime.now().isoformat()
+
+            # Create point
+            qdrant.upsert(
+                collection_name=EVENTS_COLLECTION,
+                points=[{
+                    "id": event_id,
+                    "payload": {
+                        "event_type": "pattern.analysis",
+                        "timestamp": timestamp,
+                        "source_agent": "pattern-detector",
+                        "description": f"Daily pattern analysis completed. Found {len(findings)} items.",
+                        "metadata": {
+                            "findings_count": len(findings),
+                            "skill_candidates": len([f for f in findings if f.get("type") == "skill_candidate"]),
+                            "failing_runbooks": len([f for f in findings if f.get("type") == "failing_runbook"]),
+                            "capability_gaps": len([f for f in findings if f.get("type") == "capability_gap"]),
+                            "autonomy_candidates": len([f for f in findings if f.get("type") == "autonomy_candidate"])
+                        },
+                        "resolution": "completed"
+                    },
+                    "vector": [0.0] * 768  # Placeholder vector
+                }]
+            )
+            print(f"[LOG] Analysis event logged: {event_id}")
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to log analysis event: {e}")
+            return False
 
 
-    async def generate_report(findings: list) -> str:
+    def generate_report(findings: List[dict]) -> str:
         """Generate a summary report of all findings."""
         report_lines = [
             "# Pattern Detector Daily Report",
@@ -240,7 +388,7 @@ data:
         capability_gaps = [f for f in findings if f.get("type") == "capability_gap"]
         autonomy_candidates = [f for f in findings if f.get("type") == "autonomy_candidate"]
 
-        report_lines.append(f"## Summary")
+        report_lines.append("## Summary")
         report_lines.append(f"- Skill Candidates: {len(skill_candidates)}")
         report_lines.append(f"- Failing Runbooks: {len(failing_runbooks)}")
         report_lines.append(f"- Capability Gaps: {len(capability_gaps)}")
@@ -279,43 +427,28 @@ data:
         print("=" * 60)
         print("Pattern Detector - Forever Learning System")
         print(f"Started at: {datetime.now().isoformat()}")
-        print(f"Knowledge MCP URL: {KNOWLEDGE_MCP_URL}")
+        print(f"Qdrant URL: {QDRANT_URL}")
         print(f"Dry Run: {DRY_RUN}")
         print("=" * 60)
+
+        # Check collection status
+        stats = get_event_stats()
+        print(f"\nAgent Events Collection: {stats}")
 
         findings = []
 
         # Run all detection tasks
-        findings.extend(await find_similar_prompts())
+        findings.extend(await find_event_patterns())
         findings.extend(await find_failing_runbooks())
         findings.extend(await find_capability_gaps())
         findings.extend(await find_autonomy_candidates())
 
-        # Cleanup old events
-        await cleanup_old_events()
-
-        # Generate and log report
-        report = await generate_report(findings)
+        # Generate and print report
+        report = generate_report(findings)
         print("\n" + report)
 
-        # Log the analysis event
-        if not DRY_RUN:
-            try:
-                await call_knowledge_mcp("log_event", {
-                    "event_type": "pattern.analysis",
-                    "description": f"Daily pattern analysis completed. Found {len(findings)} items.",
-                    "source_agent": "pattern-detector",
-                    "metadata": {
-                        "findings_count": len(findings),
-                        "skill_candidates": len([f for f in findings if f.get("type") == "skill_candidate"]),
-                        "failing_runbooks": len([f for f in findings if f.get("type") == "failing_runbook"]),
-                        "capability_gaps": len([f for f in findings if f.get("type") == "capability_gap"]),
-                        "autonomy_candidates": len([f for f in findings if f.get("type") == "autonomy_candidate"])
-                    },
-                    "resolution": "completed"
-                })
-            except Exception as e:
-                print(f"[WARN] Failed to log analysis event: {e}")
+        # Log the analysis
+        log_analysis_event(findings)
 
         # Send summary notification if there are actionable findings
         actionable = [f for f in findings if f.get("type") in ("autonomy_candidate", "failing_runbook")]

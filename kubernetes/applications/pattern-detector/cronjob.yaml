@@ -40,8 +40,8 @@ spec:
                   echo "=== Running pattern detector ==="
                   python /app/pattern_detector.py
               env:
-                - name: KNOWLEDGE_MCP_URL
-                  value: "http://knowledge-mcp:8000"
+                - name: QDRANT_URL
+                  value: "http://qdrant:6333"
                 - name: DRY_RUN
                   value: "false"
               resources:
