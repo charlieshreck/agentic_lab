@@ -827,6 +827,78 @@ data:
         else:
             return {"status": "error", "error": "Failed to store event in Qdrant"}
 
+    async def rest_api_update_event(request: Request):
+        """Update an event with feedback/outcome (REST API wrapper for Forever Learning System)."""
+        try:
+            import json as json_module
+            body = await request.body()
+            data = json_module.loads(body)
+
+            event_id = data.get("event_id")
+            if not event_id:
+                return JSONResponse(
+                    {"status": "error", "error": "Missing required field: event_id"},
+                    status_code=400
+                )
+
+            score = data.get("score")
+            feedback = data.get("feedback")
+            resolution = data.get("resolution")
+
+            if score is None and feedback is None and resolution is None:
+                return JSONResponse(
+                    {"status": "error", "error": "Must provide at least one of: score, feedback, resolution"},
+                    status_code=400
+                )
+
+            result = await _update_event_impl(event_id, score, feedback, resolution)
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"Error updating event: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def _update_event_impl(
+        event_id: str,
+        score: Optional[float] = None,
+        feedback: Optional[str] = None,
+        resolution: Optional[str] = None
+    ) -> dict:
+        """Implementation of update_event (shared by MCP tool and REST API)."""
+        # Get current event
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{QDRANT_URL}/collections/agent_events/points",
+                json={"ids": [event_id], "with_payload": True, "with_vector": True}
+            )
+            if response.status_code != 200:
+                return {"status": "error", "error": "Event not found"}
+
+            points = response.json().get("result", [])
+            if not points:
+                return {"status": "error", "error": f"Event {event_id} not found"}
+
+            point = points[0]
+            payload = point.get("payload", {})
+            vector = point.get("vector")
+
+            # Update fields
+            if score is not None:
+                payload["score"] = score
+            if feedback is not None:
+                payload["feedback"] = feedback
+            if resolution is not None:
+                payload["resolution"] = resolution
+
+            # Upsert back
+            updated_point = {"id": event_id, "vector": vector, "payload": payload}
+            success = await qdrant_upsert("agent_events", [updated_point])
+
+            if success:
+                logger.info(f"Updated event {event_id}: score={score}, resolution={resolution}")
+                return {"status": "ok", "event_id": event_id, "updated": {"score": score, "feedback": feedback, "resolution": resolution}}
+            else:
+                return {"status": "error", "error": "Failed to update event"}
+
     # ============================================================================
     # MAIN
     # ============================================================================
@@ -846,6 +918,7 @@ data:
             Route("/api/runbook", rest_api_runbook, methods=["GET"]),
             Route("/api/runbooks", rest_api_runbooks, methods=["GET"]),
             Route("/api/log_event", rest_api_log_event, methods=["POST"]),
+            Route("/api/update_event", rest_api_update_event, methods=["POST"]),
         ]
 
         mcp_app = mcp.http_app()

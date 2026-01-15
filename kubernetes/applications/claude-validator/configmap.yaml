@@ -124,6 +124,18 @@ data:
         include_pending_validations: bool = True
         include_system_health: bool = True
 
+    class FeedbackRequest(BaseModel):
+        """Request to submit feedback on a previous execution (Forever Learning System)."""
+        event_id: str           # ID from agent_events
+        score: float            # 0.0-1.0 (0=failed, 1=perfect)
+        feedback: str           # Human feedback text
+        outcome: str            # resolved, partial, failed, escalated
+
+    class FeedbackResponse(BaseModel):
+        status: str
+        event_id: str
+        message: str
+
     # ============================================================================
     # Claude Agent Integration
     # ============================================================================
@@ -261,6 +273,98 @@ data:
                 "knowledge_mcp": knowledge_ok
             }
         }
+
+    @app.post("/feedback", response_model=FeedbackResponse)
+    async def submit_feedback(request: FeedbackRequest, background_tasks: BackgroundTasks):
+        """
+        Submit feedback for a previous execution (Forever Learning System).
+
+        This allows humans to:
+        - Rate how well a task was completed (0.0-1.0)
+        - Provide text feedback on what worked or didn't
+        - Mark the final outcome (resolved, partial, failed, escalated)
+
+        Feedback updates the event in Qdrant and contributes to learning metrics.
+        """
+        logger.info(f"Received feedback for event {request.event_id}: score={request.score}, outcome={request.outcome}")
+
+        # Validate score range
+        if not 0.0 <= request.score <= 1.0:
+            raise HTTPException(status_code=400, detail="Score must be between 0.0 and 1.0")
+
+        # Validate outcome
+        valid_outcomes = {"resolved", "partial", "failed", "escalated"}
+        if request.outcome not in valid_outcomes:
+            raise HTTPException(status_code=400, detail=f"Outcome must be one of: {valid_outcomes}")
+
+        # Update event in knowledge-mcp
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/update_event",
+                    json={
+                        "event_id": request.event_id,
+                        "score": request.score,
+                        "feedback": request.feedback,
+                        "resolution": request.outcome
+                    }
+                )
+
+                if response.status_code != 200:
+                    logger.error(f"Failed to update event: {response.text}")
+                    raise HTTPException(status_code=500, detail="Failed to update event in knowledge base")
+
+                result = response.json()
+                if result.get("status") != "ok":
+                    raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+
+            except httpx.RequestError as e:
+                logger.error(f"Request to knowledge-mcp failed: {e}")
+                raise HTTPException(status_code=502, detail="Could not reach knowledge service")
+
+        # Log a feedback.received event
+        background_tasks.add_task(
+            log_feedback_event,
+            request.event_id,
+            request.score,
+            request.outcome
+        )
+
+        # Notify Matrix for low scores (potential learning opportunity)
+        if request.score < 0.5:
+            background_tasks.add_task(
+                notify_matrix,
+                f"⚠️ Low feedback score ({request.score:.1f}) for event `{request.event_id}`\n"
+                f"Outcome: {request.outcome}\n"
+                f"Feedback: {request.feedback[:200] if request.feedback else 'None'}"
+            )
+
+        return FeedbackResponse(
+            status="recorded",
+            event_id=request.event_id,
+            message=f"Feedback recorded: score={request.score}, outcome={request.outcome}"
+        )
+
+    async def log_feedback_event(event_id: str, score: float, outcome: str):
+        """Log a feedback.received event to the knowledge base."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/log_event",
+                    json={
+                        "event_type": "feedback.received",
+                        "description": f"Feedback received for event {event_id}: score={score}, outcome={outcome}",
+                        "source_agent": "claude-validator",
+                        "metadata": {
+                            "original_event_id": event_id,
+                            "score": score,
+                            "outcome": outcome
+                        },
+                        "resolution": outcome
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"Failed to log feedback event: {e}")
 
     @app.post("/validate", response_model=ValidationResult)
     async def validate_item(request: ValidationRequest, background_tasks: BackgroundTasks):
