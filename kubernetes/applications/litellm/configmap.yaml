@@ -14,25 +14,41 @@ data:
     # WARNING: Do not use Pro models without budget controls
 
     model_list:
-      # Primary: Direct Gemini API (free tier)
-      - model_name: gemini/gemini-2.0-flash
+      # ===== TIER 1: Local/Free (Ollama) =====
+      # Use for: classification, filtering, simple tasks
+      - model_name: tier1
         litellm_params:
-          model: gemini/gemini-2.0-flash
-          api_key: os.environ/GEMINI_API_KEY
+          model: ollama/qwen2.5:7b
+          api_base: http://ollama:11434
 
-      # Fallback: Local Ollama (no rate limits)
       - model_name: ollama-qwen
         litellm_params:
           model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
 
-      # Embedding model
-      - model_name: embeddings
+      - model_name: ollama-llama
         litellm_params:
-          model: gemini/text-embedding-004
+          model: ollama/llama3.1:8b
+          api_base: http://ollama:11434
+
+      # Local embeddings (when Gemini rate limited)
+      - model_name: embeddings-local
+        litellm_params:
+          model: ollama/nomic-embed-text
+          api_base: http://ollama:11434
+
+      # ===== TIER 2: Gemini (Free Tier, 1M Context) =====
+      # Use for: analysis, summaries, large context tasks
+      - model_name: tier2
+        litellm_params:
+          model: gemini/gemini-2.0-flash
           api_key: os.environ/GEMINI_API_KEY
 
-      # Aliases
+      - model_name: gemini/gemini-2.0-flash
+        litellm_params:
+          model: gemini/gemini-2.0-flash
+          api_key: os.environ/GEMINI_API_KEY
+
       - model_name: gemini-pro
         litellm_params:
           model: gemini/gemini-2.0-flash
@@ -43,7 +59,31 @@ data:
           model: gemini/gemini-2.0-flash
           api_key: os.environ/GEMINI_API_KEY
 
-    # Router settings - fallback to OpenRouter on 429
+      # Gemini embeddings (primary)
+      - model_name: embeddings
+        litellm_params:
+          model: gemini/text-embedding-004
+          api_key: os.environ/GEMINI_API_KEY
+
+      # ===== TIER 3: Claude (Premium, Best Quality) =====
+      # Use for: validation, code gen, security, complex reasoning
+      # Note: Requires ANTHROPIC_API_KEY in Infisical
+      - model_name: tier3
+        litellm_params:
+          model: anthropic/claude-sonnet-4-20250514
+          api_key: os.environ/ANTHROPIC_API_KEY
+
+      - model_name: claude-sonnet
+        litellm_params:
+          model: anthropic/claude-sonnet-4-20250514
+          api_key: os.environ/ANTHROPIC_API_KEY
+
+      - model_name: claude-haiku
+        litellm_params:
+          model: anthropic/claude-3-5-haiku-20241022
+          api_key: os.environ/ANTHROPIC_API_KEY
+
+    # Router settings - tiered fallbacks
     router_settings:
       routing_strategy: simple-shuffle
       num_retries: 1
@@ -51,12 +91,28 @@ data:
       timeout: 60
       allowed_fails: 1
       fallbacks:
+        # Tier 3 → Tier 2 → Tier 1
+        - tier3:
+            - tier2
+            - tier1
+        - claude-sonnet:
+            - tier2
+            - tier1
+        - claude-haiku:
+            - tier2
+            - tier1
+        # Tier 2 → Tier 1
+        - tier2:
+            - tier1
         - gemini/gemini-2.0-flash:
             - ollama-qwen
         - gemini-pro:
             - ollama-qwen
         - gemini/gemini-2.0-pro:
             - ollama-qwen
+        # Embeddings fallback
+        - embeddings:
+            - embeddings-local
 
     # General settings
     general_settings:
