@@ -678,18 +678,28 @@ data:
             return f"# RF Setting Change Preview\n\n**Set confirmation=true to apply.**\n\n## Setting\n- **Name**: {params.setting}\n- **New Value**: {status_str}\n\nTo apply, call again with `confirmation=true`\n"
 
         try:
-            # Get current setting to find its ID
+            # Get current setting to find its ID and current values
             settings = await _api_get("/rest/setting")
-            setting_id = None
+            setting_data = None
             for s in settings:
                 if s.get("key") == params.setting:
-                    setting_id = s.get("_id")
+                    setting_data = s
                     break
 
-            if not setting_id:
+            if not setting_data:
                 return f"Error: Setting '{params.setting}' not found"
 
-            await _api_put(f"/rest/setting/{setting_id}", {"enabled": params.enabled})
+            setting_id = setting_data.get("_id")
+            setting_key = setting_data.get("key")
+
+            # Build update payload - merge enabled flag into existing settings
+            # Some settings use 'auto_enabled' (radio_ai), others use 'enabled'
+            update_payload = {"enabled": params.enabled}
+            if setting_key == "radio_ai":
+                update_payload["auto_enabled"] = params.enabled
+
+            # UniFi API requires: PUT /rest/setting/{key}/{_id}
+            await _api_put(f"/rest/setting/{setting_key}/{setting_id}", update_payload)
 
             result_status = "enabled" if params.enabled else "disabled"
             return f"# RF Setting Updated \n\n- **Setting**: {params.setting}\n- **Status**: {result_status}\n\nChanges will take effect within 30 seconds.\n"
