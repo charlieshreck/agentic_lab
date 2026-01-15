@@ -594,6 +594,71 @@ data:
             ]
         }
 
+    @app.post("/alert")
+    async def receive_alertmanager_webhook(alerts: List[dict]):
+        """Receive alerts from Prometheus AlertManager webhook."""
+        logger.info(f"Received {len(alerts)} alerts from AlertManager")
+        processed = 0
+
+        for alert in alerts:
+            status = alert.get("status", "firing")
+            labels = alert.get("labels", {})
+            annotations = alert.get("annotations", {})
+
+            alertname = labels.get("alertname", "Unknown")
+            severity = labels.get("severity", "warning")
+            namespace = labels.get("namespace", "unknown")
+            cluster = labels.get("cluster", "unknown")
+
+            description = annotations.get("description") or annotations.get("summary") or alertname
+
+            # Skip resolved alerts for now
+            if status == "resolved":
+                logger.info(f"Alert resolved: {alertname}")
+                # Remove from raised_alerts if present
+                alert_key = f"alertmanager:{alertname}:{namespace}"
+                raised_alerts.pop(alert_key, None)
+                continue
+
+            # Check cooldown
+            alert_key = f"alertmanager:{alertname}:{namespace}"
+            if alert_key in raised_alerts:
+                elapsed = (datetime.utcnow() - raised_alerts[alert_key]).total_seconds()
+                if elapsed < ALERT_COOLDOWN_SECONDS:
+                    logger.debug(f"Alert '{alertname}' in cooldown ({elapsed:.0f}s)")
+                    continue
+
+            logger.info(f"Processing alert: {alertname} ({severity}) from {cluster}/{namespace}")
+
+            # Forward to LangGraph for AI-assisted triage
+            try:
+                await forward_to_langgraph(
+                    alertname=alertname,
+                    severity=severity,
+                    description=description,
+                    source=f"alertmanager:{cluster}",
+                    namespace=namespace
+                )
+                raised_alerts[alert_key] = datetime.utcnow()
+                processed += 1
+            except Exception as e:
+                logger.error(f"Failed to forward alert {alertname}: {e}")
+                # Fallback: send directly to Matrix bot
+                try:
+                    await raise_alert(
+                        name=alertname,
+                        severity=severity,
+                        description=f"[{cluster}/{namespace}] {description}",
+                        source="alertmanager",
+                        suggested_fix=annotations.get("runbook_url")
+                    )
+                    raised_alerts[alert_key] = datetime.utcnow()
+                    processed += 1
+                except Exception as e2:
+                    logger.error(f"Fallback alert also failed: {e2}")
+
+        return {"status": "ok", "processed": processed, "total": len(alerts)}
+
     def main():
         port = int(os.environ.get("PORT", "8000"))
         uvicorn.run(app, host="0.0.0.0", port=port)
