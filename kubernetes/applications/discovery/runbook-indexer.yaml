@@ -348,6 +348,20 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          initContainers:
+            # Clone runbooks from git
+            - name: git-sync
+              image: alpine/git:latest
+              command:
+                - sh
+                - -c
+                - |
+                  git clone --depth 1 --single-branch --branch main \
+                    https://github.com/charlieshreck/agentic_lab.git /tmp/repo && \
+                  cp -r /tmp/repo/runbooks/* /runbooks/
+              volumeMounts:
+                - name: runbooks
+                  mountPath: /runbooks
           containers:
             - name: indexer
               image: python:3.11-slim
@@ -382,9 +396,7 @@ spec:
               configMap:
                 name: runbook-indexer-script
             - name: runbooks
-              hostPath:
-                path: /home/agentic_lab/runbooks
-                type: Directory
+              emptyDir: {}
             - name: seed-runbooks
               configMap:
                 name: seed-runbooks
