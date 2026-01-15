@@ -610,7 +610,7 @@ data:
         return await get_queue_stats()
 
     @app.post("/agent/query")
-    async def query_agent(prompt: str, context: Optional[Dict[str, Any]] = None):
+    async def query_agent(prompt: str, background_tasks: BackgroundTasks, context: Optional[Dict[str, Any]] = None):
         """
         Simple query endpoint for quick questions.
         Wraps run_agent with defaults for query-style interactions.
@@ -621,7 +621,7 @@ data:
             max_turns=3,
             allowed_tools=["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
         )
-        return await run_agent(request)
+        return await run_agent(request, background_tasks)
 
     @app.get("/mcp/servers")
     async def list_mcp_servers():
