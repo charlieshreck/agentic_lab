@@ -281,111 +281,111 @@ data:
         if request.target_type == "runbook":
             prompt = f"""You are validating a runbook. Your task:
 
-1. First, search for similar runbooks in the knowledge base:
-   - Use mcp__knowledge__search_runbooks with query "{request.target_id}"
-   - Note any patterns or standards from similar runbooks
+    1. First, search for similar runbooks in the knowledge base:
+    - Use mcp__knowledge__search_runbooks with query "{request.target_id}"
+    - Note any patterns or standards from similar runbooks
 
-2. Read the runbook file:
-   - Path: {request.target_path or f'/workspace/runbooks/{request.target_id}.md'}
-   - If file doesn't exist, check /workspace/runbooks/ for similar names
+    2. Read the runbook file:
+    - Path: {request.target_path or f'/workspace/runbooks/{request.target_id}.md'}
+    - If file doesn't exist, check /workspace/runbooks/ for similar names
 
-3. Validate the runbook for:
-   - Logic correctness: Will the diagnosis steps catch the right cases?
-   - Completeness: Are all steps documented? Is there a rollback procedure?
-   - Security: Are there any dangerous commands without safeguards?
-   - Clarity: Can someone unfamiliar execute this successfully?
-   - kubectl/CLI commands: Are they syntactically correct?
+    3. Validate the runbook for:
+    - Logic correctness: Will the diagnosis steps catch the right cases?
+    - Completeness: Are all steps documented? Is there a rollback procedure?
+    - Security: Are there any dangerous commands without safeguards?
+    - Clarity: Can someone unfamiliar execute this successfully?
+    - kubectl/CLI commands: Are they syntactically correct?
 
-4. {"If you find issues, FIX THEM directly in the file." if request.auto_fix else "List issues but do not modify the file."}
+    4. {"If you find issues, FIX THEM directly in the file." if request.auto_fix else "List issues but do not modify the file."}
 
-5. Return a JSON summary:
-```json
-{{
-  "approved": true/false,
-  "confidence": 0.0-1.0,
-  "issues_found": ["list of issues found"],
-  "issues_fixed": ["list of issues you fixed"],
-  "suggestions": ["recommendations for improvement"],
-  "changes_made": ["list of changes made to the file"]
-}}
-```
+    5. Return a JSON summary:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": ["list of issues found"],
+    "issues_fixed": ["list of issues you fixed"],
+    "suggestions": ["recommendations for improvement"],
+    "changes_made": ["list of changes made to the file"]
+    }}
+    ```
 
-Be thorough but practical. Minor style issues don't need fixing."""
+    Be thorough but practical. Minor style issues don't need fixing."""
 
         elif request.target_type == "decision":
             prompt = f"""You are auditing an architectural decision. Your task:
 
-1. Search for related decisions and context:
-   - Use mcp__knowledge__search_documentation with query "{request.target_id}"
-   - Look for prior decisions on similar topics
+    1. Search for related decisions and context:
+    - Use mcp__knowledge__search_documentation with query "{request.target_id}"
+    - Look for prior decisions on similar topics
 
-2. Read the decision document:
-   - Path: {request.target_path or f'/workspace/decisions/{request.target_id}.md'}
+    2. Read the decision document:
+    - Path: {request.target_path or f'/workspace/decisions/{request.target_id}.md'}
 
-3. Evaluate the decision:
-   - Is the rationale sound?
-   - Were alternatives considered?
-   - Are there risks not addressed?
-   - Does it conflict with existing architecture?
+    3. Evaluate the decision:
+    - Is the rationale sound?
+    - Were alternatives considered?
+    - Are there risks not addressed?
+    - Does it conflict with existing architecture?
 
-4. Return a JSON summary:
-```json
-{{
-  "approved": true/false,
-  "confidence": 0.0-1.0,
-  "issues_found": ["concerns with the decision"],
-  "issues_fixed": [],
-  "suggestions": ["recommendations"],
-  "changes_made": []
-}}
-```"""
+    4. Return a JSON summary:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": ["concerns with the decision"],
+    "issues_fixed": [],
+    "suggestions": ["recommendations"],
+    "changes_made": []
+    }}
+    ```"""
 
         elif request.target_type == "mcp":
             prompt = f"""You are reviewing an MCP server implementation. Your task:
 
-1. Read the MCP server code:
-   - Path: {request.target_path or f'/workspace/mcp-servers/{request.target_id}/src/main.py'}
+    1. Read the MCP server code:
+    - Path: {request.target_path or f'/workspace/mcp-servers/{request.target_id}/src/main.py'}
 
-2. Validate:
-   - Does it follow FastMCP patterns?
-   - Are there security issues (command injection, path traversal)?
-   - Is error handling adequate?
-   - Does it have a /health endpoint?
-   - Are tools properly typed with Pydantic models?
+    2. Validate:
+    - Does it follow FastMCP patterns?
+    - Are there security issues (command injection, path traversal)?
+    - Is error handling adequate?
+    - Does it have a /health endpoint?
+    - Are tools properly typed with Pydantic models?
 
-3. {"Fix any issues directly in the file." if request.auto_fix else "List issues without modifying."}
+    3. {"Fix any issues directly in the file." if request.auto_fix else "List issues without modifying."}
 
-4. Test syntax by running: python -m py_compile <file>
+    4. Test syntax by running: python -m py_compile <file>
 
-5. Return JSON summary:
-```json
-{{
-  "approved": true/false,
-  "confidence": 0.0-1.0,
-  "issues_found": ["issues found"],
-  "issues_fixed": ["issues fixed"],
-  "suggestions": ["improvements"],
-  "changes_made": ["changes made"]
-}}
-```"""
+    5. Return JSON summary:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": ["issues found"],
+    "issues_fixed": ["issues fixed"],
+    "suggestions": ["improvements"],
+    "changes_made": ["changes made"]
+    }}
+    ```"""
 
         else:
             prompt = f"""Review and validate this item:
-- Type: {request.target_type}
-- ID: {request.target_id}
-- Path: {request.target_path or 'unknown'}
+    - Type: {request.target_type}
+    - ID: {request.target_id}
+    - Path: {request.target_path or 'unknown'}
 
-Read the content, check for issues, and return JSON:
-```json
-{{
-  "approved": true/false,
-  "confidence": 0.0-1.0,
-  "issues_found": [],
-  "issues_fixed": [],
-  "suggestions": [],
-  "changes_made": []
-}}
-```"""
+    Read the content, check for issues, and return JSON:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": [],
+    "issues_fixed": [],
+    "suggestions": [],
+    "changes_made": []
+    }}
+    ```"""
 
         # Call Claude with appropriate tools
         tools = TOOLS_FULL if request.auto_fix else TOOLS_VALIDATION
@@ -470,38 +470,38 @@ Read the content, check for issues, and return JSON:
 
         prompt = f"""Generate a Claude Code skill for this capability gap:
 
-**Description**: {gap.description}
-**Triggering patterns**: {', '.join(gap.triggering_patterns)}
-**Type**: {gap.type}
+    **Description**: {gap.description}
+    **Triggering patterns**: {', '.join(gap.triggering_patterns)}
+    **Type**: {gap.type}
 
-Your task:
-1. Search for similar skills or documentation:
-   - Use mcp__knowledge__search_documentation with relevant queries
-   - Look for patterns in existing skills
+    Your task:
+    1. Search for similar skills or documentation:
+    - Use mcp__knowledge__search_documentation with relevant queries
+    - Look for patterns in existing skills
 
-2. Generate a comprehensive skill markdown file with:
-   - Clear title and description
-   - Step-by-step instructions
-   - Example usage
-   - Available tools/MCPs to use
-   - Error handling guidance
+    2. Generate a comprehensive skill markdown file with:
+    - Clear title and description
+    - Step-by-step instructions
+    - Example usage
+    - Available tools/MCPs to use
+    - Error handling guidance
 
-3. Write the skill to: {output_path}
-   - Use the Write tool to create the file
-   - Follow Claude Code skill format
+    3. Write the skill to: {output_path}
+    - Use the Write tool to create the file
+    - Follow Claude Code skill format
 
-4. Verify the file was created correctly by reading it back
+    4. Verify the file was created correctly by reading it back
 
-5. Return JSON summary:
-```json
-{{
-  "status": "generated",
-  "skill_name": "name",
-  "output_path": "{output_path}",
-  "description": "brief description",
-  "tools_used": ["list of tools referenced in skill"]
-}}
-```"""
+    5. Return JSON summary:
+    ```json
+    {{
+    "status": "generated",
+    "skill_name": "name",
+    "output_path": "{output_path}",
+    "description": "brief description",
+    "tools_used": ["list of tools referenced in skill"]
+    }}
+    ```"""
 
         response = await call_claude(prompt, tools=TOOLS_GENERATION, model="opus", timeout=180)
 
@@ -540,42 +540,42 @@ Your task:
 
         prompt = f"""Generate a new MCP server for this capability gap:
 
-**Description**: {gap.description}
-**Required tools**: {', '.join(gap.tools_needed)}
-**Triggering alerts**: {', '.join(gap.triggering_alerts)}
-**Service name**: {gap.service_name}
+    **Description**: {gap.description}
+    **Required tools**: {', '.join(gap.tools_needed)}
+    **Triggering alerts**: {', '.join(gap.triggering_alerts)}
+    **Service name**: {gap.service_name}
 
-Your task:
-1. Research existing MCP patterns:
-   - Search documentation for "MCP server" patterns
-   - Look at how similar tools are implemented
+    Your task:
+    1. Research existing MCP patterns:
+    - Search documentation for "MCP server" patterns
+    - Look at how similar tools are implemented
 
-2. Create the MCP server structure:
-   - {mcp_dir}/src/main.py - FastMCP server code
-   - {mcp_dir}/requirements.txt - Dependencies
-   - {mcp_dir}/Dockerfile - Container build
-   - {mcp_dir}/README.md - Documentation
+    2. Create the MCP server structure:
+    - {mcp_dir}/src/main.py - FastMCP server code
+    - {mcp_dir}/requirements.txt - Dependencies
+    - {mcp_dir}/Dockerfile - Container build
+    - {mcp_dir}/README.md - Documentation
 
-3. The MCP server must:
-   - Use FastMCP framework
-   - Include /health endpoint
-   - Use Pydantic models for inputs/outputs
-   - Have proper error handling
-   - Include docstrings for all tools
+    3. The MCP server must:
+    - Use FastMCP framework
+    - Include /health endpoint
+    - Use Pydantic models for inputs/outputs
+    - Have proper error handling
+    - Include docstrings for all tools
 
-4. Validate syntax:
-   - Run: python -m py_compile {mcp_dir}/src/main.py
+    4. Validate syntax:
+    - Run: python -m py_compile {mcp_dir}/src/main.py
 
-5. Return JSON summary:
-```json
-{{
-  "status": "generated",
-  "service_name": "{gap.service_name}",
-  "output_dir": "{mcp_dir}",
-  "tools_implemented": ["list of tool names"],
-  "files_created": ["list of files"]
-}}
-```"""
+    5. Return JSON summary:
+    ```json
+    {{
+    "status": "generated",
+    "service_name": "{gap.service_name}",
+    "output_dir": "{mcp_dir}",
+    "tools_implemented": ["list of tool names"],
+    "files_created": ["list of files"]
+    }}
+    ```"""
 
         response = await call_claude(prompt, tools=TOOLS_FULL, model="opus", timeout=300)
 
@@ -642,32 +642,32 @@ Your task:
 
         prompt = f"""Update the ambient context file for Claude Code sessions.
 
-Your task:
-1. Gather current system state:
-   {"- Query recent decisions from knowledge base" if request.include_recent_decisions else ""}
-   {"- Check for pending validations" if request.include_pending_validations else ""}
-   {"- Get cluster health from infrastructure-mcp" if request.include_system_health else ""}
+    Your task:
+    1. Gather current system state:
+    {"- Query recent decisions from knowledge base" if request.include_recent_decisions else ""}
+    {"- Check for pending validations" if request.include_pending_validations else ""}
+    {"- Get cluster health from infrastructure-mcp" if request.include_system_health else ""}
 
-2. Write a context summary to /workspace/.claude/context/latest.md with:
-   - Current timestamp
-   - Recent activity summary
-   - Pending items requiring attention
-   - System health status
-   - Quick reference links
+    2. Write a context summary to /workspace/.claude/context/latest.md with:
+    - Current timestamp
+    - Recent activity summary
+    - Pending items requiring attention
+    - System health status
+    - Quick reference links
 
-3. Format for easy scanning by Claude Code sessions.
+    3. Format for easy scanning by Claude Code sessions.
 
-4. Return JSON:
-```json
-{{
-  "status": "updated",
-  "items_included": {{
+    4. Return JSON:
+    ```json
+    {{
+    "status": "updated",
+    "items_included": {{
     "decisions": 0,
     "pending_validations": 0,
     "health_checks": 0
-  }}
-}}
-```"""
+    }}
+    }}
+    ```"""
 
         response = await call_claude(prompt, tools=TOOLS_VALIDATION, model="sonnet", timeout=120)
 
@@ -689,31 +689,31 @@ Your task:
         """
         prompt = """Analyze the system for improvement opportunities.
 
-Your task:
-1. Search for recent validation failures and issues:
-   - Use mcp__knowledge__search_runbooks with "failed" or "issues"
-   - Look for patterns in what's failing
+    Your task:
+    1. Search for recent validation failures and issues:
+    - Use mcp__knowledge__search_runbooks with "failed" or "issues"
+    - Look for patterns in what's failing
 
-2. Identify improvement opportunities:
-   - Runbooks that frequently fail validation
-   - Missing capabilities (repeated manual interventions)
-   - Common error patterns
+    2. Identify improvement opportunities:
+    - Runbooks that frequently fail validation
+    - Missing capabilities (repeated manual interventions)
+    - Common error patterns
 
-3. For each improvement opportunity:
-   - Draft the fix (runbook update, new skill, etc.)
-   - Write it to the appropriate location
-   - Add a note explaining the improvement
+    3. For each improvement opportunity:
+    - Draft the fix (runbook update, new skill, etc.)
+    - Write it to the appropriate location
+    - Add a note explaining the improvement
 
-4. Return JSON summary:
-```json
-{
-  "improvements_identified": 0,
-  "improvements_implemented": 0,
-  "details": [
+    4. Return JSON summary:
+    ```json
+    {
+    "improvements_identified": 0,
+    "improvements_implemented": 0,
+    "details": [
     {"type": "runbook", "id": "...", "change": "..."},
-  ]
-}
-```"""
+    ]
+    }
+    ```"""
 
         response = await call_claude(prompt, tools=TOOLS_FULL, model="opus", timeout=600, async_mode=True, priority=4)
 
@@ -731,7 +731,7 @@ Your task:
         port = int(os.environ.get("PORT", "8000"))
         uvicorn.run(app, host="0.0.0.0", port=port)
 
-  requirements.txt: |
+    requirements.txt: |
     fastapi>=0.115.0
     uvicorn>=0.34.0
     httpx>=0.27.0

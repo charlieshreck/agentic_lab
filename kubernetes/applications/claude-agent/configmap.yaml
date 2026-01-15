@@ -55,6 +55,9 @@ data:
         "arr-suite": os.getenv("ARR_SUITE_MCP_URL", "http://arr-suite-mcp:8000"),
     }
 
+    # Knowledge MCP URL for event logging
+    KNOWLEDGE_MCP_URL = os.getenv("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
+
     # Priority levels (lower score = higher priority)
     PRIORITY_USER = 1      # User-initiated requests
     PRIORITY_CRITICAL = 2  # Critical alerts
