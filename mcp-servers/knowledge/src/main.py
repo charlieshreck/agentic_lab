@@ -360,6 +360,307 @@ async def search_documentation(
         return []
 
 
+# Valid autonomy levels for runbooks
+AUTONOMY_LEVELS = {
+    "manual": {
+        "confidence_threshold": 0.0,
+        "requires_approval": True,
+        "timeout_auto_approve": None,
+        "notify_human": True,
+        "description": "Always requires human approval"
+    },
+    "prompted": {
+        "confidence_threshold": 0.7,
+        "requires_approval": True,
+        "timeout_auto_approve": 300,  # Auto-approve after 5 min
+        "notify_human": True,
+        "description": "Prompts human, auto-approves if no response"
+    },
+    "standard": {
+        "confidence_threshold": 0.85,
+        "requires_approval": False,
+        "timeout_auto_approve": None,
+        "notify_human": True,
+        "description": "Executes automatically, notifies human"
+    },
+    "autonomous": {
+        "confidence_threshold": 0.95,
+        "requires_approval": False,
+        "timeout_auto_approve": None,
+        "notify_human": False,
+        "description": "Fully autonomous, logged only"
+    }
+}
+
+
+@mcp.tool()
+async def get_runbook(runbook_id: str) -> Optional[dict]:
+    """
+    Get a specific runbook by ID.
+
+    Args:
+        runbook_id: UUID of the runbook
+
+    Returns:
+        Runbook details or None if not found
+    """
+    try:
+        point = await qdrant_get_by_id("runbooks", runbook_id)
+        if not point:
+            return None
+        payload = point.get("payload", {})
+        payload["id"] = runbook_id
+        return payload
+    except Exception as e:
+        logger.error(f"Get runbook failed: {e}")
+        return None
+
+
+@mcp.tool()
+async def update_runbook(
+    runbook_id: str,
+    automation_level: Optional[str] = None,
+    success_rate: Optional[float] = None,
+    execution_count: Optional[int] = None,
+    success_count: Optional[int] = None,
+    avg_resolution_time: Optional[int] = None
+) -> dict:
+    """
+    Update runbook metadata including autonomy level and execution stats.
+
+    Used by the autonomy system to track runbook performance and
+    automatically upgrade/downgrade autonomy levels based on success rates.
+
+    Args:
+        runbook_id: UUID of the runbook to update
+        automation_level: New autonomy level (manual, prompted, standard, autonomous)
+        success_rate: Updated success rate (0.0-1.0)
+        execution_count: Total number of executions
+        success_count: Number of successful executions
+        avg_resolution_time: Average resolution time in seconds
+
+    Returns:
+        Status of the update operation
+    """
+    try:
+        # Validate autonomy level if provided
+        if automation_level and automation_level not in AUTONOMY_LEVELS:
+            return {
+                "success": False,
+                "error": f"Invalid autonomy level: {automation_level}. "
+                         f"Valid levels: {list(AUTONOMY_LEVELS.keys())}"
+            }
+
+        # Get existing runbook
+        point = await qdrant_get_by_id("runbooks", runbook_id)
+        if not point:
+            return {"success": False, "error": f"Runbook not found: {runbook_id}"}
+
+        payload = point.get("payload", {})
+
+        # Update fields if provided
+        if automation_level is not None:
+            old_level = payload.get("automation_level", "manual")
+            payload["automation_level"] = automation_level
+            # Log autonomy change
+            if old_level != automation_level:
+                logger.info(f"Runbook {runbook_id} autonomy: {old_level} -> {automation_level}")
+
+        if success_rate is not None:
+            if not 0.0 <= success_rate <= 1.0:
+                return {"success": False, "error": "success_rate must be between 0.0 and 1.0"}
+            payload["success_rate"] = success_rate
+
+        if execution_count is not None:
+            payload["execution_count"] = execution_count
+
+        if success_count is not None:
+            payload["success_count"] = success_count
+
+        if avg_resolution_time is not None:
+            payload["avg_resolution_time"] = avg_resolution_time
+
+        payload["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        # Regenerate embedding if title/solution changed (not in this case, but future-proof)
+        combined_text = f"{payload.get('title', '')}\n{payload.get('trigger_pattern', '')}\n{payload.get('solution', '')}"
+        vector = await get_embedding(combined_text)
+
+        updated_point = {
+            "id": runbook_id,
+            "vector": vector,
+            "payload": payload
+        }
+
+        success = await qdrant_upsert("runbooks", [updated_point])
+        return {"success": success, "id": runbook_id}
+    except Exception as e:
+        logger.error(f"Update runbook failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def record_runbook_execution(
+    runbook_id: str,
+    success: bool,
+    resolution_time: Optional[int] = None
+) -> dict:
+    """
+    Record a runbook execution and update statistics.
+
+    Convenience method that updates execution_count, success_count, and success_rate
+    in a single call. Used after executing a runbook to track its effectiveness.
+
+    Args:
+        runbook_id: UUID of the executed runbook
+        success: Whether the execution was successful
+        resolution_time: Time to resolution in seconds (optional)
+
+    Returns:
+        Updated runbook stats and any autonomy level changes
+    """
+    try:
+        # Get existing runbook
+        point = await qdrant_get_by_id("runbooks", runbook_id)
+        if not point:
+            return {"success": False, "error": f"Runbook not found: {runbook_id}"}
+
+        payload = point.get("payload", {})
+
+        # Update counts
+        execution_count = payload.get("execution_count", 0) + 1
+        success_count = payload.get("success_count", 0) + (1 if success else 0)
+        success_rate = success_count / execution_count if execution_count > 0 else 0.0
+
+        # Update average resolution time
+        avg_resolution_time = payload.get("avg_resolution_time", 0)
+        if resolution_time is not None:
+            old_total = avg_resolution_time * (execution_count - 1)
+            avg_resolution_time = int((old_total + resolution_time) / execution_count)
+
+        payload["execution_count"] = execution_count
+        payload["success_count"] = success_count
+        payload["success_rate"] = success_rate
+        payload["avg_resolution_time"] = avg_resolution_time
+        payload["last_executed"] = datetime.now(timezone.utc).isoformat()
+
+        # Check for autonomy level upgrade eligibility
+        current_level = payload.get("automation_level", "manual")
+        suggested_upgrade = None
+
+        if execution_count >= 10:  # Minimum executions for upgrade consideration
+            for level_name, level_config in AUTONOMY_LEVELS.items():
+                if success_rate >= level_config["confidence_threshold"]:
+                    if level_name != current_level:
+                        # Check if this is actually an upgrade
+                        level_order = ["manual", "prompted", "standard", "autonomous"]
+                        if level_order.index(level_name) > level_order.index(current_level):
+                            suggested_upgrade = level_name
+
+        # Regenerate embedding
+        combined_text = f"{payload.get('title', '')}\n{payload.get('trigger_pattern', '')}\n{payload.get('solution', '')}"
+        vector = await get_embedding(combined_text)
+
+        updated_point = {
+            "id": runbook_id,
+            "vector": vector,
+            "payload": payload
+        }
+
+        upsert_success = await qdrant_upsert("runbooks", [updated_point])
+
+        result = {
+            "success": upsert_success,
+            "id": runbook_id,
+            "execution_count": execution_count,
+            "success_count": success_count,
+            "success_rate": success_rate,
+            "current_level": current_level
+        }
+
+        if suggested_upgrade:
+            result["suggested_upgrade"] = suggested_upgrade
+            result["upgrade_reason"] = f"Success rate {success_rate:.0%} exceeds threshold for {suggested_upgrade}"
+
+        return result
+    except Exception as e:
+        logger.error(f"Record runbook execution failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def get_autonomy_config(level: str) -> Optional[dict]:
+    """
+    Get the configuration for an autonomy level.
+
+    Args:
+        level: Autonomy level name (manual, prompted, standard, autonomous)
+
+    Returns:
+        Level configuration including thresholds and approval requirements
+    """
+    if level not in AUTONOMY_LEVELS:
+        return None
+    return {"level": level, **AUTONOMY_LEVELS[level]}
+
+
+@mcp.tool()
+async def list_autonomy_candidates(
+    min_executions: int = 10,
+    min_success_rate: float = 0.9
+) -> List[dict]:
+    """
+    List runbooks eligible for autonomy upgrade.
+
+    Finds runbooks that meet the criteria for upgrading to a higher autonomy level
+    based on their execution history and success rate.
+
+    Args:
+        min_executions: Minimum number of executions required (default: 10)
+        min_success_rate: Minimum success rate required (default: 0.9)
+
+    Returns:
+        List of runbooks with upgrade suggestions
+    """
+    try:
+        results = await qdrant_scroll("runbooks", limit=200)
+
+        candidates = []
+        level_order = ["manual", "prompted", "standard", "autonomous"]
+
+        for point in results:
+            payload = point.get("payload", {})
+            execution_count = payload.get("execution_count", 0)
+            success_rate = payload.get("success_rate", 0.0)
+            current_level = payload.get("automation_level", "manual")
+
+            if execution_count < min_executions or success_rate < min_success_rate:
+                continue
+
+            # Find the highest eligible level
+            eligible_level = current_level
+            for level_name, level_config in AUTONOMY_LEVELS.items():
+                if success_rate >= level_config["confidence_threshold"]:
+                    if level_order.index(level_name) > level_order.index(eligible_level):
+                        eligible_level = level_name
+
+            if eligible_level != current_level:
+                candidates.append({
+                    "id": str(point.get("id", "")),
+                    "title": payload.get("title", ""),
+                    "current_level": current_level,
+                    "suggested_level": eligible_level,
+                    "success_rate": success_rate,
+                    "execution_count": execution_count,
+                    "threshold": AUTONOMY_LEVELS[eligible_level]["confidence_threshold"]
+                })
+
+        return candidates
+    except Exception as e:
+        logger.error(f"List autonomy candidates failed: {e}")
+        return []
+
+
 @mcp.tool()
 async def add_runbook(
     title: str,
@@ -374,13 +675,22 @@ async def add_runbook(
         title: Runbook title
         trigger_pattern: Regex pattern that triggers this runbook
         solution: Step-by-step solution
-        automation_level: One of: manual, prompted, standard
+        automation_level: One of: manual, prompted, standard, autonomous
 
     Returns:
         Status of the operation
     """
     try:
         import uuid
+
+        # Validate autonomy level
+        if automation_level not in AUTONOMY_LEVELS:
+            return {
+                "success": False,
+                "error": f"Invalid autonomy level: {automation_level}. "
+                         f"Valid levels: {list(AUTONOMY_LEVELS.keys())}"
+            }
+
         point_id = str(uuid.uuid4())
 
         # Create combined text for embedding
@@ -396,7 +706,9 @@ async def add_runbook(
                 "solution": solution,
                 "automation_level": automation_level,
                 "success_rate": 0.0,
+                "success_count": 0,
                 "execution_count": 0,
+                "avg_resolution_time": 0,
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
         }
