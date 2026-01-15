@@ -5,6 +5,7 @@ metadata:
   namespace: ai-platform
   labels:
     app: claude-validator
+    version: "2.0.0"
 spec:
   replicas: 1
   selector:
@@ -14,6 +15,9 @@ spec:
     metadata:
       labels:
         app: claude-validator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
     spec:
       containers:
       - name: claude-validator
@@ -22,7 +26,14 @@ spec:
         - /bin/bash
         - -c
         - |
-          pip install -r /app/requirements.txt && \
+          set -e
+          echo "=== Installing dependencies ==="
+          pip install --no-cache-dir -r /app/requirements.txt
+
+          echo "=== Creating workspace directories ==="
+          mkdir -p /workspace/runbooks /workspace/skills /workspace/mcp-servers /workspace/decisions /workspace/.claude/context
+
+          echo "=== Starting Claude Validator v2.0.0 ==="
           python /app/main.py
         ports:
         - containerPort: 8000
@@ -32,8 +43,8 @@ spec:
           value: "8000"
         - name: CLAUDE_AGENT_URL
           value: "http://claude-agent:8000"
-        - name: QDRANT_URL
-          value: "http://qdrant:6333"
+        - name: KNOWLEDGE_MCP_URL
+          value: "http://knowledge-mcp:8000"
         - name: MATRIX_BOT_URL
           value: "http://matrix-bot:8000"
         - name: LOOKBACK_HOURS
@@ -41,26 +52,33 @@ spec:
         volumeMounts:
         - name: code
           mountPath: /app
+        - name: workspace
+          mountPath: /workspace
         resources:
           requests:
             memory: "256Mi"
             cpu: "100m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "1Gi"
+            cpu: "1000m"
         livenessProbe:
           httpGet:
             path: /health
             port: http
           initialDelaySeconds: 60
           periodSeconds: 30
+          timeoutSeconds: 10
         readinessProbe:
           httpGet:
             path: /health
             port: http
           initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
       volumes:
       - name: code
         configMap:
           name: claude-validator-code
+      - name: workspace
+        emptyDir:
+          sizeLimit: 1Gi
