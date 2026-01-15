@@ -1,0 +1,25 @@
+---
+# Pattern Detector ArgoCD Application
+# Part of Forever Learning System - Phase 5
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pattern-detector
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/applications/pattern-detector
+  destination:
+    server: https://10.20.0.40:6443
+    namespace: ai-platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
