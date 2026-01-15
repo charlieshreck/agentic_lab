@@ -753,6 +753,80 @@ data:
         except Exception as e:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
+    async def rest_api_log_event(request: Request):
+        """Log an event to the agent_events collection (REST API wrapper for Forever Learning System)."""
+        try:
+            import json as json_module
+            body = await request.body()
+            data = json_module.loads(body)
+
+            event_type = data.get("event_type")
+            description = data.get("description")
+            source_agent = data.get("source_agent", "claude-agent")
+            metadata = data.get("metadata")
+            resolution = data.get("resolution")
+
+            if not event_type or not description:
+                return JSONResponse(
+                    {"status": "error", "error": "Missing required fields: event_type and description"},
+                    status_code=400
+                )
+
+            # Call the log_event function directly (not the MCP tool wrapper)
+            result = await _log_event_impl(event_type, description, source_agent, metadata, resolution)
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"Error logging event: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def _log_event_impl(
+        event_type: str,
+        description: str,
+        source_agent: str = "claude-agent",
+        metadata: Optional[dict] = None,
+        resolution: Optional[str] = None
+    ) -> dict:
+        """Implementation of log_event (shared by MCP tool and REST API)."""
+        # Valid event types
+        valid_types = {
+            "agent.chat.start", "agent.chat.complete", "agent.tool.call",
+            "agent.error", "validation.complete", "runbook.executed",
+            "feedback.received", "pattern.detected", "autonomy.upgrade"
+        }
+        if event_type not in valid_types:
+            return {"status": "error", "error": f"Invalid event_type. Must be one of: {valid_types}"}
+
+        event_id = str(uuid.uuid4())
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Generate embedding from description
+        try:
+            vector = await get_embedding(f"{event_type}: {description}")
+        except Exception as e:
+            return {"status": "error", "error": f"Failed to generate embedding: {str(e)}"}
+
+        # Build payload
+        payload = {
+            "event_type": event_type,
+            "description": description,
+            "source_agent": source_agent,
+            "timestamp": timestamp,
+            "metadata": metadata or {},
+            "resolution": resolution,
+            "score": None,
+            "feedback": None
+        }
+
+        # Upsert to Qdrant
+        point = {"id": event_id, "vector": vector, "payload": payload}
+        success = await qdrant_upsert("agent_events", [point])
+
+        if success:
+            logger.info(f"Logged event {event_id}: {event_type}")
+            return {"status": "ok", "event_id": event_id, "timestamp": timestamp}
+        else:
+            return {"status": "error", "error": "Failed to store event in Qdrant"}
+
     # ============================================================================
     # MAIN
     # ============================================================================
@@ -771,6 +845,7 @@ data:
             Route("/api/entity", rest_api_entity, methods=["GET"]),
             Route("/api/runbook", rest_api_runbook, methods=["GET"]),
             Route("/api/runbooks", rest_api_runbooks, methods=["GET"]),
+            Route("/api/log_event", rest_api_log_event, methods=["POST"]),
         ]
 
         mcp_app = mcp.http_app()
