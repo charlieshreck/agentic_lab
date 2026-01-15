@@ -19,7 +19,7 @@ data:
     from datetime import datetime
     from typing import Dict, List, Any, Optional
 
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from pydantic import BaseModel
     import httpx
     import uvicorn
@@ -595,16 +595,25 @@ data:
         }
 
     @app.post("/alert")
-    async def receive_alertmanager_webhook(payload: dict):
+    async def receive_alertmanager_webhook(request: Request):
         """Receive alerts from Prometheus AlertManager webhook."""
+        try:
+            payload = await request.json()
+        except Exception as e:
+            logger.error(f"Failed to parse alert payload: {e}")
+            return {"status": "error", "message": str(e)}
+
         # AlertManager sends: {"receiver": "...", "status": "...", "alerts": [...]}
-        # Extract alerts array from payload, or treat payload as single alert
-        if "alerts" in payload:
+        # Or sometimes just an array of alerts
+        if isinstance(payload, dict) and "alerts" in payload:
             alerts = payload.get("alerts", [])
         elif isinstance(payload, list):
             alerts = payload
-        else:
+        elif isinstance(payload, dict):
             alerts = [payload]  # Single alert as dict
+        else:
+            logger.error(f"Unexpected payload type: {type(payload)}")
+            return {"status": "error", "message": "Invalid payload format"}
 
         logger.info(f"Received {len(alerts)} alerts from AlertManager")
         processed = 0
