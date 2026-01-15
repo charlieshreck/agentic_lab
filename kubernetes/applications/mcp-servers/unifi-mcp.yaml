@@ -53,7 +53,7 @@ data:
     # Session manager for operations requiring CSRF token
     class UniFiSession:
         def __init__(self):
-            self.cookies = None
+            self.cookies = {}  # Store as dict for cross-client use
             self.csrf_token = None
 
         async def login(self) -> bool:
@@ -68,9 +68,10 @@ data:
                         json={"username": UNIFI_USER, "password": UNIFI_PASSWORD}
                     )
                     response.raise_for_status()
-                    self.cookies = response.cookies
+                    # Convert cookies to dict for use with other clients
+                    self.cookies = {k: v for k, v in response.cookies.items()}
                     self.csrf_token = response.headers.get("X-CSRF-Token", "")
-                    logger.info("UniFi session auth successful")
+                    logger.info(f"UniFi session auth successful, CSRF token: {self.csrf_token[:8]}...")
                     return True
             except Exception as e:
                 logger.error(f"Session login failed: {e}")
