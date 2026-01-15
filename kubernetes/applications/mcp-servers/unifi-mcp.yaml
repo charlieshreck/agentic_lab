@@ -193,18 +193,18 @@ data:
 
     async def _api_put_session(endpoint: str, data: dict) -> Any:
         """PUT using session auth with CSRF token (required for site settings)."""
+        logger.info(f"_api_put_session called for {endpoint}")
         if not await session_manager.ensure_session():
             raise Exception("Session auth required but UNIFI_USER/PASSWORD not configured")
+        logger.info(f"Session ready - cookies: {list(session_manager.cookies.keys())}, csrf: {session_manager.csrf_token[:8] if session_manager.csrf_token else 'NONE'}...")
         headers = {"Content-Type": "application/json"}
         if session_manager.csrf_token:
             headers["X-CSRF-Token"] = session_manager.csrf_token
+        url = f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}"
+        logger.info(f"PUT to {url} with headers: {list(headers.keys())}")
         async with httpx.AsyncClient(verify=SSL_CONTEXT, timeout=30.0) as client:
-            r = await client.put(
-                f"{UNIFI_HOST}/proxy/network/api/s/{UNIFI_SITE}{endpoint}",
-                headers=headers,
-                cookies=session_manager.cookies,
-                json=data
-            )
+            r = await client.put(url, headers=headers, cookies=session_manager.cookies, json=data)
+            logger.info(f"PUT response: {r.status_code}")
             r.raise_for_status()
             return r.json()
 
