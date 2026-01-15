@@ -65,6 +65,61 @@ data:
     PRIORITY_LOW = 4       # Background tasks
 
     # ============================================================================
+    # Event Logging (Forever Learning System)
+    # ============================================================================
+
+    async def log_to_knowledge(
+        event_type: str,
+        description: str,
+        task_id: Optional[str] = None,
+        task_data: Optional[dict] = None,
+        result: Optional[str] = None,
+        success: bool = True,
+        latency_ms: Optional[float] = None
+    ):
+        """
+        Log execution event to knowledge-mcp for the Forever Learning System.
+
+        This allows the AI platform to learn from every interaction by tracking
+        what worked, what failed, and why.
+        """
+        try:
+            metadata = {
+                "worker_id": WORKER_ID,
+                "source": "claude-agent",
+            }
+            if task_id:
+                metadata["task_id"] = task_id
+            if task_data:
+                metadata["model"] = task_data.get("model", "unknown")
+                metadata["prompt_length"] = len(task_data.get("prompt", ""))
+                metadata["timeout"] = task_data.get("timeout", 600)
+            if result:
+                metadata["response_length"] = len(result)
+            if latency_ms:
+                metadata["latency_ms"] = latency_ms
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/log_event",
+                    json={
+                        "event_type": event_type,
+                        "description": description[:500],  # Truncate for embedding
+                        "source_agent": "claude-agent",
+                        "metadata": metadata,
+                        "resolution": "completed" if success else "failed"
+                    }
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    print(f"[Learning] Logged event {data.get('event_id', 'unknown')}: {event_type}")
+                else:
+                    print(f"[Learning] Failed to log event: {resp.status_code}")
+        except Exception as e:
+            # Don't fail the main task if logging fails
+            print(f"[Learning] Error logging event: {e}")
+
+    # ============================================================================
     # Redis Task Queue Functions
     # ============================================================================
 
@@ -307,16 +362,53 @@ data:
         env["HOME"] = os.environ.get("HOME", "/home/agent")
         env["CLAUDE_CODE_ENTRYPOINT"] = "agent-api"
 
+        # Track timing for learning system
+        start_time = datetime.utcnow()
+
         try:
             returncode, stdout, stderr = await asyncio.to_thread(
                 _run_claude_sync, cmd, working_dir, env, timeout
             )
+
+            # Calculate latency
+            latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+
             if returncode == 0:
                 await update_task_result(task_id, "completed", result=stdout)
+                # Log success to learning system
+                await log_to_knowledge(
+                    event_type="agent.chat.complete",
+                    description=f"Task {task_id}: {prompt[:200]}",
+                    task_id=task_id,
+                    task_data=task_data,
+                    result=stdout,
+                    success=True,
+                    latency_ms=latency_ms
+                )
             else:
                 await update_task_result(task_id, "failed", result=stdout, error=stderr or "Unknown error")
+                # Log failure to learning system
+                await log_to_knowledge(
+                    event_type="agent.error",
+                    description=f"Task {task_id} failed: {stderr[:200] if stderr else 'Unknown error'}",
+                    task_id=task_id,
+                    task_data=task_data,
+                    result=stdout,
+                    success=False,
+                    latency_ms=latency_ms
+                )
         except Exception as e:
+            latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
             await update_task_result(task_id, "failed", error=str(e))
+            # Log exception to learning system
+            await log_to_knowledge(
+                event_type="agent.error",
+                description=f"Task {task_id} exception: {str(e)[:200]}",
+                task_id=task_id,
+                task_data=task_data,
+                success=False,
+                latency_ms=latency_ms
+            )
 
     # Worker state
     worker_running = False
@@ -374,6 +466,7 @@ data:
                 )
 
             # Sync mode - execute directly (bypasses queue)
+            sync_task_id = str(uuid.uuid4())[:8]  # Short ID for sync tasks
             cmd = [
                 "claude",
                 "--print",
@@ -391,17 +484,48 @@ data:
             env["HOME"] = os.environ.get("HOME", "/home/agent")
             env["CLAUDE_CODE_ENTRYPOINT"] = "agent-api"
 
+            # Track timing for learning system
+            start_time = datetime.utcnow()
+            task_data = {
+                "prompt": request.prompt,
+                "model": request.model,
+                "timeout": request.timeout,
+            }
+
             returncode, stdout, stderr = await asyncio.to_thread(
                 _run_claude_sync, cmd, request.working_directory, env, request.timeout
             )
 
+            # Calculate latency
+            latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+
             if returncode == 0:
+                # Log success to learning system (fire and forget)
+                asyncio.create_task(log_to_knowledge(
+                    event_type="agent.chat.complete",
+                    description=f"Sync task {sync_task_id}: {request.prompt[:200]}",
+                    task_id=sync_task_id,
+                    task_data=task_data,
+                    result=stdout,
+                    success=True,
+                    latency_ms=latency_ms
+                ))
                 return AgentResponse(
                     success=True,
                     result=stdout,
                     tool_calls=[]
                 )
             else:
+                # Log failure to learning system
+                asyncio.create_task(log_to_knowledge(
+                    event_type="agent.error",
+                    description=f"Sync task {sync_task_id} failed: {stderr[:200] if stderr else 'Unknown error'}",
+                    task_id=sync_task_id,
+                    task_data=task_data,
+                    result=stdout,
+                    success=False,
+                    latency_ms=latency_ms
+                ))
                 return AgentResponse(
                     success=False,
                     error=stderr or "Unknown error",
@@ -409,6 +533,12 @@ data:
                 )
 
         except Exception as e:
+            # Log exception (can't easily get timing here)
+            asyncio.create_task(log_to_knowledge(
+                event_type="agent.error",
+                description=f"Sync task exception: {str(e)[:200]}",
+                success=False
+            ))
             return AgentResponse(
                 success=False,
                 error=str(e)
