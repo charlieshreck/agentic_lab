@@ -813,7 +813,7 @@ data:
             Route("/api/wlans", api_wlans),
         ]
 
-        mcp_app = mcp.http_app()
+        mcp_app = mcp.http_app(stateless_http=True)  # Stateless mode for K8s
         app = Starlette(
             routes=rest_routes + [Mount("/", app=mcp_app)],
             lifespan=mcp_app.lifespan
@@ -836,7 +836,7 @@ spec:
       labels:
         app: unifi-mcp
       annotations:
-        configmap-hash: "v2-comprehensive"
+        configmap-hash: "v4-http-app-stateless"
     spec:
       containers:
         - name: unifi-mcp
