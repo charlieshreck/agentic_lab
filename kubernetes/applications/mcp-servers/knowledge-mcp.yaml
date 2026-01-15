@@ -1156,10 +1156,10 @@ data:
                     "match": {"any": resolutions}
                 })
 
-            # Only apply filter if we have conditions
-            qdrant_filter = {"must": filter_conditions} if filter_conditions else None
+            # Only apply filter if we have actual conditions (not empty list)
+            qdrant_filter = {"must": filter_conditions} if len(filter_conditions) > 0 else None
 
-            # Query Qdrant
+            # Query Qdrant (use None filter to get all events)
             events = await qdrant_scroll("agent_events", qdrant_filter, limit)
 
             # Post-filter by timestamp (since range on string isn't supported)
