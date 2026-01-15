@@ -1284,6 +1284,139 @@ data:
             return JSONResponse({"status": "error", "error": str(e), "groups": []}, status_code=500)
 
     # ============================================================================
+    # REST API - ADD ENDPOINTS
+    # ============================================================================
+
+    async def rest_api_add_documentation(request: Request) -> JSONResponse:
+        """Add documentation to the knowledge base (REST API)."""
+        try:
+            import json as json_module
+            body = await request.body()
+            data = json_module.loads(body)
+
+            title = data.get("title")
+            content = data.get("content")
+            path = data.get("path")
+            tags = data.get("tags", [])
+
+            if not title or not content:
+                return JSONResponse(
+                    {"status": "error", "error": "Missing required fields: title and content"},
+                    status_code=400
+                )
+
+            point_id = str(uuid.uuid4())
+            vector = await get_embedding(f"{title}\n{content[:2000]}")
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "title": title,
+                    "content": content,
+                    "path": path or "",
+                    "tags": tags,
+                    "indexed_at": datetime.now(timezone.utc).isoformat()
+                }
+            }
+            success = await qdrant_upsert("documentation", [point])
+            if success:
+                logger.info(f"Added documentation: {title} (id={point_id})")
+                return JSONResponse({"status": "ok", "id": point_id})
+            else:
+                return JSONResponse({"status": "error", "error": "Failed to upsert"}, status_code=500)
+        except Exception as e:
+            logger.error(f"Error adding documentation: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_add_runbook(request: Request) -> JSONResponse:
+        """Add a runbook to the knowledge base (REST API)."""
+        try:
+            import json as json_module
+            body = await request.body()
+            data = json_module.loads(body)
+
+            title = data.get("title")
+            trigger_pattern = data.get("trigger_pattern")
+            solution = data.get("solution")
+            path = data.get("path")
+
+            if not title or not trigger_pattern or not solution:
+                return JSONResponse(
+                    {"status": "error", "error": "Missing required fields: title, trigger_pattern, solution"},
+                    status_code=400
+                )
+
+            point_id = str(uuid.uuid4())
+            vector = await get_embedding(f"{title}\n{trigger_pattern}\n{solution[:1000]}")
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "title": title,
+                    "trigger_pattern": trigger_pattern,
+                    "solution": solution,
+                    "path": path or "",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "automation_level": "manual",
+                    "execution_count": 0,
+                    "success_count": 0,
+                    "success_rate": 0.0
+                }
+            }
+            success = await qdrant_upsert("runbooks", [point])
+            if success:
+                logger.info(f"Added runbook: {title} (id={point_id})")
+                return JSONResponse({"status": "ok", "id": point_id})
+            else:
+                return JSONResponse({"status": "error", "error": "Failed to upsert"}, status_code=500)
+        except Exception as e:
+            logger.error(f"Error adding runbook: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    async def rest_api_add_decision(request: Request) -> JSONResponse:
+        """Add an architectural decision to the knowledge base (REST API)."""
+        try:
+            import json as json_module
+            body = await request.body()
+            data = json_module.loads(body)
+
+            title = data.get("title")
+            decision = data.get("decision")
+            rationale = data.get("rationale")
+            context = data.get("context")
+            alternatives = data.get("alternatives", [])
+
+            if not title or not decision or not rationale:
+                return JSONResponse(
+                    {"status": "error", "error": "Missing required fields: title, decision, rationale"},
+                    status_code=400
+                )
+
+            point_id = str(uuid.uuid4())
+            vector = await get_embedding(f"{title}\n{decision}\n{rationale}")
+            point = {
+                "id": point_id,
+                "vector": vector,
+                "payload": {
+                    "title": title,
+                    "decision": decision,
+                    "rationale": rationale,
+                    "context": context or "",
+                    "alternatives": alternatives,
+                    "date": datetime.now(timezone.utc).isoformat()
+                }
+            }
+            success = await qdrant_upsert("decisions", [point])
+            if success:
+                logger.info(f"Added decision: {title} (id={point_id})")
+                return JSONResponse({"status": "ok", "id": point_id})
+            else:
+                return JSONResponse({"status": "error", "error": "Failed to upsert"}, status_code=500)
+        except Exception as e:
+            logger.error(f"Error adding decision: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+    # ============================================================================
     # MAIN
     # ============================================================================
 
@@ -1305,6 +1438,9 @@ data:
             Route("/api/update_event", rest_api_update_event, methods=["POST"]),
             Route("/api/events", rest_api_events, methods=["GET"]),
             Route("/api/find_similar_prompts", rest_api_find_similar_prompts, methods=["POST"]),
+            Route("/api/add_documentation", rest_api_add_documentation, methods=["POST"]),
+            Route("/api/add_runbook", rest_api_add_runbook, methods=["POST"]),
+            Route("/api/add_decision", rest_api_add_decision, methods=["POST"]),
         ]
 
         mcp_app = mcp.http_app()
