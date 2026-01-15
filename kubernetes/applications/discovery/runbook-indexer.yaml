@@ -75,7 +75,11 @@ data:
         try:
             with urlopen(req, timeout=60) as resp:
                 return json.loads(resp.read().decode())
-        except (URLError, HTTPError, json.JSONDecodeError) as e:
+        except HTTPError as e:
+            body = e.read().decode() if hasattr(e, 'read') else ''
+            logger.error(f"HTTP PUT {url} failed: {e.code} {e.reason} - {body}")
+            return None
+        except (URLError, json.JSONDecodeError) as e:
             logger.warning(f"HTTP PUT {url} failed: {e}")
             return None
 
