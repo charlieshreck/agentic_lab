@@ -27,18 +27,19 @@ spec:
               containerPort: 3000
               protocol: TCP
           env:
-            # Authentication
+            # Authentication - NOAUTH (no underscore per Keep docs)
             - name: AUTH_TYPE
-              value: "NO_AUTH"
+              value: "NOAUTH"
             - name: NEXTAUTH_SECRET
               value: "keep-nextauth-secret-change-me"
             - name: NEXTAUTH_URL
-              value: "http://keep.kernow.io"
+              value: "https://keep.kernow.io"
             # API URLs - backend is accessible via internal service
             - name: API_URL
               value: "http://keep:8080"
+            # Client-side API URL - must be browser-accessible
             - name: NEXT_PUBLIC_API_URL
-              value: "http://keep.kernow.io/api"
+              value: "http://10.20.0.40:31105"
             # Disable Pusher/websockets (matches backend config)
             - name: PUSHER_DISABLED
               value: "true"
