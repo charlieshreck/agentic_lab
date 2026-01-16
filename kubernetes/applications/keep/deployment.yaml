@@ -37,12 +37,18 @@ spec:
             # Database authentication - local user accounts
             - name: AUTH_TYPE
               value: "DB"
-            # Keep API secret for session encryption
+            # Keep API secret for session encryption (from Infisical)
             - name: KEEP_API_SECRET
-              value: "keep-secret-change-me-in-production"
-            # JWT secret - must match frontend NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: keep-secrets
+                  key: KEEP_API_SECRET
+            # JWT secret - must match frontend NEXTAUTH_SECRET (from Infisical)
             - name: KEEP_JWT_SECRET
-              value: "keep-nextauth-secret-change-me"
+              valueFrom:
+                secretKeyRef:
+                  name: keep-secrets
+                  key: KEEP_JWT_SECRET
             # Keep API URL for webhooks
             - name: KEEP_API_URL
               value: "http://10.20.0.40:31105"

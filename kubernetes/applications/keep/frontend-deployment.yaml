@@ -31,7 +31,10 @@ spec:
             - name: AUTH_TYPE
               value: "DB"
             - name: NEXTAUTH_SECRET
-              value: "keep-nextauth-secret-change-me"
+              valueFrom:
+                secretKeyRef:
+                  name: keep-secrets
+                  key: NEXTAUTH_SECRET
             - name: NEXTAUTH_URL
               value: "https://keep.kernow.io"
             # API URLs - backend is accessible via internal service

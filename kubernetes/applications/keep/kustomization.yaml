@@ -6,6 +6,7 @@ namespace: keep
 resources:
   - namespace.yaml
   - pvc.yaml
+  - infisical-secret.yaml
   - deployment.yaml
   - service.yaml
   - frontend-deployment.yaml
