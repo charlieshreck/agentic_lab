@@ -540,7 +540,7 @@ data:
                 "Content-Type": "application/json"
             },
             json={
-                "workspaceSlug": "prod-homelab-y-nij",
+                "projectSlug": "prod-homelab-y-nij",
                 "environment": "prod",
                 "secretPath": SECRET_PATH,
                 "secretValue": value
