@@ -6,8 +6,13 @@ metadata:
   labels:
     app.kubernetes.io/name: keep
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - keep.kernow.io
+      secretName: kernow-io-tls
   rules:
     - host: keep.kernow.io
       http:
