@@ -9,7 +9,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: claude-refresh.agentic.kernow.io
+    - host: claude-refresh.kernow.io
       http:
         paths:
           - path: /
