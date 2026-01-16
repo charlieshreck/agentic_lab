@@ -337,13 +337,16 @@ data:
                         "annotations": {}
                     }
                 )
-                if response.status_code == 200:
+                if 200 <= response.status_code < 300:
                     raised_alerts[alert_key] = datetime.utcnow()
-                    result = response.json()
-                    logger.info(f"LangGraph processing: {result}")
+                    try:
+                        result = response.json()
+                    except Exception:
+                        result = {"status": "accepted", "code": response.status_code}
+                    logger.info(f"LangGraph processing (HTTP {response.status_code}): {result}")
                     return result
                 else:
-                    logger.error(f"LangGraph error: {response.text}")
+                    logger.error(f"LangGraph error (HTTP {response.status_code}): {response.text}")
                     return None
             except Exception as e:
                 logger.error(f"Error forwarding to LangGraph: {e}")

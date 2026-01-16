@@ -436,11 +436,16 @@ data:
                 )
             else:
                 TASKS_TOTAL.labels(status="failed", model=model).inc()
-                await update_task_result(task_id, "failed", result=stdout, error=stderr or "Unknown error")
+                # Claude CLI often puts errors in stdout, not stderr
+                error_msg = stderr or stdout or "Unknown error"
+                # Extract first line if it's an API error for cleaner logging
+                if "API Error" in error_msg or "authentication_error" in error_msg:
+                    error_msg = error_msg.split('\n')[0][:500]
+                await update_task_result(task_id, "failed", result=stdout, error=error_msg)
                 # Log failure to learning system
                 await log_to_knowledge(
                     event_type="agent.error",
-                    description=f"Task {task_id} failed: {stderr[:200] if stderr else 'Unknown error'}",
+                    description=f"Task {task_id} failed: {error_msg[:200]}",
                     task_id=task_id,
                     task_data=task_data,
                     result=stdout,
