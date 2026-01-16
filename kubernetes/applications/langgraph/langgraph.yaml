@@ -725,6 +725,22 @@ data:
         labels: Optional[dict] = None
         annotations: Optional[dict] = None
 
+    class KeepAlert(BaseModel):
+        """Keep alert format - maps to AlertInput internally."""
+        fingerprint: Optional[str] = None
+        id: Optional[str] = None
+        name: str
+        status: str = "firing"
+        severity: str = "warning"
+        lastReceived: Optional[str] = None
+        description: Optional[str] = None
+        message: Optional[str] = None
+        labels: Optional[dict] = None
+        source: Optional[list] = None
+        # Accept any additional fields Keep might send
+        class Config:
+            extra = "allow"
+
     class ApprovalRequest(BaseModel):
         alert_id: str
         solution_index: int
@@ -1856,6 +1872,50 @@ data:
             "alert_id": alert_dict["id"],
             "status": "accepted",
             "message": "Alert queued for processing"
+        }
+
+    @app.post("/keep-alert", status_code=202)
+    async def process_keep_alert(alert: KeepAlert):
+        """Receive alert from Keep and process. Transforms Keep format to internal format."""
+        # Transform Keep alert to internal format
+        alert_id = alert.fingerprint or alert.id or f"keep-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        namespace = "default"
+        if alert.labels:
+            namespace = alert.labels.get("namespace", "default")
+
+        alert_dict = {
+            "id": alert_id,
+            "alertname": alert.name,
+            "severity": alert.severity or "warning",
+            "namespace": namespace,
+            "description": alert.description or alert.message or "",
+            "labels": alert.labels or {},
+            "annotations": {},
+            "source": alert.source,
+            "keep_status": alert.status
+        }
+
+        initial_state = {
+            "messages": [],
+            "alert": alert_dict,
+            "assessment": {},
+            "solutions": [],
+            "selected_solution": {},
+            "approval_status": "pending",
+            "execution_result": {},
+            "runbook_id": "",
+            "topic_id": 0,
+            "thread_id": alert_dict["id"],
+            "runbook_match": {},
+            "handled_locally": False
+        }
+        # Spawn background task - returns immediately
+        asyncio.create_task(_process_alert_background(alert_dict, initial_state))
+        logger.info("Keep alert %s (%s) accepted for async processing", alert_dict["alertname"], alert_dict["id"])
+        return {
+            "alert_id": alert_dict["id"],
+            "status": "accepted",
+            "message": "Keep alert queued for processing"
         }
 
     @app.post("/approve")
