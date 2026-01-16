@@ -17,6 +17,14 @@ spec:
     - host: keep.kernow.io
       http:
         paths:
+          # NextAuth routes - MUST go to frontend
+          - path: /api/auth
+            pathType: Prefix
+            backend:
+              service:
+                name: keep-frontend
+                port:
+                  number: 3000
           # Backend API routes
           - path: /api
             pathType: Prefix
