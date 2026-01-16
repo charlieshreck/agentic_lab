@@ -532,15 +532,19 @@ data:
     def update_infisical_secret(value):
         """Update the secret in Infisical."""
         token = get_infisical_token()
+        # v3 PATCH API expects all params in JSON body
         resp = requests.patch(
             f"{INFISICAL_HOST}/v3/secrets/raw/{SECRET_KEY}",
-            params={
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            },
+            json={
                 "workspaceSlug": "prod-homelab-y-nij",
                 "environment": "prod",
-                "secretPath": SECRET_PATH
-            },
-            headers={"Authorization": f"Bearer {token}"},
-            json={"secretValue": value}
+                "secretPath": SECRET_PATH,
+                "secretValue": value
+            }
         )
         if resp.status_code in [200, 201]:
             return True
