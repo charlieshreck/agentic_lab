@@ -5,6 +5,9 @@ metadata:
 spec:
   externalIPs: true
   loadBalancerIPs: true
+  # Specify the interface for L2 announcements
+  interfaces:
+    - ^eno.*  # Match eno1 and any eno interfaces
   # NOTE: For single-node cluster (agentic-01), match all nodes
   # Control-plane IS the only node, so we don't exclude it
   nodeSelector:
