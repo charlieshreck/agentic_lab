@@ -40,6 +40,9 @@ spec:
             # Keep API secret for session encryption
             - name: KEEP_API_SECRET
               value: "keep-secret-change-me-in-production"
+            # JWT secret - must match frontend NEXTAUTH_SECRET
+            - name: KEEP_JWT_SECRET
+              value: "keep-nextauth-secret-change-me"
             # Keep API URL for webhooks
             - name: KEEP_API_URL
               value: "http://10.20.0.40:31105"
