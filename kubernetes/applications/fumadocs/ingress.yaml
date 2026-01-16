@@ -9,10 +9,10 @@ spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - knowledge.kernow.io
+        - fumadocs.kernow.io
       secretName: kernow-io-tls
   rules:
-    - host: knowledge.kernow.io
+    - host: fumadocs.kernow.io
       http:
         paths:
           - path: /
