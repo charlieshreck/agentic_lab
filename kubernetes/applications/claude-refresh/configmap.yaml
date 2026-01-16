@@ -6,7 +6,7 @@ metadata:
 data:
   app.py: |
     #!/usr/bin/env python3
-    """Claude OAuth Token Refresh Service - Mobile-friendly web form."""
+    """Claude OAuth Token Refresh Service - Interactive wizard."""
     import os
     import json
     import base64
@@ -33,108 +33,250 @@ data:
     <html>
     <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
         <title>Claude Token Refresh</title>
         <style>
-            * { box-sizing: border-box; }
+            * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
             body {
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                margin: 0; padding: 20px;
-                background: #1a1a2e; color: #eee;
+                margin: 0; padding: 16px;
+                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                color: #eee;
                 min-height: 100vh;
             }
-            .container { max-width: 600px; margin: 0 auto; }
-            h1 { color: #fff; font-size: 1.5em; margin-bottom: 10px; }
-            .status { padding: 15px; border-radius: 8px; margin: 15px 0; }
-            .status.success { background: #1e4620; border: 1px solid #2e7d32; }
-            .status.error { background: #4a1515; border: 1px solid #c62828; }
-            .status.info { background: #1a3a5c; border: 1px solid #1976d2; }
-            .current { font-size: 0.9em; opacity: 0.8; margin: 10px 0; }
-            .expired { color: #ff6b6b; font-weight: bold; }
-            .valid { color: #69db7c; }
-            textarea {
-                width: 100%; height: 120px;
-                padding: 15px; font-size: 16px;
-                border: 2px solid #333; border-radius: 8px;
-                background: #0f0f1a; color: #fff;
-                resize: vertical;
+            .container { max-width: 500px; margin: 0 auto; }
+            h1 {
+                color: #fff; font-size: 1.4em; margin: 0 0 16px 0;
+                display: flex; align-items: center; gap: 10px;
             }
-            textarea:focus { border-color: #667eea; outline: none; }
-            button {
-                width: 100%; padding: 18px;
-                font-size: 18px; font-weight: bold;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white; border: none; border-radius: 8px;
-                cursor: pointer; margin-top: 15px;
+            .status-banner {
+                padding: 12px 16px; border-radius: 12px; margin-bottom: 20px;
+                display: flex; align-items: center; gap: 12px;
             }
-            button:active { transform: scale(0.98); }
-            .instructions {
-                background: #252540; padding: 15px;
-                border-radius: 8px; margin: 20px 0;
-                font-size: 0.9em; line-height: 1.6;
+            .status-banner.expired { background: linear-gradient(135deg, #c0392b 0%, #e74c3c 100%); }
+            .status-banner.warning { background: linear-gradient(135deg, #d35400 0%, #e67e22 100%); }
+            .status-banner.valid { background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); }
+            .status-banner.success { background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); }
+            .status-banner.error { background: linear-gradient(135deg, #c0392b 0%, #e74c3c 100%); }
+            .status-icon { font-size: 1.5em; }
+            .status-text { flex: 1; }
+            .status-text strong { display: block; font-size: 1.1em; }
+            .status-text small { opacity: 0.9; }
+
+            .step {
+                background: rgba(255,255,255,0.05);
+                border-radius: 16px;
+                margin-bottom: 12px;
+                overflow: hidden;
+                border: 1px solid rgba(255,255,255,0.1);
             }
-            code {
-                background: #1a1a2e; padding: 3px 8px;
-                border-radius: 4px; font-size: 0.85em;
-                display: block; margin: 8px 0;
-                overflow-x: auto; white-space: nowrap;
+            .step.active { border-color: #667eea; }
+            .step.done { opacity: 0.6; }
+            .step-header {
+                padding: 16px;
+                display: flex; align-items: center; gap: 12px;
+                cursor: pointer;
             }
-            .step { margin: 10px 0; }
             .step-num {
-                display: inline-block; width: 24px; height: 24px;
-                background: #667eea; border-radius: 50%;
-                text-align: center; line-height: 24px;
-                font-size: 0.8em; margin-right: 8px;
+                width: 32px; height: 32px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                border-radius: 50%;
+                display: flex; align-items: center; justify-content: center;
+                font-weight: bold; font-size: 1em;
+                flex-shrink: 0;
             }
+            .step.done .step-num { background: #27ae60; }
+            .step-title { flex: 1; font-weight: 600; }
+            .step-content {
+                padding: 0 16px 16px 60px;
+                display: none;
+            }
+            .step.active .step-content { display: block; }
+
+            .btn {
+                display: block; width: 100%;
+                padding: 16px 20px;
+                font-size: 16px; font-weight: 600;
+                border: none; border-radius: 12px;
+                cursor: pointer;
+                text-decoration: none;
+                text-align: center;
+                margin-top: 12px;
+                transition: transform 0.1s, opacity 0.1s;
+            }
+            .btn:active { transform: scale(0.98); opacity: 0.9; }
+            .btn-primary {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+            .btn-secondary {
+                background: rgba(255,255,255,0.1);
+                color: #fff;
+                border: 1px solid rgba(255,255,255,0.2);
+            }
+            .btn-success {
+                background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+                color: white;
+            }
+
+            .code-box {
+                background: #0a0a15;
+                border: 1px solid rgba(255,255,255,0.1);
+                border-radius: 8px;
+                padding: 12px;
+                font-family: 'SF Mono', Monaco, monospace;
+                font-size: 13px;
+                overflow-x: auto;
+                white-space: nowrap;
+                margin: 12px 0;
+                position: relative;
+            }
+            .code-box code { color: #a8e6cf; }
+            .copy-btn {
+                position: absolute;
+                right: 8px; top: 8px;
+                background: #667eea;
+                border: none;
+                color: white;
+                padding: 6px 12px;
+                border-radius: 6px;
+                font-size: 12px;
+                cursor: pointer;
+            }
+            .copy-btn.copied { background: #27ae60; }
+
+            textarea {
+                width: 100%;
+                height: 100px;
+                padding: 12px;
+                font-size: 14px;
+                font-family: 'SF Mono', Monaco, monospace;
+                border: 2px solid rgba(255,255,255,0.1);
+                border-radius: 12px;
+                background: #0a0a15;
+                color: #fff;
+                resize: none;
+                margin: 12px 0;
+            }
+            textarea:focus {
+                border-color: #667eea;
+                outline: none;
+            }
+
+            .helper-text {
+                font-size: 0.85em;
+                color: rgba(255,255,255,0.6);
+                margin-top: 8px;
+            }
+
+            .checkmark { color: #2ecc71; margin-left: 8px; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🔑 Claude Token Refresh</h1>
+            <h1>🔑 Claude Token</h1>
 
             {% if message %}
-            <div class="status {{ status }}">{{ message }}</div>
+            <div class="status-banner {{ status }}">
+                <span class="status-icon">{% if status == 'success' %}✅{% else %}❌{% endif %}</span>
+                <div class="status-text">
+                    <strong>{{ message }}</strong>
+                </div>
+            </div>
+            {% else %}
+            <div class="status-banner {% if days_remaining < 0 %}expired{% elif days_remaining < 7 %}warning{% else %}valid{% endif %}">
+                <span class="status-icon">{% if days_remaining < 0 %}🔴{% elif days_remaining < 7 %}🟡{% else %}🟢{% endif %}</span>
+                <div class="status-text">
+                    {% if days_remaining < 0 %}
+                    <strong>Expired {{ -days_remaining }} days ago</strong>
+                    <small>Token needs refresh</small>
+                    {% elif days_remaining < 7 %}
+                    <strong>Expires in {{ days_remaining }} days</strong>
+                    <small>Refresh soon</small>
+                    {% else %}
+                    <strong>Valid for {{ days_remaining }} days</strong>
+                    <small>All good!</small>
+                    {% endif %}
+                </div>
+            </div>
             {% endif %}
 
-            <div class="current">
-                Current token:
-                {% if expires_at %}
-                    {% if days_remaining < 0 %}
-                    <span class="expired">Expired {{ -days_remaining }} days ago</span>
-                    {% elif days_remaining < 7 %}
-                    <span class="expired">Expires in {{ days_remaining }} days</span>
-                    {% else %}
-                    <span class="valid">Valid for {{ days_remaining }} days</span>
-                    {% endif %}
-                {% else %}
-                    <span class="expired">Unknown</span>
-                {% endif %}
+            <div class="step {% if step == 1 %}active{% elif step > 1 %}done{% endif %}" id="step1">
+                <div class="step-header" onclick="setStep(1)">
+                    <span class="step-num">1</span>
+                    <span class="step-title">Login to Claude</span>
+                    {% if step > 1 %}<span class="checkmark">✓</span>{% endif %}
+                </div>
+                <div class="step-content">
+                    <p>On your computer, open terminal and run:</p>
+                    <div class="code-box">
+                        <code>claude login</code>
+                        <button class="copy-btn" onclick="copyText('claude login', this)">Copy</button>
+                    </div>
+                    <p class="helper-text">This opens a browser to authenticate with Anthropic.</p>
+                    <button class="btn btn-primary" onclick="setStep(2)">Done, Next →</button>
+                </div>
             </div>
 
-            <form method="POST">
-                <textarea name="credentials" placeholder="Paste base64 credentials here..."
-                          required>{{ credentials or '' }}</textarea>
-                <button type="submit">Update Token</button>
-            </form>
-
-            <div class="instructions">
-                <strong>How to get new credentials:</strong>
-                <div class="step">
-                    <span class="step-num">1</span>
-                    Run on computer:
-                    <code>claude login</code>
-                </div>
-                <div class="step">
+            <div class="step {% if step == 2 %}active{% elif step > 2 %}done{% endif %}" id="step2">
+                <div class="step-header" onclick="setStep(2)">
                     <span class="step-num">2</span>
-                    Copy the output of:
-                    <code>cat ~/.claude/.credentials.json | base64 -w0</code>
+                    <span class="step-title">Copy credentials</span>
+                    {% if step > 2 %}<span class="checkmark">✓</span>{% endif %}
                 </div>
-                <div class="step">
+                <div class="step-content">
+                    <p>Run this to get the token:</p>
+                    <div class="code-box">
+                        <code>cat ~/.claude/.credentials.json | base64 -w0</code>
+                        <button class="copy-btn" onclick="copyText('cat ~/.claude/.credentials.json | base64 -w0', this)">Copy</button>
+                    </div>
+                    <p class="helper-text">Copy the entire output (it's one long line).</p>
+                    <button class="btn btn-primary" onclick="setStep(3)">Copied, Next →</button>
+                </div>
+            </div>
+
+            <div class="step {% if step == 3 %}active{% endif %}" id="step3">
+                <div class="step-header" onclick="setStep(3)">
                     <span class="step-num">3</span>
-                    Paste above and tap Update
+                    <span class="step-title">Paste & Update</span>
+                </div>
+                <div class="step-content">
+                    <form method="POST" id="updateForm">
+                        <input type="hidden" name="step" value="3">
+                        <textarea name="credentials"
+                                  placeholder="Paste the base64 output here..."
+                                  required>{{ credentials or '' }}</textarea>
+                        <button type="submit" class="btn btn-success">🚀 Update Token</button>
+                    </form>
                 </div>
             </div>
         </div>
+
+        <script>
+            let currentStep = {{ step }};
+
+            function setStep(n) {
+                currentStep = n;
+                document.querySelectorAll('.step').forEach((el, i) => {
+                    el.classList.remove('active', 'done');
+                    if (i + 1 < n) el.classList.add('done');
+                    if (i + 1 === n) el.classList.add('active');
+                });
+                // Update URL without reload
+                history.replaceState(null, '', '?step=' + n);
+            }
+
+            function copyText(text, btn) {
+                navigator.clipboard.writeText(text).then(() => {
+                    btn.textContent = 'Copied!';
+                    btn.classList.add('copied');
+                    setTimeout(() => {
+                        btn.textContent = 'Copy';
+                        btn.classList.remove('copied');
+                    }, 2000);
+                });
+            }
+        </script>
     </body>
     </html>
     """
@@ -178,8 +320,6 @@ data:
     def update_infisical_secret(value):
         """Update the secret in Infisical."""
         token = get_infisical_token()
-
-        # First try to update, if fails try to create
         resp = requests.patch(
             f"{INFISICAL_HOST}/v3/secrets/raw/{SECRET_KEY}",
             params={
@@ -190,10 +330,8 @@ data:
             headers={"Authorization": f"Bearer {token}"},
             json={"secretValue": value}
         )
-
         if resp.status_code in [200, 201]:
             return True
-
         app.logger.error(f"Failed to update secret: {resp.status_code} {resp.text}")
         return False
 
@@ -231,8 +369,10 @@ data:
         message = None
         status = None
         credentials = None
+        step = int(request.args.get("step", 1))
 
         if request.method == "POST":
+            step = 3
             credentials = request.form.get("credentials", "").strip()
 
             if not credentials:
@@ -240,40 +380,34 @@ data:
                 status = "error"
             else:
                 try:
-                    # Validate base64
                     decoded = base64.b64decode(credentials)
                     creds = json.loads(decoded)
-
-                    # Validate structure
                     oauth = creds.get("claudeAiOauth", {})
                     if not oauth.get("accessToken") or not oauth.get("expiresAt"):
                         raise ValueError("Missing accessToken or expiresAt")
 
-                    # Calculate new expiry
                     new_expires = oauth["expiresAt"]
                     new_expires_dt = datetime.fromtimestamp(new_expires / 1000)
                     new_days = (new_expires_dt - datetime.now()).days
 
                     if new_days < 0:
-                        message = f"These credentials are already expired!"
+                        message = "These credentials are already expired!"
                         status = "error"
                     else:
-                        # Update Infisical
                         if update_infisical_secret(credentials):
-                            message = f"✅ Token updated! Valid for {new_days} days"
+                            message = f"Token updated! Valid for {new_days} days"
                             status = "success"
                             expires_at = new_expires
                             days_remaining = new_days
-                            credentials = None  # Clear form
-
-                            # Send resolved alert
+                            credentials = None
+                            step = 1
                             send_resolved_alert(new_days, new_expires_dt.strftime("%Y-%m-%d"))
                         else:
                             message = "Failed to update Infisical"
                             status = "error"
 
                 except json.JSONDecodeError:
-                    message = "Invalid JSON in credentials"
+                    message = "Invalid JSON - check you copied the full output"
                     status = "error"
                 except Exception as e:
                     message = f"Error: {str(e)}"
@@ -285,7 +419,8 @@ data:
             status=status,
             expires_at=expires_at,
             days_remaining=days_remaining or 0,
-            credentials=credentials
+            credentials=credentials,
+            step=step
         )
 
     @app.route("/health")
