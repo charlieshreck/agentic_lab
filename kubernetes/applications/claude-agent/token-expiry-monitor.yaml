@@ -1,0 +1,146 @@
+---
+# Claude OAuth Token Expiration Monitor
+# Checks daily and alerts when token expires within 7 days
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-token-monitor
+  namespace: ai-platform
+spec:
+  schedule: "0 9 * * *"  # Daily at 9 AM UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: monitor
+              image: curlimages/curl:8.5.0
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  # Read credentials from mounted secret
+                  CREDS_B64=$(cat /secrets/CREDENTIALS_JSON_B64)
+
+                  # Decode and extract expiresAt (using basic tools)
+                  CREDS=$(echo "$CREDS_B64" | base64 -d)
+
+                  # Extract expiresAt timestamp (milliseconds)
+                  EXPIRES_AT=$(echo "$CREDS" | grep -o '"expiresAt":[0-9]*' | cut -d: -f2)
+
+                  if [ -z "$EXPIRES_AT" ]; then
+                    echo "ERROR: Could not extract expiresAt from credentials"
+                    exit 1
+                  fi
+
+                  # Convert to seconds
+                  EXPIRES_SECONDS=$((EXPIRES_AT / 1000))
+                  CURRENT_SECONDS=$(date +%s)
+
+                  # Calculate days remaining
+                  DIFF_SECONDS=$((EXPIRES_SECONDS - CURRENT_SECONDS))
+                  DAYS_REMAINING=$((DIFF_SECONDS / 86400))
+
+                  EXPIRES_DATE=$(date -d "@$EXPIRES_SECONDS" "+%Y-%m-%d %H:%M UTC" 2>/dev/null || date -r "$EXPIRES_SECONDS" "+%Y-%m-%d %H:%M UTC")
+
+                  echo "Claude OAuth Token Status:"
+                  echo "  Expires: $EXPIRES_DATE"
+                  echo "  Days remaining: $DAYS_REMAINING"
+
+                  # Alert if within 7 days or expired
+                  if [ "$DAYS_REMAINING" -lt 7 ]; then
+                    if [ "$DAYS_REMAINING" -lt 0 ]; then
+                      SEVERITY="critical"
+                      STATUS="firing"
+                      DESCRIPTION="Claude OAuth token EXPIRED $((DAYS_REMAINING * -1)) days ago on $EXPIRES_DATE. Run 'claude login' and update Infisical."
+                    else
+                      SEVERITY="warning"
+                      STATUS="firing"
+                      DESCRIPTION="Claude OAuth token expires in $DAYS_REMAINING days on $EXPIRES_DATE. Run 'claude login' soon to refresh."
+                    fi
+
+                    echo "ALERT: $DESCRIPTION"
+
+                    # Send alert to Keep
+                    curl -s -X POST "http://keep.keep.svc.cluster.local:8080/alerts/event/keep" \
+                      -H "Content-Type: application/json" \
+                      -H "X-API-KEY: ${KEEP_API_KEY}" \
+                      -d "{
+                        \"name\": \"ClaudeOAuthTokenExpiry\",
+                        \"status\": \"$STATUS\",
+                        \"severity\": \"$SEVERITY\",
+                        \"description\": \"$DESCRIPTION\",
+                        \"source\": \"claude-token-monitor\",
+                        \"labels\": {
+                          \"service\": \"claude-agent\",
+                          \"namespace\": \"ai-platform\",
+                          \"days_remaining\": \"$DAYS_REMAINING\"
+                        }
+                      }"
+
+                    echo ""
+                    echo "Alert sent to Keep"
+                  else
+                    echo "Token healthy - no alert needed"
+
+                    # Send resolved status if previously alerted
+                    curl -s -X POST "http://keep.keep.svc.cluster.local:8080/alerts/event/keep" \
+                      -H "Content-Type: application/json" \
+                      -H "X-API-KEY: ${KEEP_API_KEY}" \
+                      -d "{
+                        \"name\": \"ClaudeOAuthTokenExpiry\",
+                        \"status\": \"resolved\",
+                        \"severity\": \"info\",
+                        \"description\": \"Claude OAuth token is healthy. Expires in $DAYS_REMAINING days on $EXPIRES_DATE.\",
+                        \"source\": \"claude-token-monitor\",
+                        \"labels\": {
+                          \"service\": \"claude-agent\",
+                          \"namespace\": \"ai-platform\",
+                          \"days_remaining\": \"$DAYS_REMAINING\"
+                        }
+                      }"
+                  fi
+              env:
+                - name: KEEP_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: keep-api-key
+                      key: api_key
+              volumeMounts:
+                - name: claude-credentials
+                  mountPath: /secrets
+                  readOnly: true
+          volumes:
+            - name: claude-credentials
+              secret:
+                secretName: claude-credentials
+---
+# Keep API key secret (pulled from Infisical)
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: keep-api-key-sync
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: agentic-homelab-6-z6v
+        envSlug: prod
+        secretsPath: /agentic-platform/keep
+  managedSecretReference:
+    secretName: keep-api-key
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner

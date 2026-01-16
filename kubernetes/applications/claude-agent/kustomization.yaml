@@ -7,3 +7,4 @@ resources:
   - infisical-secrets.yaml
   - configmap.yaml
   - deployment.yaml
+  - token-expiry-monitor.yaml
