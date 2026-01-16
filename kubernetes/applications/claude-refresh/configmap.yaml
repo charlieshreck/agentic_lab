@@ -442,15 +442,17 @@ data:
             </div>
 
             <div class="quick-mode">
-                <h3>Already have the token copied?</h3>
-                <form method="POST" id="quickForm" onsubmit="return handleSubmit(event)">
-                    <textarea name="credentials" id="quickInput"
-                        placeholder='Quick paste: JSON or base64...'
-                        style="min-height: 80px;"></textarea>
-                    <button type="submit" class="btn btn-outline">
-                        Quick Update
-                    </button>
-                </form>
+                <h3>🖥️ One-liner from your computer</h3>
+                <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 12px;">
+                    After running <code style="background: var(--card); padding: 2px 6px; border-radius: 4px;">claude login</code>, just run:
+                </p>
+                <div class="cmd-box" style="margin-bottom: 16px;">
+                    <code style="font-size: 11px;">curl -X POST https://claude-refresh.kernow.io/api/push -H "Content-Type: application/json" -d @~/.claude/.credentials.json</code>
+                    <button class="cmd-copy" onclick="copyCmd(this)" style="font-size: 11px; padding: 6px 10px;">Copy</button>
+                </div>
+                <p style="color: var(--text-muted); font-size: 13px;">
+                    ✨ That's it! No phone needed.
+                </p>
             </div>
         </div>
 
@@ -660,6 +662,49 @@ data:
     @app.route("/health")
     def health():
         return {"status": "ok"}
+
+    @app.route("/api/push", methods=["POST"])
+    def api_push():
+        """API endpoint for direct push from computer terminal.
+        Usage: curl -X POST https://claude-refresh.kernow.io/api/push -H "Content-Type: application/json" -d @~/.claude/.credentials.json
+        """
+        try:
+            # Accept raw JSON body
+            creds = request.get_json(force=True)
+
+            if not creds:
+                return {"error": "No JSON body provided"}, 400
+
+            # Validate structure
+            oauth = creds.get("claudeAiOauth", {})
+            if not oauth.get("accessToken") or not oauth.get("expiresAt"):
+                return {"error": "Invalid credentials format - missing accessToken or expiresAt"}, 400
+
+            # Check expiry
+            new_expires = oauth["expiresAt"]
+            new_expires_dt = datetime.fromtimestamp(new_expires / 1000)
+            new_days = (new_expires_dt - datetime.now()).days
+
+            if new_days < 0:
+                return {"error": "Token is already expired", "expires": new_expires_dt.isoformat()}, 400
+
+            # Encode and store
+            encoded = base64.b64encode(json.dumps(creds).encode()).decode()
+            if update_infisical_secret(encoded):
+                send_resolved_alert(new_days, new_expires_dt.strftime("%Y-%m-%d"))
+                return {
+                    "success": True,
+                    "message": f"Token updated! Valid for {new_days} days",
+                    "expires": new_expires_dt.isoformat(),
+                    "days_remaining": new_days
+                }
+            else:
+                return {"error": "Failed to update Infisical"}, 500
+
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON"}, 400
+        except Exception as e:
+            return {"error": str(e)}, 500
 
     if __name__ == "__main__":
         app.run(host="0.0.0.0", port=8080)
