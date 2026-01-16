@@ -136,7 +136,7 @@ spec:
         secretName: universal-auth-credentials
         secretNamespace: infisical-operator-system
       secretsScope:
-        projectSlug: agentic-homelab-6-z6v
+        projectSlug: prod-homelab-y-nij
         envSlug: prod
         secretsPath: /agentic-platform/keep
   managedSecretReference:
