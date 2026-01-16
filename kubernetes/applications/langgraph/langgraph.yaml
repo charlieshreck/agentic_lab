@@ -1821,8 +1821,18 @@ data:
 
     graph = create_workflow()
 
-    @app.post("/alert")
+    async def _process_alert_background(alert_dict: dict, initial_state: dict):
+        """Background task to process alert through the graph."""
+        try:
+            logger.info("Processing alert %s in background", alert_dict["id"])
+            result = await graph.ainvoke(initial_state)
+            logger.info("Alert %s processed: status=%s", alert_dict["id"], result.get("approval_status", "unknown"))
+        except Exception as e:
+            logger.error("Background graph execution failed for %s: %s", alert_dict["id"], e)
+
+    @app.post("/alert", status_code=202)
     async def process_alert(alert: AlertInput):
+        """Receive alert and process asynchronously. Returns immediately with 202 Accepted."""
         alert_dict = alert.model_dump()
         alert_dict["id"] = alert_dict.get("id") or "alert-" + datetime.utcnow().strftime("%Y%m%d%H%M%S")
         initial_state = {
@@ -1839,17 +1849,14 @@ data:
             "runbook_match": {},
             "handled_locally": False
         }
-        try:
-            result = await graph.ainvoke(initial_state)
-            return {
-                "alert_id": alert_dict["id"],
-                "status": result.get("approval_status", "pending"),
-                "assessment": result.get("assessment", {}),
-                "solutions_count": len(result.get("solutions", []))
-            }
-        except Exception as e:
-            logger.error("Graph execution failed: %s", e)
-            raise HTTPException(status_code=500, detail=str(e))
+        # Spawn background task - returns immediately
+        asyncio.create_task(_process_alert_background(alert_dict, initial_state))
+        logger.info("Alert %s accepted for async processing", alert_dict["id"])
+        return {
+            "alert_id": alert_dict["id"],
+            "status": "accepted",
+            "message": "Alert queued for processing"
+        }
 
     @app.post("/approve")
     async def approve_action(request: ApprovalRequest):
