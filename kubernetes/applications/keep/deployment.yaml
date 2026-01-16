@@ -34,9 +34,12 @@ spec:
               value: "file"
             - name: SECRET_MANAGER_DIRECTORY
               value: "/data/secrets"
-            # Authentication disabled for internal use
+            # Database authentication - local user accounts
             - name: AUTH_TYPE
-              value: "NO_AUTH"
+              value: "DB"
+            # Keep API secret for session encryption
+            - name: KEEP_API_SECRET
+              value: "keep-secret-change-me-in-production"
             # Keep API URL for webhooks
             - name: KEEP_API_URL
               value: "http://10.20.0.40:31105"

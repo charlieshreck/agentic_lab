@@ -27,9 +27,9 @@ spec:
               containerPort: 3000
               protocol: TCP
           env:
-            # Authentication - NOAUTH (no underscore per Keep docs)
+            # Database authentication - local user accounts
             - name: AUTH_TYPE
-              value: "NOAUTH"
+              value: "DB"
             - name: NEXTAUTH_SECRET
               value: "keep-nextauth-secret-change-me"
             - name: NEXTAUTH_URL
