@@ -59,11 +59,11 @@ spec:
                     if [ "$DAYS_REMAINING" -lt 0 ]; then
                       SEVERITY="critical"
                       STATUS="firing"
-                      DESCRIPTION="Claude OAuth token EXPIRED $((DAYS_REMAINING * -1)) days ago on $EXPIRES_DATE. Run 'claude login' and update Infisical."
+                      DESCRIPTION="Claude OAuth token EXPIRED $((DAYS_REMAINING * -1)) days ago. Tap to refresh: https://claude-refresh.kernow.io"
                     else
                       SEVERITY="warning"
                       STATUS="firing"
-                      DESCRIPTION="Claude OAuth token expires in $DAYS_REMAINING days on $EXPIRES_DATE. Run 'claude login' soon to refresh."
+                      DESCRIPTION="Claude OAuth token expires in $DAYS_REMAINING days. Tap to refresh: https://claude-refresh.kernow.io"
                     fi
 
                     echo "ALERT: $DESCRIPTION"

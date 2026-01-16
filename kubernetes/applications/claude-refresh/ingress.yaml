@@ -1,0 +1,21 @@
+---
+# Internal access via Traefik (agentic cluster)
+# For external access, the bridge is in prod cluster
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: claude-refresh
+  namespace: ai-platform
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: claude-refresh.agentic.kernow.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: claude-refresh
+                port:
+                  number: 8080

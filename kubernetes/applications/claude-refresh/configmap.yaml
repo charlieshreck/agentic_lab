@@ -1,0 +1,296 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-refresh-code
+  namespace: ai-platform
+data:
+  app.py: |
+    #!/usr/bin/env python3
+    """Claude OAuth Token Refresh Service - Mobile-friendly web form."""
+    import os
+    import json
+    import base64
+    import requests
+    from datetime import datetime
+    from flask import Flask, request, render_template_string
+
+    app = Flask(__name__)
+
+    # Infisical config
+    INFISICAL_HOST = "https://app.infisical.com/api"
+    INFISICAL_PROJECT_ID = os.environ.get("INFISICAL_PROJECT_ID")
+    INFISICAL_CLIENT_ID = os.environ.get("INFISICAL_CLIENT_ID")
+    INFISICAL_CLIENT_SECRET = os.environ.get("INFISICAL_CLIENT_SECRET")
+    SECRET_PATH = "/agentic-platform/claude"
+    SECRET_KEY = "CREDENTIALS_JSON_B64"
+
+    # Keep config for alerts
+    KEEP_URL = os.environ.get("KEEP_URL", "http://keep.keep.svc.cluster.local:8080")
+    KEEP_API_KEY = os.environ.get("KEEP_API_KEY", "")
+
+    HTML_TEMPLATE = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+        <title>Claude Token Refresh</title>
+        <style>
+            * { box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                margin: 0; padding: 20px;
+                background: #1a1a2e; color: #eee;
+                min-height: 100vh;
+            }
+            .container { max-width: 600px; margin: 0 auto; }
+            h1 { color: #fff; font-size: 1.5em; margin-bottom: 10px; }
+            .status { padding: 15px; border-radius: 8px; margin: 15px 0; }
+            .status.success { background: #1e4620; border: 1px solid #2e7d32; }
+            .status.error { background: #4a1515; border: 1px solid #c62828; }
+            .status.info { background: #1a3a5c; border: 1px solid #1976d2; }
+            .current { font-size: 0.9em; opacity: 0.8; margin: 10px 0; }
+            .expired { color: #ff6b6b; font-weight: bold; }
+            .valid { color: #69db7c; }
+            textarea {
+                width: 100%; height: 120px;
+                padding: 15px; font-size: 16px;
+                border: 2px solid #333; border-radius: 8px;
+                background: #0f0f1a; color: #fff;
+                resize: vertical;
+            }
+            textarea:focus { border-color: #667eea; outline: none; }
+            button {
+                width: 100%; padding: 18px;
+                font-size: 18px; font-weight: bold;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white; border: none; border-radius: 8px;
+                cursor: pointer; margin-top: 15px;
+            }
+            button:active { transform: scale(0.98); }
+            .instructions {
+                background: #252540; padding: 15px;
+                border-radius: 8px; margin: 20px 0;
+                font-size: 0.9em; line-height: 1.6;
+            }
+            code {
+                background: #1a1a2e; padding: 3px 8px;
+                border-radius: 4px; font-size: 0.85em;
+                display: block; margin: 8px 0;
+                overflow-x: auto; white-space: nowrap;
+            }
+            .step { margin: 10px 0; }
+            .step-num {
+                display: inline-block; width: 24px; height: 24px;
+                background: #667eea; border-radius: 50%;
+                text-align: center; line-height: 24px;
+                font-size: 0.8em; margin-right: 8px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🔑 Claude Token Refresh</h1>
+
+            {% if message %}
+            <div class="status {{ status }}">{{ message }}</div>
+            {% endif %}
+
+            <div class="current">
+                Current token:
+                {% if expires_at %}
+                    {% if days_remaining < 0 %}
+                    <span class="expired">Expired {{ -days_remaining }} days ago</span>
+                    {% elif days_remaining < 7 %}
+                    <span class="expired">Expires in {{ days_remaining }} days</span>
+                    {% else %}
+                    <span class="valid">Valid for {{ days_remaining }} days</span>
+                    {% endif %}
+                {% else %}
+                    <span class="expired">Unknown</span>
+                {% endif %}
+            </div>
+
+            <form method="POST">
+                <textarea name="credentials" placeholder="Paste base64 credentials here..."
+                          required>{{ credentials or '' }}</textarea>
+                <button type="submit">Update Token</button>
+            </form>
+
+            <div class="instructions">
+                <strong>How to get new credentials:</strong>
+                <div class="step">
+                    <span class="step-num">1</span>
+                    Run on computer:
+                    <code>claude login</code>
+                </div>
+                <div class="step">
+                    <span class="step-num">2</span>
+                    Copy the output of:
+                    <code>cat ~/.claude/.credentials.json | base64 -w0</code>
+                </div>
+                <div class="step">
+                    <span class="step-num">3</span>
+                    Paste above and tap Update
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    def get_infisical_token():
+        """Get access token from Infisical using universal auth."""
+        resp = requests.post(
+            f"{INFISICAL_HOST}/v1/auth/universal-auth/login",
+            json={
+                "clientId": INFISICAL_CLIENT_ID,
+                "clientSecret": INFISICAL_CLIENT_SECRET
+            }
+        )
+        resp.raise_for_status()
+        return resp.json()["accessToken"]
+
+    def get_current_token_expiry():
+        """Get current token expiration from Infisical."""
+        try:
+            token = get_infisical_token()
+            resp = requests.get(
+                f"{INFISICAL_HOST}/v3/secrets/raw/{SECRET_KEY}",
+                params={
+                    "workspaceSlug": "prod-homelab-y-nij",
+                    "environment": "prod",
+                    "secretPath": SECRET_PATH
+                },
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            if resp.status_code == 200:
+                secret_value = resp.json()["secret"]["secretValue"]
+                creds = json.loads(base64.b64decode(secret_value))
+                expires_at = creds.get("claudeAiOauth", {}).get("expiresAt", 0)
+                expires_dt = datetime.fromtimestamp(expires_at / 1000)
+                days_remaining = (expires_dt - datetime.now()).days
+                return expires_at, days_remaining
+        except Exception as e:
+            app.logger.error(f"Error getting current token: {e}")
+        return None, None
+
+    def update_infisical_secret(value):
+        """Update the secret in Infisical."""
+        token = get_infisical_token()
+
+        # First try to update, if fails try to create
+        resp = requests.patch(
+            f"{INFISICAL_HOST}/v3/secrets/raw/{SECRET_KEY}",
+            params={
+                "workspaceSlug": "prod-homelab-y-nij",
+                "environment": "prod",
+                "secretPath": SECRET_PATH
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            json={"secretValue": value}
+        )
+
+        if resp.status_code in [200, 201]:
+            return True
+
+        app.logger.error(f"Failed to update secret: {resp.status_code} {resp.text}")
+        return False
+
+    def send_resolved_alert(days_remaining, expires_date):
+        """Send resolved alert to Keep."""
+        if not KEEP_API_KEY:
+            return
+        try:
+            requests.post(
+                f"{KEEP_URL}/alerts/event/keep",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-API-KEY": KEEP_API_KEY
+                },
+                json={
+                    "name": "ClaudeOAuthTokenExpiry",
+                    "status": "resolved",
+                    "severity": "info",
+                    "description": f"Claude OAuth token refreshed. Valid for {days_remaining} days until {expires_date}.",
+                    "source": "claude-refresh",
+                    "labels": {
+                        "service": "claude-agent",
+                        "namespace": "ai-platform",
+                        "days_remaining": str(days_remaining)
+                    }
+                },
+                timeout=5
+            )
+        except Exception as e:
+            app.logger.error(f"Failed to send resolved alert: {e}")
+
+    @app.route("/", methods=["GET", "POST"])
+    def index():
+        expires_at, days_remaining = get_current_token_expiry()
+        message = None
+        status = None
+        credentials = None
+
+        if request.method == "POST":
+            credentials = request.form.get("credentials", "").strip()
+
+            if not credentials:
+                message = "Please paste credentials"
+                status = "error"
+            else:
+                try:
+                    # Validate base64
+                    decoded = base64.b64decode(credentials)
+                    creds = json.loads(decoded)
+
+                    # Validate structure
+                    oauth = creds.get("claudeAiOauth", {})
+                    if not oauth.get("accessToken") or not oauth.get("expiresAt"):
+                        raise ValueError("Missing accessToken or expiresAt")
+
+                    # Calculate new expiry
+                    new_expires = oauth["expiresAt"]
+                    new_expires_dt = datetime.fromtimestamp(new_expires / 1000)
+                    new_days = (new_expires_dt - datetime.now()).days
+
+                    if new_days < 0:
+                        message = f"These credentials are already expired!"
+                        status = "error"
+                    else:
+                        # Update Infisical
+                        if update_infisical_secret(credentials):
+                            message = f"✅ Token updated! Valid for {new_days} days"
+                            status = "success"
+                            expires_at = new_expires
+                            days_remaining = new_days
+                            credentials = None  # Clear form
+
+                            # Send resolved alert
+                            send_resolved_alert(new_days, new_expires_dt.strftime("%Y-%m-%d"))
+                        else:
+                            message = "Failed to update Infisical"
+                            status = "error"
+
+                except json.JSONDecodeError:
+                    message = "Invalid JSON in credentials"
+                    status = "error"
+                except Exception as e:
+                    message = f"Error: {str(e)}"
+                    status = "error"
+
+        return render_template_string(
+            HTML_TEMPLATE,
+            message=message,
+            status=status,
+            expires_at=expires_at,
+            days_remaining=days_remaining or 0,
+            credentials=credentials
+        )
+
+    @app.route("/health")
+    def health():
+        return {"status": "ok"}
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080)

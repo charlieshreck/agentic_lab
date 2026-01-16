@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-refresh
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claude-refresh
+  template:
+    metadata:
+      labels:
+        app: claude-refresh
+    spec:
+      containers:
+        - name: app
+          image: python:3.11-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              pip install --quiet flask requests &&
+              python /app/app.py
+          ports:
+            - containerPort: 8080
+          env:
+            - name: INFISICAL_PROJECT_ID
+              value: "9383e039-68ca-4bab-bc3c-aa06fdb82627"
+            - name: INFISICAL_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: infisical-universal-auth
+                  key: CLIENT_ID
+            - name: INFISICAL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infisical-universal-auth
+                  key: CLIENT_SECRET
+            - name: KEEP_URL
+              value: "http://keep.keep.svc.cluster.local:8080"
+            - name: KEEP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: keep-api-key
+                  key: api_key
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: code
+          configMap:
+            name: claude-refresh-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-refresh
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: claude-refresh
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 31110
