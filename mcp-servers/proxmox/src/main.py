@@ -14,6 +14,19 @@ PROXMOX_HOST = os.environ.get("PROXMOX_HOST", "https://10.10.0.10:8006")
 PROXMOX_USER = os.environ.get("PROXMOX_USER", "root@pam")
 PROXMOX_TOKEN_ID = os.environ.get("PROXMOX_TOKEN_ID", "")
 PROXMOX_TOKEN_SECRET = os.environ.get("PROXMOX_TOKEN_SECRET", "")
+# SSL verification: set to path of CA bundle, or "false" to disable (not recommended)
+PROXMOX_SSL_VERIFY = os.environ.get("PROXMOX_SSL_VERIFY", "true")
+
+def _get_ssl_context():
+    """Get SSL verification setting - supports CA path or boolean."""
+    if PROXMOX_SSL_VERIFY.lower() == "false":
+        logger.warning("SSL verification disabled - not recommended for production")
+        return False
+    elif PROXMOX_SSL_VERIFY.lower() == "true":
+        return True
+    else:
+        # Assume it's a path to CA bundle
+        return PROXMOX_SSL_VERIFY
 
 mcp = FastMCP(
     name="proxmox-mcp",
@@ -52,7 +65,7 @@ async def proxmox_api(endpoint: str, method: str = "GET", data: dict = None) -> 
     }
     url = f"{PROXMOX_HOST}/api2/json{endpoint}"
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
+    async with httpx.AsyncClient(verify=_get_ssl_context(), timeout=30.0) as client:
         if method == "GET":
             response = await client.get(url, headers=headers)
         elif method == "POST":
