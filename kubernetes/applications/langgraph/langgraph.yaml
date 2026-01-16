@@ -1879,8 +1879,12 @@ data:
     async def keep_alert_debug(request: Request):
         """Debug endpoint to see what Keep sends."""
         body = await request.body()
-        logger.info("Keep debug - raw body: %s", body.decode('utf-8', errors='replace'))
-        return {"received": body.decode('utf-8', errors='replace')[:500]}
+        query_params = dict(request.query_params)
+        content_type = request.headers.get('content-type', 'none')
+        logger.info("Keep debug - content-type: %s", content_type)
+        logger.info("Keep debug - query params: %s", query_params)
+        logger.info("Keep debug - raw body: %s", body.decode('utf-8', errors='replace')[:1000])
+        return {"content_type": content_type, "query_params": query_params, "body": body.decode('utf-8', errors='replace')[:500]}
 
     @app.post("/keep-alert", status_code=202)
     async def process_keep_alert(alert: KeepAlert):
