@@ -10,4 +10,3 @@ resources:
   - service.yaml
   - ingressclass.yaml
   - nodeport-services.yaml  # Keep existing NodePorts working
-  - test-ingress.yaml       # Test ingress for validation
