@@ -6,7 +6,7 @@ metadata:
 data:
   app.py: |
     #!/usr/bin/env python3
-    """Claude OAuth Token Refresh Service - Mobile-first interactive wizard."""
+    """Claude OAuth Token Refresh Service - Mobile-first interactive wizard with auto-refresh."""
     import os
     import json
     import base64
@@ -23,6 +23,10 @@ data:
     INFISICAL_CLIENT_SECRET = os.environ.get("INFISICAL_CLIENT_SECRET")
     SECRET_PATH = "/agentic-platform/claude"
     SECRET_KEY = "CREDENTIALS_JSON_B64"
+
+    # Claude OAuth config (from claude-code-login project)
+    CLAUDE_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+    CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
     # Keep config for alerts
     KEEP_URL = os.environ.get("KEEP_URL", "http://keep.keep.svc.cluster.local:8080")
@@ -579,6 +583,117 @@ data:
         except Exception as e:
             app.logger.error(f"Failed to send resolved alert: {e}")
 
+    def get_current_credentials():
+        """Get current credentials from Infisical (includes refresh token)."""
+        try:
+            token = get_infisical_token()
+            resp = requests.get(
+                f"{INFISICAL_HOST}/v3/secrets/raw/{SECRET_KEY}",
+                params={
+                    "workspaceSlug": "prod-homelab-y-nij",
+                    "environment": "prod",
+                    "secretPath": SECRET_PATH
+                },
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            if resp.status_code == 200:
+                secret_value = resp.json()["secret"]["secretValue"]
+                return json.loads(base64.b64decode(secret_value))
+        except Exception as e:
+            app.logger.error(f"Error getting current credentials: {e}")
+        return None
+
+    def refresh_oauth_token(refresh_token):
+        """Use refresh token to get new access token from Anthropic OAuth."""
+        try:
+            resp = requests.post(
+                CLAUDE_OAUTH_TOKEN_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                    "Referer": "https://claude.ai/",
+                    "Origin": "https://claude.ai"
+                },
+                json={
+                    "grant_type": "refresh_token",
+                    "client_id": CLAUDE_CLIENT_ID,
+                    "refresh_token": refresh_token
+                },
+                timeout=30
+            )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    "access_token": data.get("access_token"),
+                    "refresh_token": data.get("refresh_token"),
+                    "expires_in": data.get("expires_in"),
+                    "scope": data.get("scope", "")
+                }
+            else:
+                app.logger.error(f"OAuth refresh failed: {resp.status_code} {resp.text}")
+                return None
+        except Exception as e:
+            app.logger.error(f"Error refreshing OAuth token: {e}")
+            return None
+
+    def do_auto_refresh():
+        """Perform automatic token refresh using stored refresh token."""
+        # Get current credentials
+        creds = get_current_credentials()
+        if not creds:
+            return {"success": False, "error": "Could not retrieve current credentials"}
+
+        oauth = creds.get("claudeAiOauth", {})
+        refresh_token = oauth.get("refreshToken")
+
+        if not refresh_token:
+            return {"success": False, "error": "No refresh token found in credentials"}
+
+        # Check current expiry
+        current_expires = oauth.get("expiresAt", 0)
+        current_expires_dt = datetime.fromtimestamp(current_expires / 1000)
+        current_days = (current_expires_dt - datetime.now()).days
+
+        # Refresh the token
+        app.logger.info(f"Attempting auto-refresh. Current token expires in {current_days} days")
+        new_tokens = refresh_oauth_token(refresh_token)
+
+        if not new_tokens:
+            return {"success": False, "error": "OAuth token refresh failed"}
+
+        # Build new credentials object
+        new_expires_at = (int(datetime.now().timestamp()) + new_tokens["expires_in"]) * 1000
+        new_expires_dt = datetime.fromtimestamp(new_expires_at / 1000)
+        new_days = (new_expires_dt - datetime.now()).days
+
+        new_creds = {
+            "claudeAiOauth": {
+                "accessToken": new_tokens["access_token"],
+                "refreshToken": new_tokens["refresh_token"],
+                "expiresAt": new_expires_at,
+                "scopes": new_tokens["scope"].split(" ") if new_tokens["scope"] else oauth.get("scopes", []),
+                "subscriptionType": oauth.get("subscriptionType", ""),
+                "rateLimitTier": oauth.get("rateLimitTier", "")
+            }
+        }
+
+        # Store new credentials
+        encoded = base64.b64encode(json.dumps(new_creds).encode()).decode()
+        if update_infisical_secret(encoded):
+            send_resolved_alert(new_days, new_expires_dt.strftime("%Y-%m-%d"))
+            app.logger.info(f"Auto-refresh successful! New token valid for {new_days} days")
+            return {
+                "success": True,
+                "message": f"Token auto-refreshed! Valid for {new_days} days",
+                "expires": new_expires_dt.isoformat(),
+                "days_remaining": new_days,
+                "previous_days_remaining": current_days
+            }
+        else:
+            return {"success": False, "error": "Failed to store refreshed credentials"}
+
     @app.route("/", methods=["GET", "POST"])
     def index():
         expires_at, days_remaining = get_current_token_expiry()
@@ -709,6 +824,76 @@ data:
             return {"error": "Invalid JSON"}, 400
         except Exception as e:
             return {"error": str(e)}, 500
+
+    @app.route("/api/status", methods=["GET"])
+    def api_status():
+        """Get current token status.
+        Usage: curl https://claude-refresh.kernow.io/api/status
+        """
+        expires_at, days_remaining = get_current_token_expiry()
+
+        if expires_at is None:
+            return {"error": "Could not retrieve token status"}, 500
+
+        expires_dt = datetime.fromtimestamp(expires_at / 1000)
+        is_expired = days_remaining < 0
+        needs_refresh = days_remaining < 7
+
+        return {
+            "expires": expires_dt.isoformat(),
+            "days_remaining": days_remaining,
+            "is_expired": is_expired,
+            "needs_refresh": needs_refresh,
+            "status": "expired" if is_expired else "warning" if needs_refresh else "healthy"
+        }
+
+    @app.route("/api/auto-refresh", methods=["POST"])
+    def api_auto_refresh():
+        """Automatically refresh the token using the stored refresh token.
+        Usage: curl -X POST https://claude-refresh.kernow.io/api/auto-refresh
+
+        This uses the OAuth refresh token to get a new access token.
+        No manual intervention required - fully automatic!
+        """
+        result = do_auto_refresh()
+        if result.get("success"):
+            return result
+        else:
+            return result, 500
+
+    @app.route("/api/auto-refresh-if-needed", methods=["POST"])
+    def api_auto_refresh_if_needed():
+        """Only refresh if token expires within threshold days.
+        Usage: curl -X POST https://claude-refresh.kernow.io/api/auto-refresh-if-needed?days=7
+
+        Args:
+            days: Refresh if token expires within this many days (default: 7)
+        """
+        threshold_days = int(request.args.get("days", 7))
+
+        # Check current status
+        expires_at, days_remaining = get_current_token_expiry()
+
+        if expires_at is None:
+            return {"error": "Could not retrieve token status"}, 500
+
+        if days_remaining > threshold_days:
+            return {
+                "success": True,
+                "message": f"Token still valid for {days_remaining} days, no refresh needed",
+                "days_remaining": days_remaining,
+                "threshold": threshold_days,
+                "refreshed": False
+            }
+
+        # Token needs refresh
+        result = do_auto_refresh()
+        if result.get("success"):
+            result["refreshed"] = True
+            result["threshold"] = threshold_days
+            return result
+        else:
+            return result, 500
 
     if __name__ == "__main__":
         app.run(host="0.0.0.0", port=8080)
