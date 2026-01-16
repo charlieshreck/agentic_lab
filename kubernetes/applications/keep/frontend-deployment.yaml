@@ -40,9 +40,9 @@ spec:
             # API URLs - backend is accessible via internal service
             - name: API_URL
               value: "http://keep:8080"
-            # Client-side API URL - must be browser-accessible
+            # Client-side API URL - separate subdomain for API
             - name: NEXT_PUBLIC_API_URL
-              value: "http://10.20.0.40:31105"
+              value: "https://api-keep.kernow.io"
             # Disable Pusher/websockets (matches backend config)
             - name: PUSHER_DISABLED
               value: "true"
