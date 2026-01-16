@@ -34,3 +34,5 @@ resources:
   - tasmota-mcp.yaml
   # Monitoring stack
   - monitoring-mcp.yaml
+  # Alert aggregation
+  - keep-mcp.yaml
