@@ -6,7 +6,7 @@ metadata:
 data:
   app.py: |
     #!/usr/bin/env python3
-    """Claude OAuth Token Refresh Service - Interactive wizard."""
+    """Claude OAuth Token Refresh Service - Mobile-first interactive wizard."""
     import os
     import json
     import base64
@@ -35,220 +35,422 @@ data:
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
         <title>Claude Token Refresh</title>
+        <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔑</text></svg>">
         <style>
+            :root {
+                --bg: #0d1117;
+                --card: #161b22;
+                --border: #30363d;
+                --text: #e6edf3;
+                --text-muted: #8b949e;
+                --purple: #8b5cf6;
+                --purple-glow: rgba(139, 92, 246, 0.3);
+                --green: #22c55e;
+                --green-glow: rgba(34, 197, 94, 0.3);
+                --red: #ef4444;
+                --orange: #f97316;
+                --blue: #3b82f6;
+            }
             * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
             body {
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                margin: 0; padding: 16px;
-                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-                color: #eee;
+                margin: 0; padding: 0;
+                background: var(--bg);
+                color: var(--text);
                 min-height: 100vh;
+                line-height: 1.5;
             }
-            .container { max-width: 500px; margin: 0 auto; }
-            h1 {
-                color: #fff; font-size: 1.4em; margin: 0 0 16px 0;
-                display: flex; align-items: center; gap: 10px;
+            .container {
+                max-width: 420px;
+                margin: 0 auto;
+                padding: 20px 16px 40px;
             }
-            .status-banner {
-                padding: 12px 16px; border-radius: 12px; margin-bottom: 20px;
-                display: flex; align-items: center; gap: 12px;
-            }
-            .status-banner.expired { background: linear-gradient(135deg, #c0392b 0%, #e74c3c 100%); }
-            .status-banner.warning { background: linear-gradient(135deg, #d35400 0%, #e67e22 100%); }
-            .status-banner.valid { background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); }
-            .status-banner.success { background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); }
-            .status-banner.error { background: linear-gradient(135deg, #c0392b 0%, #e74c3c 100%); }
-            .status-icon { font-size: 1.5em; }
-            .status-text { flex: 1; }
-            .status-text strong { display: block; font-size: 1.1em; }
-            .status-text small { opacity: 0.9; }
 
-            .step {
-                background: rgba(255,255,255,0.05);
-                border-radius: 16px;
-                margin-bottom: 12px;
-                overflow: hidden;
-                border: 1px solid rgba(255,255,255,0.1);
+            /* Header */
+            .header {
+                text-align: center;
+                padding: 24px 0;
             }
-            .step.active { border-color: #667eea; }
-            .step.done { opacity: 0.6; }
+            .header h1 {
+                font-size: 28px;
+                font-weight: 700;
+                margin: 0 0 8px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+            }
+            .header p {
+                color: var(--text-muted);
+                margin: 0;
+                font-size: 15px;
+            }
+
+            /* Status Card */
+            .status-card {
+                border-radius: 16px;
+                padding: 20px;
+                margin-bottom: 24px;
+                display: flex;
+                align-items: center;
+                gap: 16px;
+            }
+            .status-card.expired {
+                background: linear-gradient(135deg, rgba(239,68,68,0.15) 0%, rgba(239,68,68,0.05) 100%);
+                border: 1px solid rgba(239,68,68,0.3);
+            }
+            .status-card.warning {
+                background: linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(249,115,22,0.05) 100%);
+                border: 1px solid rgba(249,115,22,0.3);
+            }
+            .status-card.valid {
+                background: linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(34,197,94,0.05) 100%);
+                border: 1px solid rgba(34,197,94,0.3);
+            }
+            .status-card.success {
+                background: linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(34,197,94,0.05) 100%);
+                border: 1px solid rgba(34,197,94,0.3);
+            }
+            .status-card.error {
+                background: linear-gradient(135deg, rgba(239,68,68,0.15) 0%, rgba(239,68,68,0.05) 100%);
+                border: 1px solid rgba(239,68,68,0.3);
+            }
+            .status-icon {
+                font-size: 36px;
+                line-height: 1;
+            }
+            .status-info h2 {
+                font-size: 18px;
+                font-weight: 600;
+                margin: 0 0 4px;
+            }
+            .status-info p {
+                font-size: 14px;
+                color: var(--text-muted);
+                margin: 0;
+            }
+
+            /* Steps */
+            .steps {
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+            }
+            .step {
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 16px;
+                overflow: hidden;
+                transition: all 0.3s ease;
+            }
+            .step.active {
+                border-color: var(--purple);
+                box-shadow: 0 0 20px var(--purple-glow);
+            }
+            .step.done {
+                opacity: 0.5;
+            }
+            .step.done .step-badge {
+                background: var(--green);
+            }
             .step-header {
-                padding: 16px;
-                display: flex; align-items: center; gap: 12px;
+                padding: 18px 20px;
+                display: flex;
+                align-items: center;
+                gap: 14px;
                 cursor: pointer;
             }
-            .step-num {
-                width: 32px; height: 32px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            .step-badge {
+                width: 36px; height: 36px;
+                background: var(--purple);
                 border-radius: 50%;
-                display: flex; align-items: center; justify-content: center;
-                font-weight: bold; font-size: 1em;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: 700;
+                font-size: 16px;
                 flex-shrink: 0;
             }
-            .step.done .step-num { background: #27ae60; }
-            .step-title { flex: 1; font-weight: 600; }
+            .step-title {
+                flex: 1;
+                font-weight: 600;
+                font-size: 17px;
+            }
+            .step-check {
+                color: var(--green);
+                font-size: 20px;
+            }
             .step-content {
-                padding: 0 16px 16px 60px;
+                padding: 0 20px 20px;
                 display: none;
             }
-            .step.active .step-content { display: block; }
+            .step.active .step-content {
+                display: block;
+            }
+            .step-content p {
+                color: var(--text-muted);
+                margin: 0 0 16px;
+                font-size: 15px;
+            }
 
+            /* Buttons */
             .btn {
-                display: block; width: 100%;
-                padding: 16px 20px;
-                font-size: 16px; font-weight: 600;
-                border: none; border-radius: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+                width: 100%;
+                padding: 18px 24px;
+                font-size: 17px;
+                font-weight: 600;
+                border: none;
+                border-radius: 12px;
                 cursor: pointer;
                 text-decoration: none;
-                text-align: center;
-                margin-top: 12px;
-                transition: transform 0.1s, opacity 0.1s;
+                transition: all 0.2s ease;
+                -webkit-appearance: none;
             }
-            .btn:active { transform: scale(0.98); opacity: 0.9; }
+            .btn:active {
+                transform: scale(0.98);
+            }
             .btn-primary {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: var(--purple);
                 color: white;
             }
-            .btn-secondary {
-                background: rgba(255,255,255,0.1);
-                color: #fff;
-                border: 1px solid rgba(255,255,255,0.2);
+            .btn-primary:hover {
+                background: #9d6ffa;
             }
             .btn-success {
-                background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+                background: var(--green);
                 color: white;
             }
-
-            .code-box {
-                background: #0a0a15;
-                border: 1px solid rgba(255,255,255,0.1);
-                border-radius: 8px;
-                padding: 12px;
-                font-family: 'SF Mono', Monaco, monospace;
-                font-size: 13px;
-                overflow-x: auto;
-                white-space: nowrap;
-                margin: 12px 0;
-                position: relative;
+            .btn-outline {
+                background: transparent;
+                color: var(--text);
+                border: 1px solid var(--border);
             }
-            .code-box code { color: #a8e6cf; }
-            .copy-btn {
-                position: absolute;
-                right: 8px; top: 8px;
-                background: #667eea;
+            .btn-link {
+                background: var(--blue);
+                color: white;
+            }
+            .btn + .btn {
+                margin-top: 10px;
+            }
+            .btn-icon {
+                font-size: 20px;
+            }
+
+            /* Command box */
+            .cmd-box {
+                background: #0d1117;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 14px 16px;
+                margin: 16px 0;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            }
+            .cmd-box code {
+                flex: 1;
+                font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+                font-size: 13px;
+                color: #7ee787;
+                white-space: nowrap;
+                overflow-x: auto;
+            }
+            .cmd-copy {
+                background: var(--purple);
                 border: none;
                 color: white;
-                padding: 6px 12px;
-                border-radius: 6px;
-                font-size: 12px;
+                padding: 8px 14px;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 600;
                 cursor: pointer;
+                flex-shrink: 0;
+                transition: all 0.2s;
             }
-            .copy-btn.copied { background: #27ae60; }
+            .cmd-copy.copied {
+                background: var(--green);
+            }
 
+            /* Textarea */
             textarea {
                 width: 100%;
-                height: 100px;
-                padding: 12px;
+                min-height: 120px;
+                padding: 16px;
                 font-size: 14px;
-                font-family: 'SF Mono', Monaco, monospace;
-                border: 2px solid rgba(255,255,255,0.1);
+                font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+                border: 2px solid var(--border);
                 border-radius: 12px;
-                background: #0a0a15;
-                color: #fff;
-                resize: none;
-                margin: 12px 0;
+                background: #0d1117;
+                color: var(--text);
+                resize: vertical;
+                margin: 16px 0;
+                -webkit-appearance: none;
             }
             textarea:focus {
-                border-color: #667eea;
+                border-color: var(--purple);
                 outline: none;
             }
-
-            .helper-text {
-                font-size: 0.85em;
-                color: rgba(255,255,255,0.6);
-                margin-top: 8px;
+            textarea::placeholder {
+                color: var(--text-muted);
             }
 
-            .checkmark { color: #2ecc71; margin-left: 8px; }
+            /* Hint */
+            .hint {
+                display: flex;
+                align-items: flex-start;
+                gap: 10px;
+                padding: 14px;
+                background: rgba(59, 130, 246, 0.1);
+                border: 1px solid rgba(59, 130, 246, 0.2);
+                border-radius: 10px;
+                margin-top: 16px;
+                font-size: 14px;
+                color: var(--text-muted);
+            }
+            .hint-icon {
+                font-size: 18px;
+                flex-shrink: 0;
+            }
+
+            /* Loading */
+            .loading {
+                display: inline-block;
+                width: 18px;
+                height: 18px;
+                border: 2px solid transparent;
+                border-top-color: currentColor;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+            }
+            @keyframes spin {
+                to { transform: rotate(360deg); }
+            }
+
+            /* Quick paste mode */
+            .quick-mode {
+                margin-top: 32px;
+                padding-top: 24px;
+                border-top: 1px solid var(--border);
+            }
+            .quick-mode h3 {
+                font-size: 15px;
+                color: var(--text-muted);
+                font-weight: 500;
+                margin: 0 0 12px;
+                text-align: center;
+            }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🔑 Claude Token</h1>
+            <div class="header">
+                <h1>🔑 Token Refresh</h1>
+                <p>Update Claude OAuth credentials</p>
+            </div>
 
             {% if message %}
-            <div class="status-banner {{ status }}">
-                <span class="status-icon">{% if status == 'success' %}✅{% else %}❌{% endif %}</span>
-                <div class="status-text">
-                    <strong>{{ message }}</strong>
+            <div class="status-card {{ status }}">
+                <span class="status-icon">{% if status == 'success' %}✅{% elif status == 'error' %}❌{% endif %}</span>
+                <div class="status-info">
+                    <h2>{{ message }}</h2>
+                    {% if status == 'success' %}
+                    <p>You're all set!</p>
+                    {% endif %}
                 </div>
             </div>
             {% else %}
-            <div class="status-banner {% if days_remaining < 0 %}expired{% elif days_remaining < 7 %}warning{% else %}valid{% endif %}">
-                <span class="status-icon">{% if days_remaining < 0 %}🔴{% elif days_remaining < 7 %}🟡{% else %}🟢{% endif %}</span>
-                <div class="status-text">
-                    {% if days_remaining < 0 %}
-                    <strong>Expired {{ -days_remaining }} days ago</strong>
-                    <small>Token needs refresh</small>
+            <div class="status-card {% if days_remaining is none or days_remaining < 0 %}expired{% elif days_remaining < 7 %}warning{% else %}valid{% endif %}">
+                <span class="status-icon">{% if days_remaining is none or days_remaining < 0 %}🔴{% elif days_remaining < 7 %}🟡{% else %}🟢{% endif %}</span>
+                <div class="status-info">
+                    {% if days_remaining is none or days_remaining < 0 %}
+                    <h2>Token Expired</h2>
+                    <p>Refresh now to restore access</p>
                     {% elif days_remaining < 7 %}
-                    <strong>Expires in {{ days_remaining }} days</strong>
-                    <small>Refresh soon</small>
+                    <h2>Expires in {{ days_remaining }} days</h2>
+                    <p>Consider refreshing soon</p>
                     {% else %}
-                    <strong>Valid for {{ days_remaining }} days</strong>
-                    <small>All good!</small>
+                    <h2>Valid for {{ days_remaining }} days</h2>
+                    <p>Token is healthy</p>
                     {% endif %}
                 </div>
             </div>
             {% endif %}
 
-            <div class="step {% if step == 1 %}active{% elif step > 1 %}done{% endif %}" id="step1">
-                <div class="step-header" onclick="setStep(1)">
-                    <span class="step-num">1</span>
-                    <span class="step-title">Login to Claude</span>
-                    {% if step > 1 %}<span class="checkmark">✓</span>{% endif %}
-                </div>
-                <div class="step-content">
-                    <p>On your computer, open terminal and run:</p>
-                    <div class="code-box">
-                        <code>claude login</code>
-                        <button class="copy-btn" onclick="copyText('claude login', this)">Copy</button>
+            <div class="steps">
+                <div class="step {% if step == 1 %}active{% elif step > 1 %}done{% endif %}" id="step1">
+                    <div class="step-header" onclick="setStep(1)">
+                        <span class="step-badge">1</span>
+                        <span class="step-title">Login to Claude</span>
+                        {% if step > 1 %}<span class="step-check">✓</span>{% endif %}
                     </div>
-                    <p class="helper-text">This opens a browser to authenticate with Anthropic.</p>
-                    <button class="btn btn-primary" onclick="setStep(2)">Done, Next →</button>
+                    <div class="step-content">
+                        <p>Open Claude and sign in with your account.</p>
+                        <a href="https://claude.ai/login" target="_blank" class="btn btn-link">
+                            <span class="btn-icon">🌐</span>
+                            Open Claude Login
+                        </a>
+                        <button class="btn btn-primary" onclick="setStep(2)">
+                            I'm logged in →
+                        </button>
+                    </div>
+                </div>
+
+                <div class="step {% if step == 2 %}active{% elif step > 2 %}done{% endif %}" id="step2">
+                    <div class="step-header" onclick="setStep(2)">
+                        <span class="step-badge">2</span>
+                        <span class="step-title">Copy Token</span>
+                        {% if step > 2 %}<span class="step-check">✓</span>{% endif %}
+                    </div>
+                    <div class="step-content">
+                        <p>On your computer terminal, run this command:</p>
+                        <div class="cmd-box">
+                            <code>cat ~/.claude/.credentials.json</code>
+                            <button class="cmd-copy" onclick="copyCmd(this)">Copy</button>
+                        </div>
+                        <p>Copy the entire JSON output.</p>
+                        <div class="hint">
+                            <span class="hint-icon">💡</span>
+                            <span>You can paste either the raw JSON or base64 encoded - both work!</span>
+                        </div>
+                        <button class="btn btn-primary" onclick="setStep(3)">
+                            I've copied it →
+                        </button>
+                    </div>
+                </div>
+
+                <div class="step {% if step == 3 %}active{% endif %}" id="step3">
+                    <div class="step-header" onclick="setStep(3)">
+                        <span class="step-badge">3</span>
+                        <span class="step-title">Paste & Save</span>
+                    </div>
+                    <div class="step-content">
+                        <p>Paste the credentials below:</p>
+                        <form method="POST" id="mainForm" onsubmit="return handleSubmit(event)">
+                            <textarea name="credentials" id="credsInput"
+                                placeholder='Paste JSON or base64 here...'
+                                required>{{ credentials or '' }}</textarea>
+                            <button type="submit" class="btn btn-success" id="submitBtn">
+                                <span id="btnText">🚀 Update Token</span>
+                            </button>
+                        </form>
+                    </div>
                 </div>
             </div>
 
-            <div class="step {% if step == 2 %}active{% elif step > 2 %}done{% endif %}" id="step2">
-                <div class="step-header" onclick="setStep(2)">
-                    <span class="step-num">2</span>
-                    <span class="step-title">Copy credentials</span>
-                    {% if step > 2 %}<span class="checkmark">✓</span>{% endif %}
-                </div>
-                <div class="step-content">
-                    <p>Run this to get the token:</p>
-                    <div class="code-box">
-                        <code>cat ~/.claude/.credentials.json | base64 -w0</code>
-                        <button class="copy-btn" onclick="copyText('cat ~/.claude/.credentials.json | base64 -w0', this)">Copy</button>
-                    </div>
-                    <p class="helper-text">Copy the entire output (it's one long line).</p>
-                    <button class="btn btn-primary" onclick="setStep(3)">Copied, Next →</button>
-                </div>
-            </div>
-
-            <div class="step {% if step == 3 %}active{% endif %}" id="step3">
-                <div class="step-header" onclick="setStep(3)">
-                    <span class="step-num">3</span>
-                    <span class="step-title">Paste & Update</span>
-                </div>
-                <div class="step-content">
-                    <form method="POST" id="updateForm">
-                        <input type="hidden" name="step" value="3">
-                        <textarea name="credentials"
-                                  placeholder="Paste the base64 output here..."
-                                  required>{{ credentials or '' }}</textarea>
-                        <button type="submit" class="btn btn-success">🚀 Update Token</button>
-                    </form>
-                </div>
+            <div class="quick-mode">
+                <h3>Already have the token copied?</h3>
+                <form method="POST" id="quickForm" onsubmit="return handleSubmit(event)">
+                    <textarea name="credentials" id="quickInput"
+                        placeholder='Quick paste: JSON or base64...'
+                        style="min-height: 80px;"></textarea>
+                    <button type="submit" class="btn btn-outline">
+                        Quick Update
+                    </button>
+                </form>
             </div>
         </div>
 
@@ -262,19 +464,27 @@ data:
                     if (i + 1 < n) el.classList.add('done');
                     if (i + 1 === n) el.classList.add('active');
                 });
-                // Update URL without reload
                 history.replaceState(null, '', '?step=' + n);
             }
 
-            function copyText(text, btn) {
-                navigator.clipboard.writeText(text).then(() => {
-                    btn.textContent = 'Copied!';
+            function copyCmd(btn) {
+                const cmd = btn.previousElementSibling.textContent;
+                navigator.clipboard.writeText(cmd).then(() => {
+                    btn.textContent = '✓ Copied';
                     btn.classList.add('copied');
                     setTimeout(() => {
                         btn.textContent = 'Copy';
                         btn.classList.remove('copied');
                     }, 2000);
                 });
+            }
+
+            function handleSubmit(e) {
+                const btn = e.target.querySelector('button[type="submit"]');
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '<span class="loading"></span> Updating...';
+                btn.disabled = true;
+                return true;
             }
         </script>
     </body>
@@ -373,18 +583,39 @@ data:
 
         if request.method == "POST":
             step = 3
-            credentials = request.form.get("credentials", "").strip()
+            raw_input = request.form.get("credentials", "").strip()
 
-            if not credentials:
+            if not raw_input:
                 message = "Please paste credentials"
                 status = "error"
             else:
                 try:
-                    decoded = base64.b64decode(credentials)
-                    creds = json.loads(decoded)
+                    # Try to detect if input is JSON or base64
+                    creds = None
+                    encoded_value = None
+
+                    # First, try to parse as raw JSON
+                    if raw_input.startswith('{'):
+                        try:
+                            creds = json.loads(raw_input)
+                            # If successful, base64 encode for storage
+                            encoded_value = base64.b64encode(raw_input.encode()).decode()
+                        except json.JSONDecodeError:
+                            pass
+
+                    # If not JSON, try base64 decode
+                    if creds is None:
+                        try:
+                            decoded = base64.b64decode(raw_input)
+                            creds = json.loads(decoded)
+                            encoded_value = raw_input  # Already base64
+                        except Exception:
+                            raise ValueError("Could not parse as JSON or base64. Please check your input.")
+
+                    # Validate the credential structure
                     oauth = creds.get("claudeAiOauth", {})
                     if not oauth.get("accessToken") or not oauth.get("expiresAt"):
-                        raise ValueError("Missing accessToken or expiresAt")
+                        raise ValueError("Missing accessToken or expiresAt in credentials")
 
                     new_expires = oauth["expiresAt"]
                     new_expires_dt = datetime.fromtimestamp(new_expires / 1000)
@@ -394,7 +625,7 @@ data:
                         message = "These credentials are already expired!"
                         status = "error"
                     else:
-                        if update_infisical_secret(credentials):
+                        if update_infisical_secret(encoded_value):
                             message = f"Token updated! Valid for {new_days} days"
                             status = "success"
                             expires_at = new_expires
@@ -407,7 +638,10 @@ data:
                             status = "error"
 
                 except json.JSONDecodeError:
-                    message = "Invalid JSON - check you copied the full output"
+                    message = "Invalid JSON format"
+                    status = "error"
+                except ValueError as e:
+                    message = str(e)
                     status = "error"
                 except Exception as e:
                     message = f"Error: {str(e)}"
