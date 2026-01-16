@@ -10,7 +10,7 @@ spec:
       reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
       reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "vikunja,traefik,keep,ai-platform"
       reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
-      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "vikunja,traefik"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "vikunja,traefik,ai-platform"
   issuerRef:
     name: letsencrypt-prod
     kind: ClusterIssuer
