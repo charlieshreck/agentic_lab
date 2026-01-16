@@ -875,4 +875,4 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 31106
+      nodePort: 31107
