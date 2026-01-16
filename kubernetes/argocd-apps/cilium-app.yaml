@@ -51,6 +51,20 @@ spec:
         # Operator settings
         operator:
           replicas: 1
+
+        # Enable L2 announcements for LoadBalancer IPs
+        l2announcements:
+          enabled: true
+          leaseDuration: "3s"
+          leaseRenewDeadline: "1s"
+          leaseRetryPeriod: "200ms"
+
+        # Enable external IPs
+        externalIPs:
+          enabled: true
+
+        # Network interface for L2 announcements (eno1 on agentic cluster)
+        devices: "eno1"
   destination:
     server: https://10.20.0.40:6443  # Agentic cluster API server
     namespace: kube-system

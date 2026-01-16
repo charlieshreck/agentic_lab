@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reflector
+  namespace: reflector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reflector
+  template:
+    metadata:
+      labels:
+        app: reflector
+    spec:
+      serviceAccountName: reflector
+      containers:
+        - name: reflector
+          image: emberstack/kubernetes-reflector:7.1.262
+          env:
+            - name: ES_Reflector__Extensions__Enabled
+              value: "true"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi

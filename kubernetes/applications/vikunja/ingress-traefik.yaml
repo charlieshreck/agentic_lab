@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vikunja-traefik
+  namespace: vikunja
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - vikunja.kernow.io
+      secretName: kernow-io-tls  # Reflected from cert-manager namespace
+  rules:
+    - host: vikunja.kernow.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vikunja
+                port:
+                  number: 8080  # Service port (NOT container port 3456)

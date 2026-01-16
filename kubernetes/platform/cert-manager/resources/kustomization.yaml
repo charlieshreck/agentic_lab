@@ -6,3 +6,6 @@ namespace: cert-manager
 resources:
   - cloudflare-api-token-secret.yaml
   - clusterissuer-letsencrypt.yaml
+  - clusterissuer-letsencrypt-staging.yaml
+  - certificate-staging-test.yaml
+  - certificate-kernow-io.yaml
