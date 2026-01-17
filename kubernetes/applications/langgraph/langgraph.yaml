@@ -1390,70 +1390,30 @@ data:
     async def call_claude_agent(prompt: str, context: dict = None, allowed_tools: list = None,
                                 priority: int = None, use_queue: bool = False, timeout: int = 300):
         """
-        Call Claude Agent for complex agentic tasks.
+        Route complex tasks to Gemini via LiteLLM.
+
+        NOTE: Claude escalation DISABLED to prevent subscription abuse.
+        All tasks now go through Gemini (local LLM).
 
         Args:
             prompt: The task prompt
             context: Optional context dict
-            allowed_tools: List of allowed tools
-            priority: Queue priority (1=user, 2=critical, 3=warning, 4=low). If set, enables queue mode.
-            use_queue: If True, use priority queue (async) instead of sync mode
+            allowed_tools: List of allowed tools (ignored - Gemini doesn't support tools)
+            priority: Queue priority (ignored)
+            use_queue: Ignored
             timeout: Timeout in seconds
-
-        Uses subscription-based Claude Code for full tool access.
         """
-        # If priority is set or use_queue is True, use async queue mode
-        if priority is not None or use_queue:
-            priority = priority or PRIORITY_LOW
-            try:
-                task_id = await queue_claude_task(prompt, priority, context, allowed_tools, timeout)
-                logger.info(f"Queued Claude task {task_id} with priority {priority}")
-                result = await poll_task_status(task_id, max_wait=float(timeout))
-                if result.get("status") == "completed":
-                    return result.get("result", "")
-                else:
-                    error = result.get("error", "Task failed or timed out")
-                    logger.error(f"Claude task {task_id} failed: {error}")
-                    return f"Error: {error}"
-            except Exception as e:
-                logger.error(f"Claude queue failed: {e}")
-                return await call_litellm([{"role": "user", "content": prompt}])
-
-        # Sync mode - direct call (for interactive/user requests)
-        async with httpx.AsyncClient(timeout=float(timeout)) as client:
-            try:
-                payload = {
-                    "prompt": prompt,
-                    "context": context or {},
-                    "allowed_tools": allowed_tools or ["Read", "Glob", "Grep", "Bash", "WebSearch"],
-                    "max_turns": 10,
-                    "working_directory": "/workspace"
-                }
-                response = await client.post(
-                    CLAUDE_AGENT_URL + "/agent/run",
-                    json=payload
-                )
-                response.raise_for_status()
-                result = response.json()
-                if result.get("success"):
-                    return result.get("result", "")
-                else:
-                    logger.error("Claude Agent error: %s", result.get("error"))
-                    return "Error: " + result.get("error", "Unknown error")
-            except Exception as e:
-                logger.error("Claude Agent call failed: %s", e)
-                # Fallback to local LLM
-                return await call_litellm([{"role": "user", "content": prompt}])
+        # DISABLED: Claude escalation - use Gemini for all tasks
+        logger.info("Routing task to Gemini (Claude disabled)")
+        return await call_litellm([{"role": "user", "content": prompt}])
 
     def should_use_claude(assessment: dict) -> bool:
-        """Determine if task should be routed to Claude based on complexity."""
-        complexity = assessment.get("complexity", "medium")
-        threshold = CLAUDE_COMPLEXITY_THRESHOLD
+        """Determine if task should be routed to Claude based on complexity.
 
-        complexity_levels = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-        threshold_levels = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-
-        return complexity_levels.get(complexity, 2) >= threshold_levels.get(threshold, 3)
+        NOTE: DISABLED - always returns False to prevent subscription abuse.
+        All tasks now handled by Gemini via LiteLLM.
+        """
+        return False  # Claude disabled - use Gemini for everything
 
     def build_assessment_prompt(alert, similar):
         return """Analyze this alert and provide assessment:
