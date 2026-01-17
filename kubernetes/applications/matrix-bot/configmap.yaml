@@ -56,6 +56,7 @@ data:
             self.conversations = {}  # room_id or thread_id -> conversation history
             self.http_client = httpx.AsyncClient(timeout=120.0)
             self.max_history = 20  # Keep last N messages per conversation
+            self.pending_approvals = {}  # event_id -> {alert_id, alert_name, solutions, room_id, created_at}
             self.startup_time = int(asyncio.get_event_loop().time() * 1000)  # ms timestamp
             import time
             self.startup_time = int(time.time() * 1000)  # Unix ms for comparison with event timestamps
@@ -268,12 +269,18 @@ data:
 
         async def on_reaction(self, room, event):
             """Handle reaction-based approvals."""
-            if event.key == "\u2705":  # Checkmark
-                thread_id = event.reacts_to
-                await self.process_approval(room.room_id, thread_id, approved=True)
-            elif event.key == "\u274c":  # X mark
-                thread_id = event.reacts_to
-                await self.process_approval(room.room_id, thread_id, approved=False)
+            event_id = event.reacts_to
+
+            # Look up pending approval by the event_id being reacted to
+            pending = self.pending_approvals.get(event_id)
+            if not pending:
+                logger.debug(f"Reaction on non-approval message: {event_id}")
+                return
+
+            if event.key == "\u2705":  # Checkmark ✅
+                await self.process_approval(room.room_id, event_id, pending, approved=True, user=event.sender)
+            elif event.key == "\u274c":  # X mark ❌
+                await self.process_approval(room.room_id, event_id, pending, approved=False, user=event.sender)
 
         async def query_gemini(self, message: str, context: dict, history: list = None) -> str:
             """Query Gemini via LangGraph /query endpoint."""
@@ -386,36 +393,85 @@ data:
                 logger.error(f"Error fetching original message: {e}")
                 return None, None
 
-        async def process_approval(self, room_id: str, thread_id: str, approved: bool):
-            """Process an approval reaction."""
+        async def process_approval(self, room_id: str, event_id: str, pending: dict, approved: bool, user: str):
+            """Process an approval reaction.
+
+            Args:
+                room_id: Matrix room ID
+                event_id: Event ID of the approval message being reacted to
+                pending: Dict with {alert_id, alert_name, solutions, room_id, created_at}
+                approved: True if approved, False if rejected
+                user: Matrix user ID who reacted (e.g., @chaz:agentic.local)
+            """
+            alert_id = pending["alert_id"]
+            alert_name = pending.get("alert_name", "Unknown")
             action = "Approved" if approved else "Rejected"
 
-            try:
-                # Notify LangGraph of approval
-                response = await self.http_client.post(
-                    f"{LANGGRAPH_URL}/approval",
-                    json={
-                        "thread_id": thread_id,
-                        "approved": approved,
-                        "source": "matrix_reaction"
-                    }
-                )
+            # Extract username from Matrix ID (@user:server → user)
+            approved_by = user.split(":")[0].lstrip("@") if user else "unknown"
 
-                if response.status_code == 200:
-                    result = response.json()
-                    await self.send_thread_reply(
-                        room_id,
-                        thread_id,
-                        f"\u2705 {action}. {result.get('message', '')}"
+            logger.info(f"Processing {action.lower()} for alert {alert_id} by {approved_by}")
+
+            try:
+                if approved:
+                    # Call LangGraph /approve with correct format
+                    response = await self.http_client.post(
+                        f"{LANGGRAPH_URL}/approve",
+                        json={
+                            "alert_id": alert_id,
+                            "solution_index": 1,  # Default to first solution
+                            "approved_by": approved_by
+                        }
                     )
                 else:
+                    # For rejections, try /ignore if it exists, otherwise just acknowledge
+                    try:
+                        response = await self.http_client.post(
+                            f"{LANGGRAPH_URL}/ignore",
+                            json={"alert_id": alert_id, "ignored_by": approved_by}
+                        )
+                    except Exception:
+                        # /ignore might not exist, that's ok
+                        response = None
+
+                if response and response.status_code == 200:
+                    result = response.json()
+                    success = result.get("success", True)
+                    summary = result.get("summary", result.get("message", ""))
+                    emoji = "\u2705" if success else "\u26a0\ufe0f"
                     await self.send_thread_reply(
                         room_id,
-                        thread_id,
-                        f"Failed to process {action.lower()}: {response.status_code}"
+                        event_id,
+                        f"{emoji} {action} by {approved_by}. {summary}"
                     )
+                elif response:
+                    await self.send_thread_reply(
+                        room_id,
+                        event_id,
+                        f"\u274c Failed to process: {response.status_code} - {response.text[:100]}"
+                    )
+                else:
+                    # Rejection with no /ignore endpoint - just acknowledge
+                    await self.send_thread_reply(
+                        room_id,
+                        event_id,
+                        f"\u274c {action} by {approved_by}. Alert {alert_name} dismissed."
+                    )
+
+                # Cleanup the pending approval
+                if event_id in self.pending_approvals:
+                    del self.pending_approvals[event_id]
+                    logger.info(f"Cleaned up pending approval for {event_id}")
+
             except Exception as e:
                 logger.error(f"Error processing approval: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                await self.send_thread_reply(
+                    room_id,
+                    event_id,
+                    f"\u274c Error processing approval: {str(e)}"
+                )
 
         async def send_message(self, room_id: str, message: str):
             """Send a message to a room."""
@@ -597,6 +653,7 @@ data:
         """Receive approval request from LangGraph and post to Matrix.
 
         Accepts flexible JSON payload - extracts what it can.
+        IMPORTANT: alert_id is required to track the approval through to LangGraph.
         """
         if not bot_instance or not bot_instance.client.logged_in:
             return {"status": "error", "message": "Bot not logged in"}
@@ -608,6 +665,12 @@ data:
             return {"status": "error", "message": str(e)}
 
         logger.info(f"Received approval request payload: {json.dumps(payload)[:500]}")
+
+        # Extract alert_id - REQUIRED for tracking approvals back to LangGraph
+        alert_id = payload.get("alert_id")
+        if not alert_id:
+            logger.error("Missing required alert_id in approval request")
+            return {"status": "error", "message": "alert_id is required"}
 
         # Extract fields flexibly - handle various payload formats
         alert_name = (
@@ -641,6 +704,7 @@ data:
             payload.get("suggested_fix") or
             None
         )
+        solutions = payload.get("solutions", [])
         runbook = (
             payload.get("runbook") or
             payload.get("runbook_url") or
@@ -653,6 +717,7 @@ data:
 
         # Build approval request message
         message = f"{emoji} **Approval Needed: {alert_name}**\n\n"
+        message += f"**Alert ID:** `{alert_id}`\n"
         message += f"**Severity:** {severity}\n\n"
 
         if description:
@@ -670,11 +735,43 @@ data:
         message += "_React \u2705 to approve, \u274c to reject_"
 
         try:
-            await bot_instance.send_message(room_id, message)
-            logger.info(f"Approval request sent to {room_id}: {alert_name}")
-            return {"status": "sent", "room_id": room_id, "alert_name": alert_name}
+            # Send message and capture event_id for tracking
+            import time
+            response = await bot_instance.client.room_send(
+                room_id,
+                "m.room.message",
+                {
+                    "msgtype": "m.text",
+                    "body": message,
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": bot_instance.markdown_to_html(message),
+                }
+            )
+            event_id = response.event_id
+
+            # Store mapping: event_id -> approval details
+            bot_instance.pending_approvals[event_id] = {
+                "alert_id": alert_id,
+                "alert_name": alert_name,
+                "solutions": solutions,
+                "room_id": room_id,
+                "created_at": time.time()
+            }
+
+            logger.info(f"Approval request sent to {room_id}: {alert_name} (event_id={event_id}, alert_id={alert_id})")
+            logger.info(f"Pending approvals count: {len(bot_instance.pending_approvals)}")
+
+            return {
+                "status": "sent",
+                "room_id": room_id,
+                "event_id": event_id,
+                "alert_id": alert_id,
+                "alert_name": alert_name
+            }
         except Exception as e:
             logger.error(f"Failed to send approval request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {"status": "error", "message": str(e)}
 
     if __name__ == "__main__":
