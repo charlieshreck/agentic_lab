@@ -49,15 +49,16 @@ data:
     class AlertsInput(BaseModel):
         model_config = ConfigDict(str_strip_whitespace=True)
         response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
-        limit: int = Field(default=50, description="Max alerts to return", ge=1, le=500)
+        limit: int = Field(default=20, description="Max alerts to return", ge=1, le=100)
         severity: Optional[str] = Field(default=None, description="Filter by severity: critical, warning, info")
-        status: Optional[str] = Field(default=None, description="Filter by status: firing, resolved, acknowledged")
+        status: Optional[str] = Field(default="firing", description="Filter by status: firing, resolved, acknowledged. Default: firing")
+        summary_only: bool = Field(default=False, description="Return counts and summary only, not full alert details")
 
     class IncidentsInput(BaseModel):
         model_config = ConfigDict(str_strip_whitespace=True)
         response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
-        limit: int = Field(default=50, description="Max incidents to return", ge=1, le=500)
-        status: Optional[str] = Field(default=None, description="Filter by status: open, acknowledged, resolved")
+        limit: int = Field(default=20, description="Max incidents to return", ge=1, le=100)
+        status: Optional[str] = Field(default="open", description="Filter by status: open, acknowledged, resolved. Default: open")
 
     class AlertIdInput(BaseModel):
         model_config = ConfigDict(str_strip_whitespace=True)
@@ -341,7 +342,7 @@ data:
         annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
     )
     async def keep_list_alerts(params: AlertsInput) -> str:
-        """List alerts with optional filters."""
+        """List alerts with optional filters. By default shows only firing alerts (limit 20)."""
         try:
             endpoint = f"/alerts?limit={params.limit}"
             if params.severity:
@@ -352,11 +353,41 @@ data:
             result = await _keep_api(endpoint)
             alerts = result if isinstance(result, list) else result.get("items", result.get("alerts", []))
 
-            if params.response_format == ResponseFormat.JSON:
-                return json.dumps({"alerts": alerts, "count": len(alerts)}, indent=2)
+            # Summary mode: return counts only
+            if params.summary_only:
+                summary = {"total": len(alerts), "by_severity": {}, "by_status": {}, "by_source": {}}
+                for a in alerts:
+                    sev = a.get("severity", "unknown")
+                    stat = a.get("status", "unknown")
+                    src = a.get("source", ["unknown"])[0] if isinstance(a.get("source"), list) else a.get("source", "unknown")
+                    summary["by_severity"][sev] = summary["by_severity"].get(sev, 0) + 1
+                    summary["by_status"][stat] = summary["by_status"].get(stat, 0) + 1
+                    summary["by_source"][src] = summary["by_source"].get(src, 0) + 1
 
+                if params.response_format == ResponseFormat.JSON:
+                    return json.dumps(summary, indent=2)
+
+                lines = ["# Alert Summary", f"Total: {summary['total']}", ""]
+                if summary["by_severity"]:
+                    lines.append("**By Severity:** " + ", ".join(f"{k}: {v}" for k, v in summary["by_severity"].items()))
+                if summary["by_status"]:
+                    lines.append("**By Status:** " + ", ".join(f"{k}: {v}" for k, v in summary["by_status"].items()))
+                return "\n".join(lines)
+
+            # Compact JSON: only essential fields
+            if params.response_format == ResponseFormat.JSON:
+                compact = [{
+                    "id": a.get("fingerprint", a.get("id", ""))[:16],
+                    "name": a.get("name", a.get("alertname", "")),
+                    "severity": a.get("severity", ""),
+                    "status": a.get("status", ""),
+                    "source": a.get("source", [""])[0] if isinstance(a.get("source"), list) else a.get("source", "")
+                } for a in alerts]
+                return json.dumps({"alerts": compact, "count": len(compact)}, indent=2)
+
+            # Markdown output (unchanged)
             lines = ["# Keep Alerts", "", f"Showing {len(alerts)} alert(s)", ""]
-            for a in alerts[:50]:
+            for a in alerts[:20]:
                 aid = a.get("fingerprint", a.get("id", "unknown"))[:12]
                 name = a.get("name", a.get("alertname", "Unknown"))
                 severity = _format_severity(a.get("severity", ""))
