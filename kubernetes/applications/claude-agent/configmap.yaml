@@ -67,6 +67,9 @@ data:
     TASK_TTL = 3600  # 1 hour TTL for results
     WORKER_ID = os.environ.get("HOSTNAME", str(uuid.uuid4())[:8])
 
+    # Concurrency configuration - each pod runs multiple workers
+    MAX_CONCURRENT_WORKERS = int(os.environ.get("MAX_CONCURRENT_WORKERS", "3"))
+
     # Redis connection pool
     redis_pool: Optional[redis.Redis] = None
 
@@ -324,20 +327,24 @@ data:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        global worker_running, worker_task
+        global worker_running, worker_tasks
         await setup_credentials()
-        # Start worker loop
+        # Start multiple worker loops for parallel processing
         worker_running = True
-        worker_task = asyncio.create_task(worker_loop())
+        print(f"[Startup] Starting {MAX_CONCURRENT_WORKERS} worker(s) per pod")
+        for i in range(MAX_CONCURRENT_WORKERS):
+            task = asyncio.create_task(worker_loop(i))
+            worker_tasks.append(task)
         yield
-        # Shutdown worker
+        # Shutdown all workers
         worker_running = False
-        if worker_task:
-            worker_task.cancel()
+        for task in worker_tasks:
+            task.cancel()
             try:
-                await worker_task
+                await task
             except asyncio.CancelledError:
                 pass
+        worker_tasks.clear()
         # Close Redis connection
         if redis_pool:
             await redis_pool.close()
@@ -487,35 +494,40 @@ data:
 
     # Worker state
     worker_running = False
-    worker_task: Optional[asyncio.Task] = None
+    worker_tasks: List[asyncio.Task] = []  # Multiple worker tasks
 
-    async def worker_loop():
-        """Background worker that processes tasks from Redis queue."""
+    async def worker_loop(worker_num: int):
+        """Background worker that processes tasks from Redis queue.
+
+        Each pod runs MAX_CONCURRENT_WORKERS of these loops for parallel processing.
+        """
         global worker_running
-        print(f"[Worker {WORKER_ID}] Starting worker loop...")
+        worker_name = f"{WORKER_ID}-{worker_num}"
+        print(f"[Worker {worker_name}] Starting worker loop...")
         ACTIVE_WORKERS.inc()  # Track active worker
         try:
             while worker_running:
                 try:
-                    # Update queue size periodically
-                    stats = await get_queue_stats()
-                    QUEUE_SIZE.set(stats.get("queue_length", 0))
+                    # Update queue size periodically (only worker 0 does this)
+                    if worker_num == 0:
+                        stats = await get_queue_stats()
+                        QUEUE_SIZE.set(stats.get("queue_length", 0))
 
                     task = await dequeue_task()
                     if task:
                         task_id, task_data = task
-                        print(f"[Worker {WORKER_ID}] Processing task {task_id}")
+                        print(f"[Worker {worker_name}] Processing task {task_id}")
                         await execute_task(task_id, task_data)
-                        print(f"[Worker {WORKER_ID}] Completed task {task_id}")
+                        print(f"[Worker {worker_name}] Completed task {task_id}")
                     else:
-                        # No tasks, wait before polling again
-                        await asyncio.sleep(1)
+                        # No tasks, wait before polling again (stagger to reduce contention)
+                        await asyncio.sleep(1 + worker_num * 0.1)
                 except Exception as e:
-                    print(f"[Worker {WORKER_ID}] Error in worker loop: {e}")
+                    print(f"[Worker {worker_name}] Error in worker loop: {e}")
                     await asyncio.sleep(5)
         finally:
             ACTIVE_WORKERS.dec()  # Track worker shutdown
-            print(f"[Worker {WORKER_ID}] Worker loop stopped")
+            print(f"[Worker {worker_name}] Worker loop stopped")
 
     @app.post("/agent/run", response_model=AgentResponse)
     async def run_agent(request: AgentRequest, background_tasks: BackgroundTasks):
