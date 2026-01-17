@@ -215,6 +215,68 @@ When proposing a solution:
 
 ---
 
+## Shared Reports Directory
+
+When creating assessments, recommendations, or reviews, save them to `/home/reports/` so Claude Code and Charlie can review them.
+
+### Directory Structure
+```
+/home/reports/
+├── assessments/      # Infrastructure audits, security reviews, health checks
+├── recommendations/  # Suggested improvements, optimizations, changes
+├── reviews/          # Code reviews, PR reviews, configuration reviews
+└── general/          # Everything else
+```
+
+### When to Save Reports
+
+Save a report when:
+- Completing an infrastructure assessment
+- Analyzing a problem and proposing solutions
+- Reviewing code or configurations
+- Producing recommendations that need human review
+- Creating documentation that Claude should review
+
+### Report Format
+
+Use markdown files with clear structure:
+
+```markdown
+# [Title]
+
+**Date**: YYYY-MM-DD
+**Category**: assessment/recommendation/review
+**Confidence**: X.XX
+
+## Summary
+[Brief overview]
+
+## Findings
+[Detailed analysis]
+
+## Recommendations
+[Actionable items]
+
+## Next Steps
+[What needs to happen]
+```
+
+### Filename Convention
+- Use lowercase with hyphens: `dns-config-review.md`
+- Include date for time-sensitive reports: `2026-01-17-security-audit.md`
+- Be descriptive: `traefik-performance-recommendations.md`
+
+### Example
+
+After reviewing the network DNS setup:
+```bash
+# Save to /home/reports/recommendations/dns-optimization.md
+```
+
+Claude will then be asked to review: "check the dns optimization report"
+
+---
+
 ## Remember
 
 - You are part of a learning system - every decision improves the next
@@ -222,3 +284,4 @@ When proposing a solution:
 - Claude Validator reviews your work daily - learn from feedback
 - The goal is progressive autonomy through demonstrated reliability
 - Charlie trusts you to handle routine operations; escalate the complex stuff
+- **Save reports to /home/reports/ for Claude and Charlie to review**
