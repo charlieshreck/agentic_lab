@@ -130,7 +130,7 @@ spec:
           volumeMounts:
             - name: code
               mountPath: /app
-            - name: gemini-credentials
+            - name: gemini-oauth-credentials
               mountPath: /secrets/gemini
               readOnly: true
             - name: workspace
@@ -173,9 +173,9 @@ spec:
           configMap:
             name: gemini-agent-code
             defaultMode: 0755
-        - name: gemini-credentials
+        - name: gemini-oauth-credentials
           secret:
-            secretName: gemini-credentials
+            secretName: gemini-oauth-credentials
         - name: gemini-context
           configMap:
             name: gemini-agent-context
