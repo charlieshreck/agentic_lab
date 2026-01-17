@@ -220,19 +220,17 @@ print(r.status_code, r.text)
 ## Known Issues
 
 ### 1. Matrix Reaction → Approval Gap
-**Status:** Open
+**Status:** Fixed (2026-01-17)
 
-The Matrix bot's reaction handler calls the wrong endpoint:
-- Bot calls: `POST /approval` with `{thread_id, approved, source}`
-- LangGraph expects: `POST /approve` with `{alert_id, solution_index, approved_by}`
+~~The Matrix bot's reaction handler calls the wrong endpoint~~
 
-**Workaround:** Manually approve via API.
+**Fix Applied:**
+1. Added `pending_approvals` dict to track `event_id` → `alert_id` mapping
+2. `/approval` endpoint now requires `alert_id` and captures Matrix `event_id`
+3. `on_reaction` looks up pending approval by `event_id`
+4. `process_approval` calls LangGraph `/approve` with `{alert_id, solution_index, approved_by}`
 
-**Fix Required:** Update `matrix-bot-code` ConfigMap:
-1. Track `alert_id` when sending approval messages
-2. Change endpoint from `/approval` to `/approve`
-3. Map reaction to `solution_index` (✅ = 1)
-4. Include `approved_by` from Matrix user
+**Commit:** `dc7c746` in agentic_lab
 
 ### 2. Claude Analysis Timeout
 **Status:** Known limitation
