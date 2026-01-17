@@ -146,6 +146,8 @@ spec:
             - name: gemini-context
               mountPath: /context
               readOnly: true
+            - name: reports
+              mountPath: /reports
           resources:
             requests:
               memory: "512Mi"
@@ -189,6 +191,9 @@ spec:
           emptyDir: {}
         - name: root-home
           emptyDir: {}
+        - name: reports
+          persistentVolumeClaim:
+            claimName: agent-reports
 ---
 apiVersion: v1
 kind: Service

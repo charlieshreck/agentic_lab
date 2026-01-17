@@ -680,6 +680,127 @@ data:
             "health": await check_mcp_health()
         }
 
+    # ============================================================================
+    # Reports API - Shared document storage for agent collaboration
+    # ============================================================================
+
+    REPORTS_DIR = Path("/reports")
+
+    class ReportSave(BaseModel):
+        """Save a report document."""
+        filename: str
+        content: str
+        category: str = "general"  # assessments, recommendations, reviews, general
+
+    class ReportMeta(BaseModel):
+        """Report metadata."""
+        filename: str
+        category: str
+        size: int
+        created: str
+        modified: str
+
+    @app.post("/reports/save")
+    async def save_report(report: ReportSave):
+        """Save a report document to shared storage."""
+        try:
+            category_dir = REPORTS_DIR / report.category
+            category_dir.mkdir(parents=True, exist_ok=True)
+
+            # Sanitize filename
+            safe_name = "".join(c for c in report.filename if c.isalnum() or c in "._-")
+            if not safe_name.endswith(".md"):
+                safe_name += ".md"
+
+            filepath = category_dir / safe_name
+            filepath.write_text(report.content)
+
+            return {
+                "success": True,
+                "path": str(filepath),
+                "category": report.category,
+                "filename": safe_name
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/reports/list")
+    async def list_reports(category: Optional[str] = None):
+        """List all reports, optionally filtered by category."""
+        try:
+            reports = []
+            search_dirs = [REPORTS_DIR / category] if category else REPORTS_DIR.iterdir()
+
+            for cat_dir in search_dirs:
+                if not cat_dir.is_dir():
+                    continue
+                cat_name = cat_dir.name
+                for filepath in cat_dir.glob("*.md"):
+                    stat = filepath.stat()
+                    reports.append({
+                        "filename": filepath.name,
+                        "category": cat_name,
+                        "size": stat.st_size,
+                        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        "path": f"{cat_name}/{filepath.name}"
+                    })
+
+            return {"reports": sorted(reports, key=lambda x: x["modified"], reverse=True)}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/reports/read/{category}/{filename}")
+    async def read_report(category: str, filename: str):
+        """Read a specific report."""
+        try:
+            filepath = REPORTS_DIR / category / filename
+            if not filepath.exists():
+                raise HTTPException(status_code=404, detail="Report not found")
+
+            content = filepath.read_text()
+            stat = filepath.stat()
+
+            return {
+                "filename": filename,
+                "category": category,
+                "content": content,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/reports/delete/{category}/{filename}")
+    async def delete_report(category: str, filename: str):
+        """Delete a report."""
+        try:
+            filepath = REPORTS_DIR / category / filename
+            if not filepath.exists():
+                raise HTTPException(status_code=404, detail="Report not found")
+
+            filepath.unlink()
+            return {"success": True, "deleted": f"{category}/{filename}"}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/reports/categories")
+    async def list_categories():
+        """List all report categories with counts."""
+        try:
+            categories = {}
+            if REPORTS_DIR.exists():
+                for cat_dir in REPORTS_DIR.iterdir():
+                    if cat_dir.is_dir():
+                        count = len(list(cat_dir.glob("*.md")))
+                        categories[cat_dir.name] = count
+            return {"categories": categories}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
   init.sh: |
     #!/bin/bash
     set -e

@@ -8,6 +8,7 @@ resources:
   - context-configmap.yaml
   - deployment.yaml
   - infisical-secret.yaml
+  - reports-pvc.yaml
 
 commonLabels:
   app.kubernetes.io/name: gemini-agent
