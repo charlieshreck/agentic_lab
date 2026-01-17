@@ -99,8 +99,13 @@ spec:
                   echo "✓ Kubeconfig configured (prod, monit, agentic)"
               fi
 
-              echo "=== Creating workspace ==="
+              echo "=== Setting up workspace with context ==="
               mkdir -p /workspace
+              # Copy CLAUDE.md context to workspace so agent can read it
+              if [ -f /context/CLAUDE.md ]; then
+                  cp /context/CLAUDE.md /workspace/CLAUDE.md
+                  echo "✓ CLAUDE.md context loaded"
+              fi
 
               echo "=== Starting API Server ==="
               cd /app
@@ -116,15 +121,11 @@ spec:
               value: "/opt/node-bin:/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
             - name: REDIS_URL
               value: "redis://redis:6379"
-            - name: KNOWLEDGE_MCP_URL
-              value: "http://knowledge-mcp:8000"
-            - name: INFRASTRUCTURE_MCP_URL
-              value: "http://infrastructure-mcp:8000"
-            - name: HOME_ASSISTANT_MCP_URL
-              value: "http://home-assistant-mcp:8000"
-            - name: ARR_SUITE_MCP_URL
-              value: "http://arr-suite-mcp:8000"
             # Do NOT set ANTHROPIC_API_KEY - use subscription auth
+          # Import ALL MCP server URLs from shared ConfigMap
+          envFrom:
+            - configMapRef:
+                name: mcp-servers-config
           volumeMounts:
             - name: code
               mountPath: /app
@@ -141,6 +142,9 @@ spec:
               mountPath: /opt/node-bin
             - name: root-home
               mountPath: /root
+            - name: claude-context
+              mountPath: /context
+              readOnly: true
           resources:
             requests:
               memory: "512Mi"
@@ -171,6 +175,9 @@ spec:
         - name: claude-credentials
           secret:
             secretName: claude-credentials
+        - name: claude-context
+          configMap:
+            name: claude-agent-context
         - name: workspace
           emptyDir: {}
         - name: agent-home

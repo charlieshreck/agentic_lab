@@ -39,10 +39,38 @@ data:
     # Claude services - agent for escalation (validator runs separately as daily cronjob)
     CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
 
-    # MCP servers
+    # MCP servers - loaded dynamically from mcp-servers-config ConfigMap
+    # These env vars are injected via envFrom in deployment
+    def load_mcp_urls():
+        """Load all MCP URLs from environment variables."""
+        urls = {}
+        mcp_names = [
+            "knowledge", "infrastructure", "coroot", "proxmox", "opnsense",
+            "adguard", "cloudflare", "unifi", "truenas", "home_assistant",
+            "arr_suite", "homepage", "web_search", "browser_automation",
+            "plex", "vikunja", "neo4j", "tasmota", "monitoring", "keep", "infisical"
+        ]
+        for name in mcp_names:
+            env_key = f"{name.upper()}_MCP_URL"
+            url = os.environ.get(env_key)
+            if url:
+                urls[name.replace("_", "-")] = url
+        return urls
+
+    MCP_URLS = load_mcp_urls()
+    logger.info(f"Loaded {len(MCP_URLS)} MCP server URLs from environment")
+
+    # Convenience accessors for frequently used MCPs
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
     COROOT_MCP_URL = os.environ.get("COROOT_MCP_URL", "http://coroot-mcp:8000")
+    OPNSENSE_MCP_URL = os.environ.get("OPNSENSE_MCP_URL", "http://opnsense-mcp:8000")
+    UNIFI_MCP_URL = os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000")
+    TRUENAS_MCP_URL = os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000")
+    PROXMOX_MCP_URL = os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000")
+    HOME_ASSISTANT_MCP_URL = os.environ.get("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000")
+    TASMOTA_MCP_URL = os.environ.get("TASMOTA_MCP_URL", "http://tasmota-mcp:8000")
+    MONITORING_MCP_URL = os.environ.get("MONITORING_MCP_URL", "http://monitoring-mcp:8000")
 
     # Matrix bot for notifications (replaces Telegram)
     MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
@@ -72,33 +100,47 @@ data:
 
     Your Capabilities:
 
-    You have access to real-time data from these MCP servers (data is fetched automatically based on your query):
+    You have access to real-time data from 21 MCP servers (data is fetched automatically based on your query):
 
     Infrastructure & Network:
+    - infrastructure-mcp - Kubernetes cluster state, pods, deployments, services
     - unifi-mcp - WiFi clients, access points, switches, network health
-    - opnsense-mcp - Firewall rules, DHCP leases, gateway status, VPN
+    - opnsense-mcp - Firewall rules, DHCP leases, gateway status, DNS
     - proxmox-mcp - VMs, LXCs, hypervisor nodes, resource usage
     - truenas-mcp - Storage pools, datasets, ZFS health, shares
-    - infrastructure-mcp - Kubernetes cluster state, pods, deployments
+    - cloudflare-mcp - DNS records, tunnels, zone management
 
     Monitoring & Observability:
     - coroot-mcp - Service metrics, anomaly detection, dependencies
+    - monitoring-mcp - VictoriaMetrics, AlertManager, VictoriaLogs, Grafana, Gatus
     - adguard-mcp - DNS stats, query logs, blocking rates
+    - keep-mcp - Alert aggregation, incidents, deduplication
 
-    Smart Home & Media:
+    Smart Home & IoT:
     - home-assistant-mcp - Lights, sensors, climate, automations
-    - arr-suite-mcp - Sonarr, Radarr, media library status
+    - tasmota-mcp - 26 Tasmota smart devices (power control, WiFi config)
+
+    Media & Entertainment:
+    - arr-suite-mcp - Sonarr, Radarr, Prowlarr, Overseerr, Transmission
+    - plex-mcp - Plex server status, libraries, active streams, GPU usage
 
     Knowledge & Search:
-    - knowledge-mcp - Qdrant vector DB with runbooks, documentation, network entities
+    - knowledge-mcp - Qdrant vector DB, runbooks, docs, entities, Neo4j graph
+    - neo4j-mcp - Knowledge graph queries, dependencies, impact analysis
     - web-search-mcp - Internet search via SearXNG
+    - browser-automation-mcp - Playwright browser automation
 
-    Qdrant Collections Available:
+    Utilities:
+    - vikunja-mcp - Task management, kanban boards
+    - homepage-mcp - Dashboard widgets and service status
+    - infisical-mcp - Secrets management (read-only)
+
+    Qdrant Collections:
     - runbooks - Operational procedures for common issues
     - documentation - Architecture docs and guides
-    - entities - Every device on the network (searchable by IP, MAC, hostname, type)
+    - entities - Every device on the network (IP, MAC, hostname, type)
     - decisions - Historical decisions and outcomes
-    - device_types - How to control different device types (APIs, protocols)
+    - agent_events - Forever Learning System event log
 
     Guidelines:
     - Answer based on ACTUAL DATA provided - never invent device names, IPs, or statuses
@@ -111,7 +153,6 @@ data:
     - 10.10.0.0/24 - Production network (Proxmox, K8s prod cluster)
     - 10.20.0.0/24 - Agentic platform (this AI system)
     - 10.30.0.0/24 - Monitoring cluster (Grafana, Prometheus, Coroot)
-    - 10.40.0.0/24 - Storage network (TrueNAS NFS)
     """
 
     # ============================================================================
@@ -2508,13 +2549,6 @@ spec:
             # Claude services (validator runs separately as daily cronjob)
             - name: CLAUDE_AGENT_URL
               value: "http://claude-agent:8000"
-            # MCP servers
-            - name: KNOWLEDGE_MCP_URL
-              value: "http://knowledge-mcp:8000"
-            - name: INFRASTRUCTURE_MCP_URL
-              value: "http://infrastructure-mcp:8000"
-            - name: COROOT_MCP_URL
-              value: "http://coroot-mcp:8000"
             # Matrix bot (replaces Telegram)
             - name: MATRIX_BOT_URL
               value: "http://matrix-bot:8000"
@@ -2530,6 +2564,11 @@ spec:
               value: "0.75"
             - name: CONTEXT_CACHE_TTL
               value: "3600"
+          # Import ALL MCP server URLs from shared ConfigMap
+          # Source: /home/.mcp.json via sync-mcp-config.sh
+          envFrom:
+            - configMapRef:
+                name: mcp-servers-config
           volumeMounts:
             - name: code
               mountPath: /code

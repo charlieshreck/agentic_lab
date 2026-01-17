@@ -6,5 +6,8 @@ namespace: ai-platform
 resources:
   - infisical-secrets.yaml
   - configmap.yaml
+  - context-configmap.yaml
   - deployment.yaml
   - token-expiry-monitor.yaml
+  # Note: mcp-servers-config ConfigMap is in platform/mcp-config/
+  # and referenced via envFrom in deployment.yaml

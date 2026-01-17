@@ -77,15 +77,33 @@ data:
     CLAUDE_HOME = Path(os.environ.get("HOME", "/home/agent")) / ".claude"
     CREDENTIALS_FILE = CLAUDE_HOME / ".credentials.json"
 
-    # MCP Server endpoints (in-cluster)
-    MCP_SERVERS = {
-        "knowledge": os.getenv("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000"),
-        "infrastructure": os.getenv("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
-        "home-assistant": os.getenv("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000"),
-        "arr-suite": os.getenv("ARR_SUITE_MCP_URL", "http://arr-suite-mcp:8000"),
-    }
+    # MCP Server endpoints - dynamically loaded from environment
+    # Source: mcp-servers-config ConfigMap (generated from /home/.mcp.json)
+    def load_mcp_servers() -> Dict[str, str]:
+        """Load all MCP server URLs from environment variables."""
+        servers = {}
+        # Known MCP servers - loaded from *_MCP_URL env vars
+        mcp_names = [
+            "knowledge", "infrastructure", "coroot", "proxmox", "opnsense",
+            "adguard", "cloudflare", "unifi", "truenas", "home_assistant",
+            "arr_suite", "homepage", "web_search", "browser_automation",
+            "plex", "vikunja", "neo4j", "tasmota", "monitoring", "keep", "infisical"
+        ]
+        for name in mcp_names:
+            env_key = f"{name.upper()}_MCP_URL"
+            url = os.getenv(env_key)
+            if url:
+                # Convert underscores back to hyphens for display name
+                display_name = name.replace("_", "-")
+                servers[display_name] = url
+        return servers
 
-    # Knowledge MCP URL for event logging
+    MCP_SERVERS = load_mcp_servers()
+
+    # Log loaded servers at startup
+    print(f"[Config] Loaded {len(MCP_SERVERS)} MCP servers from environment")
+
+    # Knowledge MCP URL for event logging (with fallback)
     KNOWLEDGE_MCP_URL = os.getenv("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
 
     # Priority levels (lower score = higher priority)

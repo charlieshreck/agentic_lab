@@ -67,16 +67,40 @@ When messaging via Matrix:
 
 ## Available Resources
 
-### MCP Servers
-- `infrastructure-mcp`: Cluster state, pods, deployments, resources
-- `coroot-mcp`: Metrics, anomalies, service dependencies
-- `knowledge-mcp`: Qdrant queries for runbooks, decisions, docs, **and network entities**
-- `opnsense-mcp`: Firewall rules, DHCP leases, gateway status
-- `unifi-mcp`: WiFi clients, APs, switches, network health
-- `proxmox-mcp`: VMs, LXCs, hypervisor management
-- `truenas-mcp`: Storage pools, datasets, shares
-- `web-search-mcp`: Web search (aggregates Google, Bing, DuckDuckGo via SearXNG), page content fetching, news/image search
-- `browser-automation-mcp`: Headless browser control (Playwright) - navigate, screenshot, click, type, evaluate JavaScript, fill forms
+### MCP Servers (21 total - synced from /home/.mcp.json)
+
+**Infrastructure & Network:**
+- `infrastructure-mcp`: Kubernetes cluster state, pods, deployments, services
+- `unifi-mcp`: WiFi clients, access points, switches, network health
+- `opnsense-mcp`: Firewall rules, DHCP leases, gateway status, DNS
+- `proxmox-mcp`: VMs, LXCs, hypervisor nodes, resource usage
+- `truenas-mcp`: Storage pools, datasets, ZFS health, shares
+- `cloudflare-mcp`: DNS records, tunnels, zone management
+
+**Monitoring & Observability:**
+- `coroot-mcp`: Service metrics, anomaly detection, dependencies
+- `monitoring-mcp`: VictoriaMetrics, AlertManager, VictoriaLogs, Grafana, Gatus
+- `adguard-mcp`: DNS stats, query logs, blocking rates
+- `keep-mcp`: Alert aggregation, incidents, deduplication
+
+**Smart Home & IoT:**
+- `home-assistant-mcp`: Lights, sensors, climate, automations
+- `tasmota-mcp`: 26 Tasmota smart devices (power control, WiFi config)
+
+**Media & Entertainment:**
+- `arr-suite-mcp`: Sonarr, Radarr, Prowlarr, Overseerr, Transmission
+- `plex-mcp`: Plex server status, libraries, active streams, GPU usage
+
+**Knowledge & Search:**
+- `knowledge-mcp`: Qdrant vector DB, runbooks, docs, **network entities**
+- `neo4j-mcp`: Knowledge graph queries, dependencies, impact analysis
+- `web-search-mcp`: Internet search via SearXNG
+- `browser-automation-mcp`: Playwright browser automation
+
+**Utilities:**
+- `vikunja-mcp`: Task management, kanban boards
+- `homepage-mcp`: Dashboard widgets and service status
+- `infisical-mcp`: Secrets management (read-only)
 
 ### Qdrant Collections
 - `runbooks`: Operational procedures

@@ -1,0 +1,102 @@
+# AUTO-GENERATED from /root/.claude/CLAUDE.md and /home/CLAUDE.md
+# Regenerate with: /home/agentic_lab/scripts/sync-mcp-config.sh --context
+#
+# This provides the Claude agent with operational context and rules.
+# Keep this in sync with the main CLAUDE.md files.
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-agent-context
+  namespace: ai-platform
+  labels:
+    app: claude-agent
+    component: context
+  annotations:
+    description: "Operational context and rules for Claude agent"
+data:
+  CLAUDE.md: |
+    # Claude Agent Operational Context
+
+    You are the Claude Agent running in the Kernow Homelab agentic cluster.
+    This context is synced from the main CLAUDE.md files.
+
+    ## Core Principles
+
+    1. **GitOps First**: NEVER manual kubectl apply. Commit → Push → ArgoCD sync.
+    2. **IaC Always**: All infrastructure in Terraform, Ansible, or K8s manifests.
+    3. **Infisical for Secrets**: NEVER hardcode secrets. Use InfisicalSecret CRD.
+    4. **Document Everything**: Update docs, runbooks, knowledge base after tasks.
+
+    ## Cluster Architecture
+
+    | Cluster | Network | Purpose |
+    |---------|---------|---------|
+    | prod | 10.10.0.0/24 | Production apps, media, ArgoCD |
+    | agentic | 10.20.0.0/24 | AI platform, MCP servers (YOU ARE HERE) |
+    | monit | 10.30.0.0/24 | Monitoring stack |
+
+    ## Available MCP Servers
+
+    All MCP servers are available via environment variables (*_MCP_URL).
+    Use the MCP_SERVERS_JSON env var for the full list.
+
+    | Server | Purpose |
+    |--------|---------|
+    | knowledge-mcp | Qdrant knowledge base, runbooks, entities |
+    | infrastructure-mcp | kubectl, talosctl, cluster operations |
+    | coroot-mcp | Observability, metrics, anomalies |
+    | proxmox-mcp | VM management |
+    | opnsense-mcp | Firewall, DHCP, DNS |
+    | adguard-mcp | DNS rewrites, filtering |
+    | cloudflare-mcp | DNS records, tunnels |
+    | unifi-mcp | Network clients, devices |
+    | truenas-mcp | Storage management |
+    | home-assistant-mcp | Smart home control |
+    | arr-suite-mcp | Media management (Sonarr, Radarr, etc.) |
+    | plex-mcp | Media server |
+    | vikunja-mcp | Task management |
+    | web-search-mcp | SearXNG search |
+    | browser-automation-mcp | Playwright browser |
+    | neo4j-mcp | Knowledge graph queries |
+    | tasmota-mcp | Smart device control |
+    | monitoring-mcp | VictoriaMetrics, AlertManager, Grafana |
+    | keep-mcp | Alert aggregation |
+
+    ## DNS Architecture
+
+    - 10.10.0.1: OPNsense (AdGuard + Caddy reverse proxy)
+    - 10.10.0.90: Prod cluster load balancer (Traefik)
+    - 10.30.0.120: Monit cluster services
+    - *.kernow.io resolves via Unbound → 10.10.0.90 (internal)
+
+    ## Forbidden Actions
+
+    - Manual `kubectl apply` for persistent changes
+    - Hardcoding secrets in manifests or code
+    - Deploying MCP servers outside agentic cluster
+    - Force pushing to main branches
+    - Skipping documentation updates after tasks
+
+    ## Learning System
+
+    Every decision you make is logged to knowledge-mcp for the Forever Learning System.
+    Log events with:
+    - event_type: agent.chat.start, agent.chat.complete, agent.error
+    - description: What you did
+    - metadata: task_id, model, latency_ms, tools_used
+    - resolution: completed, failed, pending
+
+    ## Kubeconfig Contexts
+
+    Your kubeconfig has all 3 clusters. Use context names:
+    - admin@agentic (default)
+    - admin@prod
+    - admin@monit
+
+    ## When Unsure
+
+    1. Search knowledge-mcp for runbooks
+    2. Check for similar past decisions
+    3. If confidence < 0.5, escalate to Claude Code session
+    4. Log the gap for future learning
