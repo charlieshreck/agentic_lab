@@ -681,10 +681,12 @@ data:
         }
 
     # ============================================================================
-    # Reports API - Shared document storage for agent collaboration
+    # Reports API - Shared document storage via Redis for agent collaboration
     # ============================================================================
 
-    REPORTS_DIR = Path("/reports")
+    REPORTS_KEY_PREFIX = "reports:"
+    REPORTS_INDEX_KEY = "reports:index"
+    REPORTS_TTL = 60 * 60 * 24 * 30  # 30 days TTL for reports
 
     class ReportSave(BaseModel):
         """Save a report document."""
@@ -692,32 +694,45 @@ data:
         content: str
         category: str = "general"  # assessments, recommendations, reviews, general
 
-    class ReportMeta(BaseModel):
-        """Report metadata."""
-        filename: str
-        category: str
-        size: int
-        created: str
-        modified: str
-
     @app.post("/reports/save")
     async def save_report(report: ReportSave):
-        """Save a report document to shared storage."""
+        """Save a report document to Redis-backed storage."""
         try:
-            category_dir = REPORTS_DIR / report.category
-            category_dir.mkdir(parents=True, exist_ok=True)
+            r = await get_redis()
 
             # Sanitize filename
             safe_name = "".join(c for c in report.filename if c.isalnum() or c in "._-")
             if not safe_name.endswith(".md"):
                 safe_name += ".md"
 
-            filepath = category_dir / safe_name
-            filepath.write_text(report.content)
+            report_key = f"{REPORTS_KEY_PREFIX}{report.category}:{safe_name}"
+            now = datetime.utcnow().isoformat()
+
+            # Store report content and metadata
+            report_data = {
+                "filename": safe_name,
+                "category": report.category,
+                "content": report.content,
+                "size": len(report.content),
+                "created": now,
+                "modified": now
+            }
+
+            # Check if exists (to preserve created date)
+            existing = await r.hgetall(report_key)
+            if existing and "created" in existing:
+                report_data["created"] = existing["created"]
+
+            await r.hset(report_key, mapping=report_data)
+            await r.expire(report_key, REPORTS_TTL)
+
+            # Add to index for listing
+            await r.sadd(f"{REPORTS_INDEX_KEY}:{report.category}", safe_name)
+            await r.sadd(REPORTS_INDEX_KEY, report.category)
 
             return {
                 "success": True,
-                "path": str(filepath),
+                "path": f"{report.category}/{safe_name}",
                 "category": report.category,
                 "filename": safe_name
             }
@@ -728,24 +743,31 @@ data:
     async def list_reports(category: Optional[str] = None):
         """List all reports, optionally filtered by category."""
         try:
+            r = await get_redis()
             reports = []
-            search_dirs = [REPORTS_DIR / category] if category else REPORTS_DIR.iterdir()
 
-            for cat_dir in search_dirs:
-                if not cat_dir.is_dir():
-                    continue
-                cat_name = cat_dir.name
-                for filepath in cat_dir.glob("*.md"):
-                    stat = filepath.stat()
-                    reports.append({
-                        "filename": filepath.name,
-                        "category": cat_name,
-                        "size": stat.st_size,
-                        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        "path": f"{cat_name}/{filepath.name}"
-                    })
+            # Get categories to search
+            if category:
+                categories = [category]
+            else:
+                categories = await r.smembers(REPORTS_INDEX_KEY)
 
-            return {"reports": sorted(reports, key=lambda x: x["modified"], reverse=True)}
+            for cat in categories:
+                filenames = await r.smembers(f"{REPORTS_INDEX_KEY}:{cat}")
+                for fname in filenames:
+                    report_key = f"{REPORTS_KEY_PREFIX}{cat}:{fname}"
+                    data = await r.hgetall(report_key)
+                    if data:
+                        reports.append({
+                            "filename": data.get("filename", fname),
+                            "category": cat,
+                            "size": int(data.get("size", 0)),
+                            "modified": data.get("modified", ""),
+                            "created": data.get("created", ""),
+                            "path": f"{cat}/{fname}"
+                        })
+
+            return {"reports": sorted(reports, key=lambda x: x.get("modified", ""), reverse=True)}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -753,19 +775,20 @@ data:
     async def read_report(category: str, filename: str):
         """Read a specific report."""
         try:
-            filepath = REPORTS_DIR / category / filename
-            if not filepath.exists():
+            r = await get_redis()
+            report_key = f"{REPORTS_KEY_PREFIX}{category}:{filename}"
+            data = await r.hgetall(report_key)
+
+            if not data:
                 raise HTTPException(status_code=404, detail="Report not found")
 
-            content = filepath.read_text()
-            stat = filepath.stat()
-
             return {
-                "filename": filename,
+                "filename": data.get("filename", filename),
                 "category": category,
-                "content": content,
-                "size": stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                "content": data.get("content", ""),
+                "size": int(data.get("size", 0)),
+                "created": data.get("created", ""),
+                "modified": data.get("modified", "")
             }
         except HTTPException:
             raise
@@ -776,11 +799,19 @@ data:
     async def delete_report(category: str, filename: str):
         """Delete a report."""
         try:
-            filepath = REPORTS_DIR / category / filename
-            if not filepath.exists():
+            r = await get_redis()
+            report_key = f"{REPORTS_KEY_PREFIX}{category}:{filename}"
+
+            if not await r.exists(report_key):
                 raise HTTPException(status_code=404, detail="Report not found")
 
-            filepath.unlink()
+            await r.delete(report_key)
+            await r.srem(f"{REPORTS_INDEX_KEY}:{category}", filename)
+
+            # Clean up empty category
+            if await r.scard(f"{REPORTS_INDEX_KEY}:{category}") == 0:
+                await r.srem(REPORTS_INDEX_KEY, category)
+
             return {"success": True, "deleted": f"{category}/{filename}"}
         except HTTPException:
             raise
@@ -791,12 +822,12 @@ data:
     async def list_categories():
         """List all report categories with counts."""
         try:
+            r = await get_redis()
             categories = {}
-            if REPORTS_DIR.exists():
-                for cat_dir in REPORTS_DIR.iterdir():
-                    if cat_dir.is_dir():
-                        count = len(list(cat_dir.glob("*.md")))
-                        categories[cat_dir.name] = count
+            cats = await r.smembers(REPORTS_INDEX_KEY)
+            for cat in cats:
+                count = await r.scard(f"{REPORTS_INDEX_KEY}:{cat}")
+                categories[cat] = count
             return {"categories": categories}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
