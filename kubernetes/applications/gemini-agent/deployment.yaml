@@ -8,7 +8,7 @@ metadata:
     app: gemini-agent
     component: agent
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: gemini-agent
