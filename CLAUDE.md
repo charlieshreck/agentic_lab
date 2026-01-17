@@ -63,6 +63,10 @@ This repository contains the infrastructure and application code for a **self-im
 | `browser-automation-mcp` | Headless browser (Playwright) | navigate, screenshot, click, type_text |
 | `infisical-mcp` | Secrets management | list_secrets, get_secret (read-only) |
 | `monitoring-mcp` | Monitoring stack (monit cluster) | query_metrics, list_alerts, query_logs, list_dashboards, get_endpoint_status |
+| `keep-mcp` | Alert aggregation & correlation | list_alerts, list_incidents, list_workflows, acknowledge_alert |
+| `github-mcp` | GitHub repository operations | github_get_repo, github_list_issues, github_get_pr, github_search_code |
+| `wikipedia-mcp` | Wikipedia knowledge retrieval | wikipedia_search, wikipedia_summary, wikipedia_article, wikipedia_related |
+| `reddit-mcp` | Reddit browsing & search | reddit_hot, reddit_search, reddit_post, reddit_comments |
 
 **Usage**: MCP servers are configured in `.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
 
@@ -90,6 +94,10 @@ This repository contains the infrastructure and application code for a **self-im
 | neo4j-mcp | 31098 | `curl http://10.20.0.40:31098/health` |
 | tasmota-mcp | 31100 | `curl http://10.20.0.40:31100/health` |
 | monitoring-mcp | 31101 | `curl http://10.20.0.40:31101/health` |
+| github-mcp | 31102 | `curl http://10.20.0.40:31102/health` |
+| wikipedia-mcp | 31103 | `curl http://10.20.0.40:31103/health` |
+| reddit-mcp | 31104 | `curl http://10.20.0.40:31104/health` |
+| keep-mcp | 31107 | `curl http://10.20.0.40:31107/health` |
 
 **IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
 

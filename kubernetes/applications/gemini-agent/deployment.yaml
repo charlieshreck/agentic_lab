@@ -1,0 +1,208 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemini-agent
+  namespace: ai-platform
+  labels:
+    app: gemini-agent
+    component: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gemini-agent
+  template:
+    metadata:
+      labels:
+        app: gemini-agent
+        component: agent
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: setup
+          image: node:22-bookworm
+          securityContext:
+            runAsUser: 0  # Root for package installation
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== Installing Python ==="
+              apt-get update && apt-get install -y python3 python3-pip python3-venv --no-install-recommends
+
+              echo "=== Setting up user home ==="
+              mkdir -p /home/agent/.gemini /home/agent/.kube /home/agent/.local /home/agent/.npm-global
+              chown -R 1000:1000 /home/agent
+
+              echo "=== Setting up /root for Gemini CLI ==="
+              mkdir -p /root/.gemini
+              chown -R 1000:1000 /root
+
+              echo "=== Installing Gemini CLI to shared location ==="
+              mkdir -p /opt/node-bin
+              cd /opt/node-bin
+              npm init -y
+              npm install @google/gemini-cli
+              # Create wrapper script
+              echo '#!/bin/bash' > /opt/node-bin/gemini
+              echo 'exec /opt/node-bin/node_modules/.bin/gemini "$@"' >> /opt/node-bin/gemini
+              chmod 755 /opt/node-bin/gemini
+              chown -R 1000:1000 /opt/node-bin
+
+              echo "=== Creating venv ==="
+              python3 -m venv /opt/venv
+              chown -R 1000:1000 /opt/venv
+              . /opt/venv/bin/activate
+              pip install --no-cache-dir -r /app/requirements.txt
+
+              echo "[Init] Setup complete"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+            - name: agent-home
+              mountPath: /home/agent
+            - name: venv
+              mountPath: /opt/venv
+            - name: node-bin
+              mountPath: /opt/node-bin
+            - name: root-home
+              mountPath: /root
+      containers:
+        - name: gemini-agent
+          image: node:22-bookworm
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              export HOME=/home/agent
+
+              echo "=== Setting up Gemini credentials ==="
+              mkdir -p $HOME/.gemini
+              if [ -f /secrets/gemini/OAUTH_CREDS_B64 ]; then
+                  base64 -d /secrets/gemini/OAUTH_CREDS_B64 > $HOME/.gemini/oauth_creds.json
+                  chmod 600 $HOME/.gemini/oauth_creds.json
+                  echo "[Init] Gemini OAuth credentials configured"
+              fi
+
+              if [ -f /secrets/gemini/SETTINGS_B64 ]; then
+                  base64 -d /secrets/gemini/SETTINGS_B64 > $HOME/.gemini/settings.json
+                  chmod 644 $HOME/.gemini/settings.json
+                  echo "[Init] Gemini settings configured"
+              fi
+
+              echo "=== Setting up kubeconfigs ==="
+              mkdir -p $HOME/.kube
+              if [ -f /secrets/gemini/KUBECONFIG_MERGED_B64 ]; then
+                  base64 -d /secrets/gemini/KUBECONFIG_MERGED_B64 > $HOME/.kube/config
+                  chmod 600 $HOME/.kube/config
+                  echo "[Init] Kubeconfig configured (prod, monit, agentic)"
+              fi
+
+              echo "=== Setting up workspace with context ==="
+              mkdir -p /workspace
+              if [ -f /context/GEMINI.md ]; then
+                  cp /context/GEMINI.md /workspace/GEMINI.md
+                  echo "[Init] GEMINI.md context loaded"
+              fi
+
+              echo "=== Starting API Server ==="
+              cd /app
+              . /opt/venv/bin/activate
+              exec uvicorn main:app --host 0.0.0.0 --port 8000
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: HOME
+              value: "/home/agent"
+            - name: PATH
+              value: "/opt/node-bin:/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+          # Import ALL MCP server URLs from shared ConfigMap
+          envFrom:
+            - configMapRef:
+                name: mcp-servers-config
+          volumeMounts:
+            - name: code
+              mountPath: /app
+            - name: gemini-credentials
+              mountPath: /secrets/gemini
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+            - name: agent-home
+              mountPath: /home/agent
+            - name: venv
+              mountPath: /opt/venv
+            - name: node-bin
+              mountPath: /opt/node-bin
+            - name: root-home
+              mountPath: /root
+            - name: gemini-context
+              mountPath: /context
+              readOnly: true
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: code
+          configMap:
+            name: gemini-agent-code
+            defaultMode: 0755
+        - name: gemini-credentials
+          secret:
+            secretName: gemini-credentials
+        - name: gemini-context
+          configMap:
+            name: gemini-agent-context
+        - name: workspace
+          emptyDir: {}
+        - name: agent-home
+          emptyDir: {}
+        - name: venv
+          emptyDir: {}
+        - name: node-bin
+          emptyDir: {}
+        - name: root-home
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gemini-agent
+  namespace: ai-platform
+  labels:
+    app: gemini-agent
+spec:
+  selector:
+    app: gemini-agent
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30201
+      name: http
+  type: NodePort
