@@ -92,7 +92,7 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 31105
+      nodePort: 31103
       name: http
   type: NodePort
 ---
