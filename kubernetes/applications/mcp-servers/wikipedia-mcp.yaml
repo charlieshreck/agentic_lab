@@ -391,5 +391,5 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 31103
+      nodePort: 31112
       name: http

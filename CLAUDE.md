@@ -94,8 +94,8 @@ This repository contains the infrastructure and application code for a **self-im
 | neo4j-mcp | 31098 | `curl http://10.20.0.40:31098/health` |
 | tasmota-mcp | 31100 | `curl http://10.20.0.40:31100/health` |
 | monitoring-mcp | 31101 | `curl http://10.20.0.40:31101/health` |
-| github-mcp | 31102 | `curl http://10.20.0.40:31102/health` |
-| wikipedia-mcp | 31103 | `curl http://10.20.0.40:31103/health` |
+| github-mcp | 31111 | `curl http://10.20.0.40:31111/health` |
+| wikipedia-mcp | 31112 | `curl http://10.20.0.40:31112/health` |
 | reddit-mcp | 31104 | `curl http://10.20.0.40:31104/health` |
 | keep-mcp | 31107 | `curl http://10.20.0.40:31107/health` |
 
