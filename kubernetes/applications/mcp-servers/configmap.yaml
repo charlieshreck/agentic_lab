@@ -6,68 +6,27 @@ metadata:
   labels:
     app: mcp-servers
 data:
-  # Infrastructure MCP configuration
-  infrastructure-config.yaml: |
-    name: infrastructure-mcp
-    description: Infrastructure management tools for Kubernetes and Talos
-    endpoint: http://infrastructure-mcp:8000
-    transport: sse
-    tools:
-      - kubectl_get_pods
-      - kubectl_get_deployments
-      - kubectl_logs
-      - kubectl_restart_deployment
-      - kubectl_get_events
-      - talosctl_health
-      - talosctl_services
-
-  # Knowledge MCP configuration
-  knowledge-config.yaml: |
-    name: knowledge-mcp
-    description: Qdrant vector search and knowledge base tools
-    endpoint: http://knowledge-mcp:8000
-    transport: sse
-    tools:
-      - search_runbooks
-      - search_decisions
-      - search_documentation
-      - add_runbook
-      - add_decision
-      - get_similar_events
-
-  # Home Assistant MCP configuration
-  home-assistant-config.yaml: |
-    name: home-assistant-mcp
-    description: Smart home control via Home Assistant
-    endpoint: http://home-assistant-mcp:8000
-    transport: sse
-    tools:
-      - list_lights
-      - turn_on_light
-      - turn_off_light
-      - list_climate
-      - set_climate
-      - get_sensor_state
-      - run_automation
-      - run_script
-      - list_areas
-
-  # Arr Suite MCP configuration
-  arr-suite-config.yaml: |
-    name: arr-suite-mcp
-    description: Media management with Sonarr, Radarr, Prowlarr
-    endpoint: http://arr-suite-mcp:8000
-    transport: sse
-    tools:
-      - list_tv_shows
-      - search_tv_show
-      - trigger_show_search
-      - get_sonarr_calendar
-      - list_movies
-      - search_movie
-      - add_movie
-      - trigger_movie_search
-      - get_download_queue
-      - get_system_status
-      - list_indexers
-      - test_indexer
+  # MCP server URLs for claude-agent envFrom
+  # Format: <NAME>_MCP_URL pointing to internal service
+  # Note: Names use underscores to be valid env var names
+  KNOWLEDGE_MCP_URL: "http://knowledge-mcp:8000"
+  INFRASTRUCTURE_MCP_URL: "http://infrastructure-mcp:8000"
+  COROOT_MCP_URL: "http://coroot-mcp:8000"
+  PROXMOX_MCP_URL: "http://proxmox-mcp:8000"
+  OPNSENSE_MCP_URL: "http://opnsense-mcp:8000"
+  ADGUARD_MCP_URL: "http://adguard-mcp:8000"
+  CLOUDFLARE_MCP_URL: "http://cloudflare-mcp:8000"
+  UNIFI_MCP_URL: "http://unifi-mcp:8000"
+  TRUENAS_MCP_URL: "http://truenas-mcp:8000"
+  HOME_ASSISTANT_MCP_URL: "http://home-assistant-mcp:8000"
+  ARR_SUITE_MCP_URL: "http://arr-suite-mcp:8000"
+  HOMEPAGE_MCP_URL: "http://homepage-mcp:8000"
+  WEB_SEARCH_MCP_URL: "http://web-search-mcp:8000"
+  BROWSER_AUTOMATION_MCP_URL: "http://browser-automation-mcp:8000"
+  PLEX_MCP_URL: "http://plex-mcp:8000"
+  VIKUNJA_MCP_URL: "http://vikunja-mcp:8000"
+  NEO4J_MCP_URL: "http://neo4j-mcp:8000"
+  TASMOTA_MCP_URL: "http://tasmota-mcp:8000"
+  MONITORING_MCP_URL: "http://monitoring-mcp:8000"
+  KEEP_MCP_URL: "http://keep-mcp:8000"
+  INFISICAL_MCP_URL: "http://infisical-mcp:8000"
