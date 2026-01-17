@@ -36,3 +36,7 @@ resources:
   - monitoring-mcp.yaml
   # Alert aggregation
   - keep-mcp.yaml
+  # Research and development
+  - github-mcp.yaml
+  - wikipedia-mcp.yaml
+  - reddit-mcp.yaml
