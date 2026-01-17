@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mcp-config-sync
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: agentic-platform
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/applications/mcp-config-sync
+  destination:
+    server: https://10.20.0.40:6443
+    namespace: ai-platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
