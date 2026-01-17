@@ -15,7 +15,7 @@ metadata:
     app.kubernetes.io/component: shared-config
   annotations:
     description: "Shared MCP server configuration for all AI agents"
-    generated-at: "2026-01-17T11:47:38Z"
+    generated-at: "2026-01-17T20:06:41Z"
     source-file: "/home/.mcp.json"
 data:
   INFISICAL_MCP_URL: "http://infisical-mcp:8000"
@@ -39,6 +39,9 @@ data:
   TASMOTA_MCP_URL: "http://tasmota-mcp:8000"
   MONITORING_MCP_URL: "http://monitoring-mcp:8000"
   KEEP_MCP_URL: "http://keep-mcp:8000"
+  GITHUB_MCP_URL: "http://github-mcp:8000"
+  WIKIPEDIA_MCP_URL: "http://wikipedia-mcp:8000"
+  REDDIT_MCP_URL: "http://reddit-mcp:8000"
   # Full MCP config as JSON (for dynamic parsing)
   MCP_SERVERS_JSON: |
-    {"servers":[{"name":"infisical","url":"http://null-mcp:8000"},{"name":"coroot","url":"http://null-mcp:8000"},{"name":"proxmox","url":"http://null-mcp:8000"},{"name":"infrastructure","url":"http://null-mcp:8000"},{"name":"knowledge","url":"http://null-mcp:8000"},{"name":"opnsense","url":"http://null-mcp:8000"},{"name":"adguard","url":"http://null-mcp:8000"},{"name":"cloudflare","url":"http://null-mcp:8000"},{"name":"unifi","url":"http://null-mcp:8000"},{"name":"truenas","url":"http://null-mcp:8000"},{"name":"home-assistant","url":"http://null-mcp:8000"},{"name":"arr-suite","url":"http://null-mcp:8000"},{"name":"homepage","url":"http://null-mcp:8000"},{"name":"web-search","url":"http://null-mcp:8000"},{"name":"browser-automation","url":"http://null-mcp:8000"},{"name":"plex","url":"http://null-mcp:8000"},{"name":"vikunja","url":"http://null-mcp:8000"},{"name":"neo4j","url":"http://null-mcp:8000"},{"name":"tasmota","url":"http://null-mcp:8000"},{"name":"monitoring","url":"http://null-mcp:8000"},{"name":"keep","url":"http://null-mcp:8000"}]}
+    {"servers":[{"name":"infisical","url":"http://null-mcp:8000"},{"name":"coroot","url":"http://null-mcp:8000"},{"name":"proxmox","url":"http://null-mcp:8000"},{"name":"infrastructure","url":"http://null-mcp:8000"},{"name":"knowledge","url":"http://null-mcp:8000"},{"name":"opnsense","url":"http://null-mcp:8000"},{"name":"adguard","url":"http://null-mcp:8000"},{"name":"cloudflare","url":"http://null-mcp:8000"},{"name":"unifi","url":"http://null-mcp:8000"},{"name":"truenas","url":"http://null-mcp:8000"},{"name":"home-assistant","url":"http://null-mcp:8000"},{"name":"arr-suite","url":"http://null-mcp:8000"},{"name":"homepage","url":"http://null-mcp:8000"},{"name":"web-search","url":"http://null-mcp:8000"},{"name":"browser-automation","url":"http://null-mcp:8000"},{"name":"plex","url":"http://null-mcp:8000"},{"name":"vikunja","url":"http://null-mcp:8000"},{"name":"neo4j","url":"http://null-mcp:8000"},{"name":"tasmota","url":"http://null-mcp:8000"},{"name":"monitoring","url":"http://null-mcp:8000"},{"name":"keep","url":"http://null-mcp:8000"},{"name":"github","url":"http://null-mcp:8000"},{"name":"wikipedia","url":"http://null-mcp:8000"},{"name":"reddit","url":"http://null-mcp:8000"}]}
