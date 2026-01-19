@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: outline-db-init
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: outline
+    app.kubernetes.io/component: db-init
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: db-init
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              echo "Creating outline database if not exists..."
+              PGPASSWORD=$POSTGRES_PASSWORD psql -h postgresql -U $POSTGRES_USER -d postgres -c "SELECT 1 FROM pg_database WHERE datname = 'outline'" | grep -q 1 || \
+              PGPASSWORD=$POSTGRES_PASSWORD createdb -h postgresql -U $POSTGRES_USER outline
+              echo "Database ready."
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-credentials
+                  key: password

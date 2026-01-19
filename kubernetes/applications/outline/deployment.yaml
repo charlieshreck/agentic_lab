@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outline
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: outline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: outline
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: outline
+    spec:
+      containers:
+        - name: outline
+          image: outlinewiki/outline:0.81.1
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            # Core settings
+            - name: NODE_ENV
+              value: "production"
+            - name: URL
+              value: "https://outline.kernow.io"
+            - name: PORT
+              value: "3000"
+            - name: FORCE_HTTPS
+              value: "false"
+
+            # Database
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-credentials
+                  key: password
+            - name: DATABASE_URL
+              value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgresql:5432/outline"
+            - name: PGSSLMODE
+              value: "disable"
+
+            # Redis
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+
+            # Secrets
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: outline-credentials
+                  key: SECRET_KEY
+            - name: UTILS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: outline-credentials
+                  key: UTILS_SECRET
+
+            # Google OIDC
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: outline-credentials
+                  key: GOOGLE_CLIENT_ID
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: outline-credentials
+                  key: GOOGLE_CLIENT_SECRET
+
+            # File storage
+            - name: FILE_STORAGE
+              value: "local"
+            - name: FILE_STORAGE_LOCAL_ROOT_DIR
+              value: "/var/lib/outline/data"
+            - name: FILE_STORAGE_UPLOAD_MAX_SIZE
+              value: "52428800"
+
+            # Optional features
+            - name: ENABLE_UPDATES
+              value: "true"
+            - name: WEB_CONCURRENCY
+              value: "2"
+            - name: DEFAULT_LANGUAGE
+              value: "en_US"
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/outline/data
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+
+          readinessProbe:
+            httpGet:
+              path: /_health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /_health
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: outline-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: outline-data
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: outline
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
