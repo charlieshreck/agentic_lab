@@ -40,3 +40,5 @@ resources:
   - github-mcp.yaml
   - wikipedia-mcp.yaml
   - reddit-mcp.yaml
+  # Documentation
+  - outline-mcp.yaml
