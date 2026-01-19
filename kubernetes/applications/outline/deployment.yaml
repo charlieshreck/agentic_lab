@@ -64,20 +64,27 @@ spec:
                   name: outline-credentials
                   key: UTILS_SECRET
 
-            # Google OIDC
-            - name: GOOGLE_CLIENT_ID
+            # Generic OIDC with Google (bypasses gmail.com block)
+            - name: OIDC_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: outline-credentials
                   key: GOOGLE_CLIENT_ID
-            - name: GOOGLE_CLIENT_SECRET
+            - name: OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: outline-credentials
                   key: GOOGLE_CLIENT_SECRET
-            # Explicitly allow personal Gmail accounts
-            - name: ALLOWED_DOMAINS
-              value: "gmail.com"
+            - name: OIDC_AUTH_URI
+              value: "https://accounts.google.com/o/oauth2/v2/auth"
+            - name: OIDC_TOKEN_URI
+              value: "https://oauth2.googleapis.com/token"
+            - name: OIDC_USERINFO_URI
+              value: "https://openidconnect.googleapis.com/v1/userinfo"
+            - name: OIDC_SCOPES
+              value: "openid profile email"
+            - name: OIDC_DISPLAY_NAME
+              value: "Google"
 
             # File storage
             - name: FILE_STORAGE
