@@ -92,27 +92,6 @@ spec:
             - name: DEFAULT_LANGUAGE
               value: "en_US"
 
-            # Robots.txt - Allow Claude and other AI crawlers for public docs
-            - name: ROBOTS_TXT
-              value: |
-                User-agent: ClaudeBot
-                Allow: /
-
-                User-agent: Claude-Web
-                Allow: /
-
-                User-agent: anthropic-ai
-                Allow: /
-
-                User-agent: *
-                Allow: /doc/
-                Allow: /s/
-                Disallow: /api/
-                Disallow: /auth/
-                Disallow: /settings/
-                Disallow: /drafts/
-                Disallow: /templates/
-
           volumeMounts:
             - name: data
               mountPath: /var/lib/outline/data

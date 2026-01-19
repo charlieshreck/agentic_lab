@@ -1,0 +1,87 @@
+---
+# ConfigMap with custom robots.txt for Claude and AI crawlers
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: outline-robots-txt
+  namespace: ai-platform
+data:
+  robots.txt: |
+    # Allow Claude and Anthropic AI crawlers full access
+    User-agent: ClaudeBot
+    Allow: /
+
+    User-agent: Claude-Web
+    Allow: /
+
+    User-agent: anthropic-ai
+    Allow: /
+
+    User-agent: CCBot
+    Allow: /
+
+    # Allow general crawlers for public documents only
+    User-agent: *
+    Allow: /doc/
+    Allow: /s/
+    Allow: /share/
+    Disallow: /api/
+    Disallow: /auth/
+    Disallow: /settings/
+    Disallow: /drafts/
+    Disallow: /templates/
+    Disallow: /home
+    Disallow: /search
+---
+# Small nginx deployment to serve robots.txt
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outline-robots
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: outline-robots
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: outline-robots
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: outline-robots
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: robots-txt
+              mountPath: /usr/share/nginx/html/robots.txt
+              subPath: robots.txt
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "5m"
+            limits:
+              memory: "32Mi"
+              cpu: "10m"
+      volumes:
+        - name: robots-txt
+          configMap:
+            name: outline-robots-txt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: outline-robots
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: outline-robots
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 31115
