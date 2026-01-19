@@ -64,27 +64,17 @@ spec:
                   name: outline-credentials
                   key: UTILS_SECRET
 
-            # Generic OIDC with Google (bypasses gmail.com block)
-            - name: OIDC_CLIENT_ID
+            # GitHub OAuth
+            - name: GITHUB_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: outline-credentials
-                  key: GOOGLE_CLIENT_ID
-            - name: OIDC_CLIENT_SECRET
+                  key: GITHUB_CLIENT_ID
+            - name: GITHUB_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: outline-credentials
-                  key: GOOGLE_CLIENT_SECRET
-            - name: OIDC_AUTH_URI
-              value: "https://accounts.google.com/o/oauth2/v2/auth"
-            - name: OIDC_TOKEN_URI
-              value: "https://oauth2.googleapis.com/token"
-            - name: OIDC_USERINFO_URI
-              value: "https://openidconnect.googleapis.com/v1/userinfo"
-            - name: OIDC_SCOPES
-              value: "openid profile email"
-            - name: OIDC_DISPLAY_NAME
-              value: "Google"
+                  key: GITHUB_CLIENT_SECRET
 
             # File storage
             - name: FILE_STORAGE
