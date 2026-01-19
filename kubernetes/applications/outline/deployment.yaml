@@ -75,9 +75,9 @@ spec:
                 secretKeyRef:
                   name: outline-credentials
                   key: GOOGLE_CLIENT_SECRET
-            # Allow personal Gmail accounts (empty = allow all)
+            # Explicitly allow personal Gmail accounts
             - name: ALLOWED_DOMAINS
-              value: ""
+              value: "gmail.com"
 
             # File storage
             - name: FILE_STORAGE
