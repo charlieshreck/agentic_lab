@@ -67,6 +67,7 @@ This repository contains the infrastructure and application code for a **self-im
 | `github-mcp` | GitHub repository operations | github_get_repo, github_list_issues, github_get_pr, github_search_code |
 | `wikipedia-mcp` | Wikipedia knowledge retrieval | wikipedia_search, wikipedia_summary, wikipedia_article, wikipedia_related |
 | `reddit-mcp` | Reddit browsing & search | reddit_hot, reddit_search, reddit_post, reddit_comments |
+| `outline-mcp` | Outline wiki document management | list_documents, search_documents, get_collection_structure, create_document |
 
 **Usage**: MCP servers are configured in `.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
 
@@ -98,6 +99,7 @@ This repository contains the infrastructure and application code for a **self-im
 | wikipedia-mcp | 31112 | `curl http://10.20.0.40:31112/health` |
 | reddit-mcp | 31104 | `curl http://10.20.0.40:31104/health` |
 | keep-mcp | 31107 | `curl http://10.20.0.40:31107/health` |
+| outline-mcp | 31114 | `curl http://10.20.0.40:31114/health` |
 
 **IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
 

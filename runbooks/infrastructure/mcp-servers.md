@@ -24,6 +24,8 @@ Claude Code / Agents
 
 ## NodePort Allocation
 
+**Range**: 31080-31199 reserved for MCP servers
+
 | MCP Server | NodePort | Purpose |
 |------------|----------|---------|
 | infisical-mcp | 31080 | Secrets management (read-only) |
@@ -43,14 +45,32 @@ Claude Code / Agents
 | browser-automation-mcp | 31094 | Playwright browser automation |
 | plex-mcp | 31096 | Plex Media Server (31095 reserved) |
 | vikunja-mcp | 31097 | Vikunja task management |
-| neo4j-mcp | 31099 | Neo4j knowledge graph (relationships, dependencies) |
+| neo4j-mcp | 31098 | Neo4j knowledge graph |
+| tasmota-mcp | 31100 | Tasmota smart device control |
+| monitoring-mcp | 31101 | VictoriaMetrics, Grafana, Gatus |
+| reddit-mcp | 31104 | Reddit browsing, discussions |
+| keep-mcp | 31107 | Alert aggregation, correlation |
+| github-mcp | 31111 | GitHub repos, issues, PRs |
+| wikipedia-mcp | 31112 | Wikipedia articles, knowledge |
+| outline-mcp | 31114 | Outline wiki document management |
+
+### Reserved Ports (Non-MCP)
+| Service | NodePort | Purpose |
+|---------|----------|---------|
+| alerting-pipeline | 31102 | Alert webhook receiver |
+| mcp-config-sync | 31103 | MCP configuration sync |
+| keep | 31105 | Keep alert platform |
+| keep-frontend | 31106 | Keep UI |
+| claude-refresh | 31110 | Claude token refresh |
+| outline | 31113 | Outline wiki application |
 
 ## Health Checks
 
 ```bash
 # Check all MCP servers
-for port in 31080 31081 31082 31083 31084 31085 31086 31087 31088 31089 31090 31091 31092 31093 31094; do
-  status=$(curl -s -o /dev/null -w "%{http_code}" http://10.20.0.40:$port/health)
+MCP_PORTS="31080 31081 31082 31083 31084 31085 31086 31087 31088 31089 31090 31091 31092 31093 31094 31096 31097 31098 31100 31101 31104 31107 31111 31112 31114"
+for port in $MCP_PORTS; do
+  status=$(curl -s -o /dev/null -w "%{http_code}" http://10.20.0.40:$port/health 2>/dev/null || echo "ERR")
   echo "Port $port: $status"
 done
 ```
@@ -114,6 +134,61 @@ MCP servers use secrets from Infisical. Check:
 
 - **ALL MCP servers belong in agentic cluster ONLY**
 - **NEVER deploy MCPs to prod or monit clusters**
-- **ALWAYS use NodePort in range 31080-31099**
+- **ALWAYS use NodePort in range 31080-31199** (check existing allocations first!)
 - **ALWAYS update `.mcp.json` after adding new MCP**
 - **ALWAYS update this runbook after changes**
+- **ALWAYS update `/root/.claude-ref/mcp-ports.txt` after port allocation**
+
+## NodePort Allocation Checklist
+
+Before allocating a new NodePort:
+```bash
+# Check all services in 311xx range
+KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/generated/kubeconfig \
+  kubectl get svc -A -o custom-columns="NAME:.metadata.name,NODEPORT:.spec.ports[*].nodePort" | grep "311" | sort -t: -k2
+
+# Check reference file
+cat /root/.claude-ref/mcp-ports.txt
+```
+
+## Pre-built Image Pattern
+
+For MCP servers with maintained Docker images (preferred when available):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <name>-mcp
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <name>-mcp
+  template:
+    metadata:
+      labels:
+        app: <name>-mcp
+        component: mcp
+    spec:
+      containers:
+        - name: mcp-server
+          image: ghcr.io/<maintainer>/<name>:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-<name>
+                  key: API_KEY
+            - name: MCP_TRANSPORT
+              value: "streamable-http"
+```
+
+**Benefits of pre-built images:**
+- Maintained by community
+- Regular security updates
+- Less code to maintain
+- Documented tool interfaces

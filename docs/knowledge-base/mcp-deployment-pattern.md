@@ -14,7 +14,103 @@ MCP (Model Context Protocol) servers provide tools for AI agents to interact wit
 **Namespace**: ai-platform
 **Manifests**: /home/agentic_lab/kubernetes/applications/mcp-servers/
 
-## Standard Pattern
+## Deployment Patterns
+
+There are two patterns for deploying MCP servers:
+
+1. **Pre-built Image Pattern** (Preferred) - Use existing Docker images from GHCR/Docker Hub
+2. **ConfigMap Pattern** - Custom server code in ConfigMap
+
+### Pattern Selection
+| Scenario | Pattern |
+|----------|---------|
+| Community-maintained MCP exists | Pre-built Image |
+| Custom integration needed | ConfigMap |
+| Quick prototyping | ConfigMap |
+| Production, low maintenance | Pre-built Image |
+
+---
+
+## Pre-built Image Pattern (Recommended)
+
+For MCP servers with maintained Docker images:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <name>-mcp
+  namespace: ai-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <name>-mcp
+  template:
+    metadata:
+      labels:
+        app: <name>-mcp
+        component: mcp
+    spec:
+      containers:
+        - name: mcp-server
+          image: ghcr.io/<maintainer>/<image>:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-<name>
+                  key: API_KEY
+            - name: API_URL
+              value: "http://<service>/api"  # Internal K8s DNS
+            - name: MCP_TRANSPORT
+              value: "streamable-http"
+            - name: MCP_HOST
+              value: "0.0.0.0"
+            - name: MCP_PORT
+              value: "3000"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: <name>-mcp
+  namespace: ai-platform
+spec:
+  type: NodePort
+  selector:
+    app: <name>-mcp
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 311XX  # Check /root/.claude-ref/mcp-ports.txt
+```
+
+**Example**: outline-mcp uses `ghcr.io/vortiago/mcp-outline:latest`
+
+**Benefits:**
+- Maintained by community
+- Regular security updates
+- Less code to maintain
+- Well-documented tool interfaces
+
+---
+
+## ConfigMap Pattern (Custom Code)
 
 Every MCP server consists of three Kubernetes resources in a single YAML file:
 
