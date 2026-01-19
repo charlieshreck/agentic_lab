@@ -45,10 +45,14 @@ data:
         listen 80;
         server_name _;
 
-        # Serve custom robots.txt
+        # Serve custom robots.txt (no caching)
         location = /robots.txt {
             alias /usr/share/nginx/html/robots.txt;
             add_header Content-Type text/plain;
+            add_header Cache-Control "no-cache, no-store, must-revalidate";
+            add_header Pragma "no-cache";
+            add_header Expires 0;
+            add_header X-Robots-Source "nginx-proxy";
         }
 
         # Proxy all other requests to Outline
