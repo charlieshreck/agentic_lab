@@ -1,0 +1,21 @@
+# Internal access via Traefik (AdGuard rewrite → 10.20.0.90)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: outline
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: outline
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: outline.kernow.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: outline
+                port:
+                  number: 80
