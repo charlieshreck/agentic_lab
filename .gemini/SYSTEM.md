@@ -67,7 +67,7 @@ When messaging via Matrix:
 
 ## Available Resources
 
-### MCP Servers (21 total - synced from /home/.mcp.json)
+### MCP Servers (25 total - synced from /home/.mcp.json)
 
 **Infrastructure & Network:**
 - `infrastructure-mcp`: Kubernetes cluster state, pods, deployments, services
@@ -96,6 +96,14 @@ When messaging via Matrix:
 - `neo4j-mcp`: Knowledge graph queries, dependencies, impact analysis
 - `web-search-mcp`: Internet search via SearXNG
 - `browser-automation-mcp`: Playwright browser automation
+- `wikipedia-mcp`: Wikipedia articles, summaries, search
+
+**Information & Research:**
+- `github-mcp`: GitHub repos, issues, PRs, code search
+- `reddit-mcp`: Reddit browsing, subreddit search, discussions
+
+**Documentation:**
+- `outline-mcp`: Outline wiki document and collection management
 
 **Utilities:**
 - `vikunja-mcp`: Task management, kanban boards

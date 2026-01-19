@@ -48,7 +48,8 @@ data:
             "knowledge", "infrastructure", "coroot", "proxmox", "opnsense",
             "adguard", "cloudflare", "unifi", "truenas", "home_assistant",
             "arr_suite", "homepage", "web_search", "browser_automation",
-            "plex", "vikunja", "neo4j", "tasmota", "monitoring", "keep", "infisical"
+            "plex", "vikunja", "neo4j", "tasmota", "monitoring", "keep", "infisical",
+            "github", "wikipedia", "reddit", "outline"
         ]
         for name in mcp_names:
             env_key = f"{name.upper()}_MCP_URL"
@@ -100,7 +101,7 @@ data:
 
     Your Capabilities:
 
-    You have access to real-time data from 21 MCP servers (data is fetched automatically based on your query):
+    You have access to real-time data from 25 MCP servers (data is fetched automatically based on your query):
 
     Infrastructure & Network:
     - infrastructure-mcp - Kubernetes cluster state, pods, deployments, services
@@ -129,6 +130,14 @@ data:
     - neo4j-mcp - Knowledge graph queries, dependencies, impact analysis
     - web-search-mcp - Internet search via SearXNG
     - browser-automation-mcp - Playwright browser automation
+    - wikipedia-mcp - Wikipedia articles, summaries, search
+
+    Information & Research:
+    - github-mcp - GitHub repos, issues, PRs, code search
+    - reddit-mcp - Reddit browsing, subreddit search, discussions
+
+    Documentation:
+    - outline-mcp - Outline wiki document and collection management
 
     Utilities:
     - vikunja-mcp - Task management, kanban boards
