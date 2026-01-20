@@ -2,70 +2,88 @@
 
 ## Overview
 
-Backrest provides a web UI for managing restic backups of VMs and LXC containers.
+Backrest provides a web UI for managing restic backups of VMs and LXC containers. It runs in the agentic cluster and stores backups in Garage S3.
 
-**Access**:
-- Internal: http://10.20.0.40:31115
-- External: https://backrest.kernow.io (via Caddy reverse proxy)
+## Access
 
-**Backend**: Garage S3 at http://10.20.0.103:30188
+| Method | URL | Notes |
+|--------|-----|-------|
+| Traefik Ingress | https://backrest.kernow.io | Via Agentic Traefik LB (10.20.0.90) |
+| NodePort | http://10.20.0.40:31115 | Direct access / fallback |
 
-## Initial Setup
+**Authentication**: Username/password configured in Backrest UI on first login.
 
-### 1. Access Backrest UI
-Navigate to http://10.20.0.40:31115
+## Architecture
 
-### 2. Add Repository
-1. Click "Add Repository"
-2. Configure S3 backend:
-   - Type: S3
-   - Endpoint: http://10.20.0.103:30188
-   - Bucket: backrest
-   - Region: garage
-   - Access Key: (from Infisical `/backups/garage`)
-   - Secret Key: (from Infisical `/backups/garage`)
-3. Set repository password (store securely!)
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                              BACKREST BACKUP FLOW                                 │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│   BACKREST (Agentic Cluster)                                                     │
+│   Namespace: backrest                                                            │
+│   Pod: backrest-xxx                                                              │
+│   ┌────────────────────────────────────────────────────────────────────────┐    │
+│   │                                                                        │    │
+│   │   ┌──────────┐    ┌───────────────┐    ┌──────────────────────────┐  │    │
+│   │   │ Web UI   │───▶│ Backup Plans  │───▶│ Restic (embedded)        │  │    │
+│   │   │ :9898    │    │ Scheduler     │    │ - Snapshots              │  │    │
+│   │   └──────────┘    └───────────────┘    │ - Deduplication          │  │    │
+│   │                                         │ - Encryption             │  │    │
+│   │                                         └────────────┬─────────────┘  │    │
+│   │                                                      │                │    │
+│   └──────────────────────────────────────────────────────┼────────────────┘    │
+│                                                          │                      │
+│                           ┌──────────────────────────────┴──────────────────┐  │
+│                           │                                                  │  │
+│                           ▼                                                  ▼  │
+│   ┌─────────────────────────────────────┐    ┌────────────────────────────────┐│
+│   │         SSH to Backup Targets       │    │      S3 to Garage Storage      ││
+│   │                                     │    │                                ││
+│   │   IAC LXC (10.10.0.100)            │    │   s3:http://10.20.0.103:30188  ││
+│   │   Plex VM (10.10.0.50)             │    │   Bucket: backrest             ││
+│   │   UniFi VM (10.10.0.51)            │    │                                ││
+│   │   TrueNAS-HDD (10.20.0.103)        │    │   Encrypted, deduplicated      ││
+│   │                                     │    │   restic repository            ││
+│   └─────────────────────────────────────┘    └────────────────────────────────┘│
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
 
-### 3. Add Backup Plans
+## Backend: Garage S3
 
-#### IAC LXC (100) - CRITICAL
-- **Name**: iac-daily
-- **Repository**: (created above)
-- **Host**: iac (10.10.0.100)
-- **Paths**: /root, /etc, /home
-- **Excludes**: /root/.cache, /root/.local/share/containers
-- **Schedule**: 0 3 * * * (3AM daily)
-- **Retention**: 14 daily, 4 weekly
+| Setting | Value |
+|---------|-------|
+| Repository URI | `s3:http://10.20.0.103:30188/backrest` |
+| Region | `garage` |
+| Endpoint | `http://10.20.0.103:30188` |
+| Bucket | `backrest` |
+| Credentials | Infisical `/backups/garage` |
 
-#### Plex VM (450)
-- **Name**: plex-daily
-- **Repository**: (created above)
-- **Host**: plex (10.10.0.50)
-- **Paths**: /var/lib/plex
-- **Excludes**: /var/lib/plex/Plex Media Server/Cache
-- **Schedule**: 0 4 * * * (4AM daily)
-- **Retention**: 7 daily, 4 weekly
+## Configured Backup Plans
 
-#### UniFi VM (451)
-- **Name**: unifi-daily
-- **Repository**: (created above)
-- **Host**: unifi (10.10.0.51)
-- **Paths**: /var/lib/unifi
-- **Schedule**: 0 5 * * * (5AM daily)
-- **Retention**: 7 daily, 4 weekly
+| Plan | Host | Paths | Excludes | Schedule | Retention |
+|------|------|-------|----------|----------|-----------|
+| **iac-daily** | iac (10.10.0.100) | /root, /etc, /home | /root/.cache, /root/.local/share/containers | 3AM daily | 14 daily, 4 weekly |
+| **plex-daily** | plex (10.10.0.50) | /var/lib/plex | Cache directories | 4AM daily | 7 daily, 4 weekly |
+| **unifi-daily** | unifi (10.10.0.51) | /var/lib/unifi | - | 5AM daily | 7 daily, 4 weekly |
+| **truenas-weekly** | truenas-hdd (10.20.0.103) | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
 
-#### TrueNAS Configs
-- **Name**: truenas-weekly
-- **Host**: truenas-hdd (10.20.0.103)
-- **Paths**: /root (config exports)
-- **Schedule**: 0 6 * * 0 (6AM Sundays)
-- **Retention**: 4 weekly, 2 monthly
+### Cron Expressions
 
-## SSH Access
+| Plan | Cron | Meaning |
+|------|------|---------|
+| iac-daily | `0 3 * * *` | Every day at 3:00 AM |
+| plex-daily | `0 4 * * *` | Every day at 4:00 AM |
+| unifi-daily | `0 5 * * *` | Every day at 5:00 AM |
+| truenas-weekly | `0 6 * * 0` | Every Sunday at 6:00 AM |
 
-Backrest uses SSH to connect to backup targets.
+## SSH Configuration
 
-**SSH Config** (mounted at `/root/.ssh/config`):
+Backrest connects to backup targets via SSH. Keys and config are mounted from Kubernetes secrets.
+
+### SSH Config (mounted at `/root/.ssh/config`)
+
 ```
 Host iac
   HostName 10.10.0.100
@@ -93,80 +111,282 @@ Host truenas-media
   IdentityFile /root/.ssh/id_ed25519
 ```
 
-**SSH Keys**: Stored in Infisical `/backups/backrest`
+### SSH Keys Location
+
+- **Infisical**: `/backups/backrest` - Contains SSH_PRIVATE_KEY, SSH_PUBLIC_KEY
+- **Kubernetes Secret**: `backrest-ssh-keys` in `backrest` namespace
+- **Mounted Path**: `/root/.ssh/` in Backrest pod
 
 ### Adding SSH Key to New Host
+
 ```bash
 # Get public key from Infisical
 PUBLIC_KEY=$(infisical secrets get SSH_PUBLIC_KEY --path=/backups/backrest --plain)
 
 # Add to target host
-ssh root@<target> "echo '$PUBLIC_KEY' >> /root/.ssh/authorized_keys"
+ssh root@<target> "mkdir -p /root/.ssh && echo '$PUBLIC_KEY' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
 ```
 
 ## Common Operations
 
-### Manual Backup
+### Access Backrest UI
+
+1. Navigate to https://backrest.kernow.io
+2. Login with configured credentials
+3. Dashboard shows all backup plans and recent activity
+
+### Run Manual Backup
+
 1. Open Backrest UI
-2. Select plan → Run Now
+2. Select backup plan from sidebar
+3. Click "Run Now" button
+4. Monitor progress in activity log
 
 ### Browse Snapshots
-1. Select repository
-2. Click "Browse"
-3. Navigate snapshot tree
+
+1. Select repository from sidebar
+2. Click "Browse" tab
+3. Navigate snapshot tree by date
+4. Select files/folders to view
 
 ### Restore Files
+
 1. Browse to desired snapshot
-2. Select files/folders
-3. Click "Restore"
-4. Choose destination path
+2. Select files/folders to restore
+3. Click "Restore" button
+4. Choose destination:
+   - **Original location**: Overwrites existing files
+   - **Custom path**: Restores to specified location
+5. Confirm and monitor progress
 
 ### Check Backup Status
-1. View plan → Recent runs
-2. Check for errors/warnings
+
+1. Select backup plan
+2. View "Recent Runs" section
+3. Check for:
+   - ✅ Success (green)
+   - ⚠️ Warning (yellow) - partial issues
+   - ❌ Failed (red) - needs investigation
+
+### View Logs
+
+```bash
+# Via kubectl
+kubectl logs -n backrest deployment/backrest --tail=100
+
+# Via MCP
+infrastructure-mcp: kubectl_logs(namespace="backrest", pod_name="backrest")
+```
 
 ## Troubleshooting
 
 ### SSH Connection Failed
-1. Verify SSH key is in target's authorized_keys
-2. Check network connectivity: `kubectl exec -n backrest deploy/backrest -- ssh -T iac`
-3. Verify SSH config is mounted: `kubectl exec -n backrest deploy/backrest -- cat /root/.ssh/config`
+
+1. **Verify SSH key is installed on target**:
+   ```bash
+   ssh root@<target> "cat /root/.ssh/authorized_keys | grep backrest"
+   ```
+
+2. **Test SSH from Backrest pod**:
+   ```bash
+   kubectl exec -n backrest deployment/backrest -- ssh -o StrictHostKeyChecking=no -T iac
+   ```
+
+3. **Verify SSH config is mounted**:
+   ```bash
+   kubectl exec -n backrest deployment/backrest -- cat /root/.ssh/config
+   ```
+
+4. **Check key permissions**:
+   ```bash
+   kubectl exec -n backrest deployment/backrest -- ls -la /root/.ssh/
+   # id_ed25519 should be 0600
+   ```
 
 ### S3 Connection Failed
-1. Verify Garage is running: `curl http://10.20.0.103:30188`
-2. Check S3 credentials in environment
-3. Test with AWS CLI: `aws s3 ls --endpoint-url=http://10.20.0.103:30188`
+
+1. **Verify Garage is running**:
+   ```bash
+   curl http://10.20.0.103:30188
+   # Expected: 403 Forbidden (anonymous access denied)
+   ```
+
+2. **Check S3 credentials in pod environment**:
+   ```bash
+   kubectl exec -n backrest deployment/backrest -- env | grep AWS
+   ```
+
+3. **Test with AWS CLI from pod**:
+   ```bash
+   kubectl exec -n backrest deployment/backrest -- aws s3 ls --endpoint-url=http://10.20.0.103:30188
+   ```
 
 ### Backup Slow
-1. Check network bandwidth
-2. Consider enabling compression
-3. Review exclude patterns
+
+1. Check network bandwidth between Backrest and target
+2. Review exclude patterns - add large cache/temp directories
+3. Enable restic compression if not enabled
+4. Check target disk I/O
 
 ### Repository Locked
-1. Check for running backups
-2. Force unlock (use with caution): Repository → Unlock
+
+This happens if a backup was interrupted.
+
+1. Check for running backups first
+2. If no backups running, unlock via UI:
+   - Select Repository → Actions → Unlock
+3. Or via restic CLI:
+   ```bash
+   kubectl exec -n backrest deployment/backrest -- restic unlock -r s3:http://10.20.0.103:30188/backrest
+   ```
+
+### "Permission Denied" During Backup
+
+1. Check target paths are readable by root
+2. Check SELinux/AppArmor on target
+3. Verify SSH user has required permissions
 
 ## Kubernetes Resources
 
-**Namespace**: backrest
+### Namespace
+```
+backrest
+```
 
-**Deployment**: backrest
-- Image: garethgeorge/backrest:latest
-- Port: 9898 (NodePort 31115)
+### Deployment
+```yaml
+Name: backrest
+Image: garethgeorge/backrest:latest
+Port: 9898
+```
 
-**Secrets**:
-- backrest-s3-credentials (Garage access)
-- backrest-ssh-keys (SSH private key + config)
+### Service
+```yaml
+Name: backrest
+Type: NodePort
+Port: 9898
+NodePort: 31115
+```
 
-**PVCs**:
-- backrest-data (1Gi) - Config and database
-- backrest-cache (5Gi) - Restic cache
+### Ingress
+```yaml
+Name: backrest
+Host: backrest.kernow.io
+IngressClass: traefik
+```
+
+### Secrets
+
+| Secret | Contents | Source |
+|--------|----------|--------|
+| `backrest-s3-credentials` | AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY | Infisical `/backups/garage` |
+| `backrest-ssh-keys` | id_ed25519, id_ed25519.pub, config | Infisical `/backups/backrest` |
+
+### PVCs
+
+| PVC | Size | Purpose |
+|-----|------|---------|
+| `backrest-data` | 1Gi | Config, database |
+| `backrest-cache` | 5Gi | Restic cache |
 
 ## Monitoring
 
-Backrest health is monitored by Gatus at http://10.30.0.120:31100
+### Gatus Health Check
+
+Backrest is monitored by Gatus at https://gatus.kernow.io:
+- Endpoint: http://10.20.0.40:31115
+- Expected: HTTP 200
+- Interval: 60s
+
+### Alerts
+
+Backup failures trigger alerts via Gatus → Keep → alerting pipeline.
+
+## Adding a New Backup Target
+
+### 1. Install SSH Key on Target
+
+```bash
+PUBLIC_KEY=$(infisical secrets get SSH_PUBLIC_KEY --path=/backups/backrest --plain)
+ssh root@<new-host> "mkdir -p /root/.ssh && echo '$PUBLIC_KEY' >> /root/.ssh/authorized_keys"
+```
+
+### 2. Update SSH Config Secret
+
+Edit `/home/agentic_lab/kubernetes/applications/backrest/ssh-secret.yaml`:
+```yaml
+# Add new host entry to config
+Host <new-host>
+  HostName <ip-address>
+  User root
+  IdentityFile /root/.ssh/id_ed25519
+```
+
+### 3. Commit and Sync
+
+```bash
+/home/scripts/git-commit-submodule.sh agentic_lab "feat(backrest): add <new-host> SSH config"
+
+# Sync ArgoCD
+KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig \
+  kubectl patch application backrest -n argocd --type merge \
+  -p '{"operation": {"initiatedBy": {"username": "claude"}, "sync": {"prune": true}}}'
+```
+
+### 4. Create Backup Plan in UI
+
+1. Open Backrest UI
+2. Click "Add Plan"
+3. Configure:
+   - Name: `<host>-daily` or `<host>-weekly`
+   - Repository: garage-s3
+   - Host: `<new-host>` (from SSH config)
+   - Paths: List of paths to backup
+   - Excludes: Cache, temp, log directories
+   - Schedule: Cron expression
+   - Retention: Daily/weekly/monthly counts
+
+## Repository Password
+
+The restic repository password is stored in Backrest's encrypted config. If you need to access the repository directly:
+
+1. Export config from Backrest UI (Settings → Export)
+2. The exported JSON contains the encrypted repository password
+3. Or check Backrest's internal database in the `backrest-data` PVC
+
+**Important**: The repository password is critical. If lost, backups cannot be restored. Ensure it's documented securely.
+
+## Disaster Recovery
+
+### If Backrest Pod is Lost
+
+1. ArgoCD will recreate the deployment
+2. PVCs preserve config and cache
+3. Repository data is safe in Garage S3
+4. SSH keys are in Kubernetes secrets (from Infisical)
+
+### If Config PVC is Lost
+
+1. Recreate backup plans manually in UI
+2. Repository (in Garage) is intact
+3. Historical backups still accessible
+
+### If Garage Storage is Lost
+
+1. Backups are gone (rebuild from PBS if available)
+2. Reconfigure Backrest with new repository
+3. Start fresh backup cycle
 
 ## Related Runbooks
-- `/home/agentic_lab/runbooks/infrastructure/backup-overview.md`
-- `/home/agentic_lab/runbooks/infrastructure/velero-operations.md`
-- `/home/agentic_lab/runbooks/infrastructure/pbs-operations.md`
+
+- `/home/agentic_lab/runbooks/infrastructure/backup-overview.md` - Overall strategy
+- `/home/agentic_lab/runbooks/infrastructure/garage-operations.md` - S3 storage
+- `/home/agentic_lab/runbooks/infrastructure/pbs-operations.md` - PBS disaster recovery
+- `/home/agentic_lab/runbooks/infrastructure/velero-operations.md` - K8s backups
+
+## Infisical Secrets
+
+| Path | Keys |
+|------|------|
+| `/backups/garage` | ACCESS_KEY_ID, SECRET_ACCESS_KEY, ENDPOINT |
+| `/backups/backrest` | SSH_PRIVATE_KEY, SSH_PUBLIC_KEY |
