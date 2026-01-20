@@ -20,6 +20,13 @@ data:
     User-agent: CCBot
     Allow: /
 
+    # Allow Google Gemini/AI crawlers
+    User-agent: Google-Extended
+    Allow: /
+
+    User-agent: Googlebot
+    Allow: /
+
     # Allow general crawlers for public documents only
     User-agent: *
     Allow: /doc/
