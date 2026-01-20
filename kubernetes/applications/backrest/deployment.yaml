@@ -10,6 +10,7 @@ metadata:
   name: backrest-data
   namespace: backrest
 spec:
+  storageClassName: local-path
   accessModes:
     - ReadWriteOnce
   resources:
@@ -22,6 +23,7 @@ metadata:
   name: backrest-cache
   namespace: backrest
 spec:
+  storageClassName: local-path
   accessModes:
     - ReadWriteOnce
   resources:
