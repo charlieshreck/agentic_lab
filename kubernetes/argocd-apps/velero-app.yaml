@@ -1,0 +1,158 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero-agentic
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: default
+  source:
+    repoURL: https://vmware-tanzu.github.io/helm-charts
+    chart: velero
+    targetRevision: 11.2.0
+    helm:
+      valuesObject:
+        # Deploy node agent for file-level backups (Restic)
+        deployNodeAgent: true
+
+        # Use Restic for file-level backups
+        configuration:
+          defaultVolumesToFsBackup: true
+
+          # Disable VolumeSnapshotLocation (not needed for file-level backups)
+          defaultVolumeSnapshotLocations: null
+          volumeSnapshotLocation: []
+
+          # Backup Storage Location configuration
+          backupStorageLocation:
+            - name: garage
+              provider: aws
+              bucket: velero-agentic
+              default: true
+              accessMode: ReadWrite
+              config:
+                region: garage
+                s3Url: http://10.20.0.103:30188
+                s3ForcePathStyle: "true"
+              credential:
+                name: velero-garage-credentials
+                key: cloud
+
+
+        # AWS plugin for S3 backup support (Velero server)
+        initContainers:
+          - name: velero-plugin-for-aws
+            image: velero/velero-plugin-for-aws:v1.13.1
+            volumeMounts:
+              - mountPath: /target
+                name: plugins
+
+        # Velero server resources
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+        # Node agent (Restic) resources and scheduling
+        nodeAgent:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          # AWS plugin for S3 backup support
+          initContainers:
+            - name: velero-plugin-for-aws
+              image: velero/velero-plugin-for-aws:v1.13.1
+              volumeMounts:
+                - mountPath: /target
+                  name: plugins
+          # Remove default affinity
+          affinity: {}
+
+        # Prometheus metrics
+        metrics:
+          enabled: true
+          serviceMonitor:
+            enabled: false
+
+        # Disable upgrade-crds hook
+        upgradeCRDs: false
+
+  destination:
+    server: https://10.20.0.40:6443
+    namespace: velero
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
+
+---
+# Velero secrets via Infisical
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero-agentic-secrets
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/platform/velero
+
+  destination:
+    server: https://10.20.0.40:6443
+    namespace: velero
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+# Velero schedules
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero-agentic-schedules
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/platform/velero/schedules
+
+  destination:
+    server: https://10.20.0.40:6443
+    namespace: velero
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

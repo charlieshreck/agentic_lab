@@ -1,0 +1,34 @@
+# Daily backup at 2:30 AM with 7-day retention
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-backup
+  namespace: velero
+spec:
+  schedule: "30 2 * * *"
+  template:
+    storageLocation: garage
+    ttl: 168h  # 7 days
+    includedNamespaces:
+      - "*"
+    excludedNamespaces:
+      - kube-system
+    defaultVolumesToFsBackup: true
+
+---
+# Weekly backup at 3:30 AM on Sundays with 30-day retention
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: weekly-backup
+  namespace: velero
+spec:
+  schedule: "30 3 * * 0"
+  template:
+    storageLocation: garage
+    ttl: 720h  # 30 days
+    includedNamespaces:
+      - "*"
+    excludedNamespaces:
+      - kube-system
+    defaultVolumesToFsBackup: true
