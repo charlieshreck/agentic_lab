@@ -61,6 +61,9 @@ spec:
               value: /data/config.json
             - name: XDG_CACHE_HOME
               value: /cache
+            # Override Kubernetes service link to prevent binding conflict
+            - name: BACKREST_PORT
+              value: "0.0.0.0:9898"
             # Garage S3 credentials from secret
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
