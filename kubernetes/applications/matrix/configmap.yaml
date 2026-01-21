@@ -28,8 +28,8 @@ data:
     max_request_size = 104857600
 
     # Registration settings
-    # Users created: chaz, agentic-bot
-    allow_registration = false
+    # TEMPORARY: Registration enabled for account creation
+    allow_registration = true
     allow_guest_registration = false
     allow_encryption = true
     allow_federation = false  # Internal only, no federation
@@ -45,10 +45,6 @@ data:
 
     # Logging
     log = "info"
-
-    # TEMPORARY: Emergency password for account recovery
-    # Remove after password reset!
-    emergency_password = "H4ckwh1z"
 
     # Well-known configuration for external clients
     # This tells clients to use the external URL, not the internal server_name
