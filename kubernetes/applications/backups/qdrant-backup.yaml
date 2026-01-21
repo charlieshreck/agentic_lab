@@ -1,0 +1,135 @@
+---
+# Qdrant Backup CronJob for Agentic Cluster
+# Creates snapshots via Qdrant API and uploads to Garage S3
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: qdrant-backup
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: qdrant-backup
+    app.kubernetes.io/component: backup
+spec:
+  # Daily at 2:30 AM UTC (after PostgreSQL)
+  schedule: "30 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: alpine:3.19
+              envFrom:
+                - secretRef:
+                    name: backup-s3-credentials
+              env:
+                - name: QDRANT_HOST
+                  value: "http://qdrant:6333"
+                - name: BACKUP_BUCKET
+                  value: "backrest"
+                - name: BACKUP_PREFIX
+                  value: "agentic/qdrant"
+                - name: S3_ENDPOINT
+                  value: "http://10.20.0.103:30188"
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  # Install dependencies
+                  apk add --no-cache curl jq aws-cli
+
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_DIR="/tmp/backup-${TIMESTAMP}"
+                  mkdir -p "${BACKUP_DIR}"
+
+                  echo "=== Qdrant Backup Started at $(date) ==="
+
+                  # Get list of collections
+                  echo "Fetching collections..."
+                  COLLECTIONS=$(curl -s "${QDRANT_HOST}/collections" | jq -r '.result.collections[].name')
+
+                  if [ -z "$COLLECTIONS" ]; then
+                    echo "No collections found or Qdrant not available"
+                    exit 0
+                  fi
+
+                  for COLLECTION in ${COLLECTIONS}; do
+                    echo "=== Backing up collection: ${COLLECTION} ==="
+
+                    # Create snapshot
+                    echo "  Creating snapshot..."
+                    SNAPSHOT_RESPONSE=$(curl -s -X POST "${QDRANT_HOST}/collections/${COLLECTION}/snapshots")
+                    SNAPSHOT_NAME=$(echo "$SNAPSHOT_RESPONSE" | jq -r '.result.name')
+
+                    if [ -z "$SNAPSHOT_NAME" ] || [ "$SNAPSHOT_NAME" = "null" ]; then
+                      echo "  ✗ Failed to create snapshot for ${COLLECTION}"
+                      echo "  Response: ${SNAPSHOT_RESPONSE}"
+                      continue
+                    fi
+
+                    echo "  Snapshot created: ${SNAPSHOT_NAME}"
+
+                    # Download snapshot
+                    SNAPSHOT_FILE="${BACKUP_DIR}/${COLLECTION}-${SNAPSHOT_NAME}"
+                    echo "  Downloading snapshot..."
+                    curl -s -o "${SNAPSHOT_FILE}" \
+                      "${QDRANT_HOST}/collections/${COLLECTION}/snapshots/${SNAPSHOT_NAME}"
+
+                    if [ -f "$SNAPSHOT_FILE" ] && [ -s "$SNAPSHOT_FILE" ]; then
+                      echo "  ✓ Downloaded: ${SNAPSHOT_FILE}"
+                    else
+                      echo "  ✗ Download failed for ${COLLECTION}"
+                      continue
+                    fi
+
+                    # Upload to S3
+                    S3_PATH="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${TIMESTAMP}/${COLLECTION}-${SNAPSHOT_NAME}"
+                    echo "  Uploading to S3..."
+                    aws s3 cp "${SNAPSHOT_FILE}" "${S3_PATH}" \
+                      --endpoint-url "${S3_ENDPOINT}"
+
+                    if [ $? -eq 0 ]; then
+                      echo "  ✓ Uploaded: ${S3_PATH}"
+                    else
+                      echo "  ✗ Upload failed for ${COLLECTION}"
+                    fi
+
+                    # Delete snapshot from Qdrant (to save space)
+                    echo "  Cleaning up Qdrant snapshot..."
+                    curl -s -X DELETE "${QDRANT_HOST}/collections/${COLLECTION}/snapshots/${SNAPSHOT_NAME}"
+
+                  done
+
+                  # Clean up old backups (keep 14 days)
+                  echo "=== Cleaning old backups ==="
+                  CUTOFF_DATE=$(date -d "14 days ago" +%Y%m%d 2>/dev/null || date -v-14d +%Y%m%d)
+
+                  aws s3 ls "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/" \
+                    --endpoint-url "${S3_ENDPOINT}" | while read -r line; do
+                    DIR=$(echo "$line" | awk '{print $2}' | tr -d '/')
+                    DIR_DATE=$(echo "$DIR" | cut -d'-' -f1)
+                    if [ -n "$DIR_DATE" ] && [ "$DIR_DATE" -lt "$CUTOFF_DATE" ] 2>/dev/null; then
+                      echo "  Deleting old backup: ${DIR}"
+                      aws s3 rm "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${DIR}/" \
+                        --endpoint-url "${S3_ENDPOINT}" --recursive
+                    fi
+                  done
+
+                  # Cleanup local files
+                  rm -rf "${BACKUP_DIR}"
+
+                  echo "=== Qdrant Backup Completed at $(date) ==="
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

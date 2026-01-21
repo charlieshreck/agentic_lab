@@ -1,0 +1,196 @@
+---
+# Neo4j Backup CronJob for Agentic Cluster
+# Exports graph data via Cypher queries and uploads to Garage S3
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: neo4j-backup
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: neo4j-backup
+    app.kubernetes.io/component: backup
+spec:
+  # Daily at 3:30 AM UTC (after Redis)
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: alpine:3.19
+              envFrom:
+                - secretRef:
+                    name: backup-s3-credentials
+              env:
+                - name: NEO4J_HOST
+                  value: "neo4j"
+                - name: NEO4J_PORT
+                  value: "7474"
+                - name: NEO4J_BOLT_PORT
+                  value: "7687"
+                - name: NEO4J_USER
+                  value: "neo4j"
+                - name: NEO4J_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: neo4j-credentials
+                      key: NEO4J_AUTH
+                      optional: true
+                - name: BACKUP_BUCKET
+                  value: "backrest"
+                - name: BACKUP_PREFIX
+                  value: "agentic/neo4j"
+                - name: S3_ENDPOINT
+                  value: "http://10.20.0.103:30188"
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  # Install dependencies
+                  apk add --no-cache curl jq aws-cli
+
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_DIR="/tmp/backup-${TIMESTAMP}"
+                  mkdir -p "${BACKUP_DIR}"
+
+                  echo "=== Neo4j Backup Started at $(date) ==="
+
+                  # Parse auth string (format: neo4j/password)
+                  if [ -n "$NEO4J_PASSWORD" ]; then
+                    AUTH_PASS=$(echo "$NEO4J_PASSWORD" | cut -d'/' -f2)
+                    AUTH_HEADER="Authorization: Basic $(echo -n "neo4j:${AUTH_PASS}" | base64)"
+                  else
+                    AUTH_HEADER=""
+                  fi
+
+                  NEO4J_URL="http://${NEO4J_HOST}:${NEO4J_PORT}"
+
+                  # Function to run Cypher query
+                  run_cypher() {
+                    local query="$1"
+                    curl -s -X POST "${NEO4J_URL}/db/neo4j/tx/commit" \
+                      -H "Content-Type: application/json" \
+                      -H "$AUTH_HEADER" \
+                      -d "{\"statements\": [{\"statement\": \"$query\"}]}"
+                  }
+
+                  # Check connectivity
+                  echo "Checking Neo4j connectivity..."
+                  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${NEO4J_URL}" -H "$AUTH_HEADER")
+                  if [ "$HTTP_CODE" != "200" ]; then
+                    echo "Warning: Neo4j returned HTTP ${HTTP_CODE}, attempting backup anyway..."
+                  fi
+
+                  # Export nodes (all labels)
+                  echo "Exporting nodes..."
+                  NODES_FILE="${BACKUP_DIR}/nodes.json"
+
+                  LABELS_RESPONSE=$(run_cypher "CALL db.labels() YIELD label RETURN label")
+                  LABELS=$(echo "$LABELS_RESPONSE" | jq -r '.results[0].data[].row[0]' 2>/dev/null || echo "")
+
+                  echo "[" > "${NODES_FILE}"
+                  FIRST_NODE=1
+
+                  for LABEL in ${LABELS}; do
+                    if [ -n "$LABEL" ]; then
+                      echo "  Exporting nodes with label: ${LABEL}"
+
+                      QUERY="MATCH (n:\`${LABEL}\`) RETURN n, labels(n) as labels, id(n) as nodeId"
+                      RESPONSE=$(run_cypher "$QUERY")
+
+                      # Extract nodes and append to file
+                      NODES=$(echo "$RESPONSE" | jq -c '.results[0].data[]' 2>/dev/null || echo "")
+                      for NODE in ${NODES}; do
+                        if [ $FIRST_NODE -eq 1 ]; then
+                          FIRST_NODE=0
+                        else
+                          echo "," >> "${NODES_FILE}"
+                        fi
+                        echo "$NODE" >> "${NODES_FILE}"
+                      done
+                    fi
+                  done
+                  echo "]" >> "${NODES_FILE}"
+
+                  # Export relationships
+                  echo "Exporting relationships..."
+                  RELS_FILE="${BACKUP_DIR}/relationships.json"
+
+                  TYPES_RESPONSE=$(run_cypher "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")
+                  REL_TYPES=$(echo "$TYPES_RESPONSE" | jq -r '.results[0].data[].row[0]' 2>/dev/null || echo "")
+
+                  echo "[" > "${RELS_FILE}"
+                  FIRST_REL=1
+
+                  for REL_TYPE in ${REL_TYPES}; do
+                    if [ -n "$REL_TYPE" ]; then
+                      echo "  Exporting relationships of type: ${REL_TYPE}"
+
+                      QUERY="MATCH (a)-[r:\`${REL_TYPE}\`]->(b) RETURN type(r) as type, properties(r) as props, id(startNode(r)) as startId, id(endNode(r)) as endId"
+                      RESPONSE=$(run_cypher "$QUERY")
+
+                      RELS=$(echo "$RESPONSE" | jq -c '.results[0].data[]' 2>/dev/null || echo "")
+                      for REL in ${RELS}; do
+                        if [ $FIRST_REL -eq 1 ]; then
+                          FIRST_REL=0
+                        else
+                          echo "," >> "${RELS_FILE}"
+                        fi
+                        echo "$REL" >> "${RELS_FILE}"
+                      done
+                    fi
+                  done
+                  echo "]" >> "${RELS_FILE}"
+
+                  # Compress backup
+                  echo "Compressing backup..."
+                  tar -czf "${BACKUP_DIR}/neo4j-${TIMESTAMP}.tar.gz" -C "${BACKUP_DIR}" nodes.json relationships.json
+
+                  # Upload to S3
+                  echo "Uploading to S3..."
+                  S3_PATH="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${TIMESTAMP}/neo4j-${TIMESTAMP}.tar.gz"
+
+                  aws s3 cp "${BACKUP_DIR}/neo4j-${TIMESTAMP}.tar.gz" "${S3_PATH}" \
+                    --endpoint-url "${S3_ENDPOINT}"
+
+                  if [ $? -eq 0 ]; then
+                    echo "✓ Uploaded: ${S3_PATH}"
+                  else
+                    echo "✗ Upload failed"
+                    exit 1
+                  fi
+
+                  # Clean up old backups (keep 14 days)
+                  echo "=== Cleaning old backups ==="
+                  CUTOFF_DATE=$(date -d "14 days ago" +%Y%m%d 2>/dev/null || date -v-14d +%Y%m%d)
+
+                  aws s3 ls "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/" \
+                    --endpoint-url "${S3_ENDPOINT}" | while read -r line; do
+                    DIR=$(echo "$line" | awk '{print $2}' | tr -d '/')
+                    DIR_DATE=$(echo "$DIR" | cut -d'-' -f1)
+                    if [ -n "$DIR_DATE" ] && [ "$DIR_DATE" -lt "$CUTOFF_DATE" ] 2>/dev/null; then
+                      echo "  Deleting old backup: ${DIR}"
+                      aws s3 rm "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${DIR}/" \
+                        --endpoint-url "${S3_ENDPOINT}" --recursive
+                    fi
+                  done
+
+                  # Cleanup
+                  rm -rf "${BACKUP_DIR}"
+
+                  echo "=== Neo4j Backup Completed at $(date) ==="
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

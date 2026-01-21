@@ -1,0 +1,173 @@
+---
+# Redis Backup CronJob for Agentic Cluster
+# Creates RDB dump and uploads to Garage S3
+# Note: Redis primarily stores session/cache data, but backup provides recovery option
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: redis-backup
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: redis-backup
+    app.kubernetes.io/component: backup
+spec:
+  # Daily at 3 AM UTC (after Qdrant)
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: redis:7-alpine
+              envFrom:
+                - secretRef:
+                    name: backup-s3-credentials
+              env:
+                - name: REDIS_HOST
+                  value: "redis"
+                - name: REDIS_PORT
+                  value: "6379"
+                - name: BACKUP_BUCKET
+                  value: "backrest"
+                - name: BACKUP_PREFIX
+                  value: "agentic/redis"
+                - name: S3_ENDPOINT
+                  value: "http://10.20.0.103:30188"
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  # Install AWS CLI
+                  apk add --no-cache aws-cli
+
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_DIR="/tmp/backup-${TIMESTAMP}"
+                  mkdir -p "${BACKUP_DIR}"
+
+                  echo "=== Redis Backup Started at $(date) ==="
+
+                  # Trigger BGSAVE and wait for completion
+                  echo "Triggering BGSAVE..."
+                  redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} BGSAVE
+
+                  # Wait for save to complete (max 60 seconds)
+                  TIMEOUT=60
+                  while [ $TIMEOUT -gt 0 ]; do
+                    LASTSAVE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} LASTSAVE)
+                    BGSAVE_IN_PROGRESS=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} INFO persistence | grep rdb_bgsave_in_progress:1 || true)
+
+                    if [ -z "$BGSAVE_IN_PROGRESS" ]; then
+                      echo "BGSAVE completed"
+                      break
+                    fi
+
+                    echo "Waiting for BGSAVE... ($TIMEOUT seconds remaining)"
+                    sleep 2
+                    TIMEOUT=$((TIMEOUT-2))
+                  done
+
+                  # Get dump via DEBUG DIGEST and DUMP commands for each key
+                  # Actually, let's use the RDB approach via container volume mount
+                  # For now, dump keys as JSON (simpler approach without volume access)
+
+                  DUMP_FILE="${BACKUP_DIR}/redis-${TIMESTAMP}.rdb"
+
+                  # Export all keys as JSON (since we can't access RDB file directly)
+                  echo "Exporting Redis data..."
+                  redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} --rdb "${DUMP_FILE}" 2>/dev/null || {
+                    echo "Direct RDB export not available, using key export..."
+                    KEYS_FILE="${BACKUP_DIR}/redis-keys-${TIMESTAMP}.json"
+                    echo "[" > "${KEYS_FILE}"
+                    FIRST=1
+                    redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} KEYS '*' | while read KEY; do
+                      if [ -n "$KEY" ]; then
+                        TYPE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} TYPE "$KEY" | tr -d '\r')
+                        TTL=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} TTL "$KEY")
+
+                        case $TYPE in
+                          string)
+                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} GET "$KEY")
+                            ;;
+                          hash)
+                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} HGETALL "$KEY")
+                            ;;
+                          list)
+                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} LRANGE "$KEY" 0 -1)
+                            ;;
+                          set)
+                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} SMEMBERS "$KEY")
+                            ;;
+                          *)
+                            VALUE="<unsupported type: $TYPE>"
+                            ;;
+                        esac
+
+                        if [ $FIRST -eq 1 ]; then
+                          FIRST=0
+                        else
+                          echo "," >> "${KEYS_FILE}"
+                        fi
+                        echo "{\"key\":\"$KEY\",\"type\":\"$TYPE\",\"ttl\":$TTL}" >> "${KEYS_FILE}"
+                      fi
+                    done
+                    echo "]" >> "${KEYS_FILE}"
+                    DUMP_FILE="${KEYS_FILE}"
+                  }
+
+                  if [ -f "$DUMP_FILE" ]; then
+                    # Compress
+                    gzip "${DUMP_FILE}"
+                    DUMP_FILE="${DUMP_FILE}.gz"
+
+                    # Upload to S3
+                    echo "Uploading to S3..."
+                    FILENAME=$(basename "$DUMP_FILE")
+                    S3_PATH="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${TIMESTAMP}/${FILENAME}"
+
+                    aws s3 cp "${DUMP_FILE}" "${S3_PATH}" \
+                      --endpoint-url "${S3_ENDPOINT}"
+
+                    if [ $? -eq 0 ]; then
+                      echo "✓ Uploaded: ${S3_PATH}"
+                    else
+                      echo "✗ Upload failed"
+                      exit 1
+                    fi
+                  else
+                    echo "No dump file created (Redis may be empty)"
+                  fi
+
+                  # Clean up old backups (keep 7 days - session data is less critical)
+                  echo "=== Cleaning old backups ==="
+                  CUTOFF_DATE=$(date -d "7 days ago" +%Y%m%d 2>/dev/null || date -v-7d +%Y%m%d)
+
+                  aws s3 ls "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/" \
+                    --endpoint-url "${S3_ENDPOINT}" | while read -r line; do
+                    DIR=$(echo "$line" | awk '{print $2}' | tr -d '/')
+                    DIR_DATE=$(echo "$DIR" | cut -d'-' -f1)
+                    if [ -n "$DIR_DATE" ] && [ "$DIR_DATE" -lt "$CUTOFF_DATE" ] 2>/dev/null; then
+                      echo "  Deleting old backup: ${DIR}"
+                      aws s3 rm "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${DIR}/" \
+                        --endpoint-url "${S3_ENDPOINT}" --recursive
+                    fi
+                  done
+
+                  # Cleanup
+                  rm -rf "${BACKUP_DIR}"
+
+                  echo "=== Redis Backup Completed at $(date) ==="
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "200m"

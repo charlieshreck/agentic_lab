@@ -35,33 +35,60 @@
 
 ## Backup Matrix
 
-| Platform | Backup Tool | Frequency | Retention | Storage |
-|----------|-------------|-----------|-----------|---------||
-| Prod K8s PVCs | Velero | Daily 2AM + Weekly Sunday 3AM | 7d + 30d | Garage |
-| Agentic K8s PVCs | Velero | Daily 2AM + Weekly Sunday 3AM | 7d + 30d | Garage |
-| Monit K8s PVCs | Velero | Daily 2:30AM + Weekly Sunday 3:30AM | 7d + 30d | Garage |
-| IAC LXC (100) | Backrest | Daily 3AM | 14d + 4w | Garage |
-| Plex VM (450) | Backrest | Daily 4AM | 7d + 4w | Garage |
-| UniFi VM (451) | Backrest | Daily 5AM | 7d + 4w | Garage |
-| TrueNAS-HDD configs | Backrest | Weekly Sunday 6AM | 4w + 2m | Garage |
-| TrueNAS-Media configs | Backrest | Weekly Sunday 7AM | 4w + 2m | Garage |
-| Critical VMs | PBS | Weekly Sunday 2AM | 4 weekly | TrueNAS PBS |
+| Platform | Backup Tool | Frequency | Retention | Storage | Notes |
+|----------|-------------|-----------|-----------|---------|-------|
+| Prod K8s PVCs | Velero | Daily 2AM + Weekly Sunday 3AM | 7d + 30d | Garage | CSI (Mayastor) - **WORKING** |
+| Agentic PostgreSQL | CronJob | Daily 2AM | 14d | Garage | pg_dump |
+| Agentic Qdrant | CronJob | Daily 2:30AM | 14d | Garage | Qdrant snapshots |
+| Agentic Redis | CronJob | Daily 3AM | 7d | Garage | RDB dump (sessions) |
+| Agentic Neo4j | CronJob | Daily 3:30AM | 14d | Garage | Cypher export |
+| IAC LXC (100) | Backrest | Daily 3AM | 14d + 4w | Garage | SSH commandPrefix |
+| Plex VM (450) | Backrest | Daily 4AM | 7d + 4w | Garage | Config/DB only |
+| UniFi VM (451) | Backrest | Daily 5AM | 7d + 4w | Garage | Controller volumes |
+| TrueNAS-HDD configs | Backrest | Weekly Sunday 6AM | 4w + 2m | Garage | /root configs |
+| TrueNAS-Media configs | Backrest | Weekly Sunday 7AM | 4w + 2m | Garage | /root configs |
+| Critical VMs | PBS | Weekly Sunday 2AM | 4 weekly | TrueNAS PBS | Full VM snapshots |
+
+**Important**: Agentic and Monit clusters use `local-path` storage (hostPath), which Velero CANNOT back up. Use application-level backups instead.
 
 ## Component Details
 
-### Velero (Kubernetes PVC Backups)
+### Velero (Kubernetes PVC Backups - Prod Only)
 
 Velero handles Kubernetes-native backups including PVCs, ConfigMaps, Secrets, and custom resources.
 
-| Cluster | Schedule | Retention | Bucket |
-|---------|----------|-----------|--------|
-| **Prod** | Daily 2AM (7d) + Weekly 3AM Sunday (30d) | As scheduled | velero-prod |
-| **Agentic** | Daily 2AM (7d) + Weekly 3AM Sunday (30d) | As scheduled | velero-agentic |
-| **Monit** | Daily 2:30AM (7d) + Weekly 3:30AM Sunday (30d) | As scheduled | velero-monit |
+**IMPORTANT**: Only the prod cluster has CSI-based storage (Mayastor). Agentic and Monit clusters use `local-path` provisioner which creates hostPath volumes that Velero CANNOT back up.
+
+| Cluster | Status | Schedule | Bucket | Notes |
+|---------|--------|----------|--------|-------|
+| **Prod** | ✅ WORKING | Daily 2AM (7d) + Weekly 3AM Sunday (30d) | velero-prod | Mayastor CSI |
+| **Agentic** | ⚠️ K8s metadata only | N/A | N/A | Uses CronJob backups |
+| **Monit** | ⚠️ K8s metadata only | N/A | N/A | Needs app-level backup |
 
 - **Backend**: Garage S3 at http://10.20.0.103:30188
 - **Credentials**: Infisical `/backups/garage`
 - **Runbook**: `/home/agentic_lab/runbooks/infrastructure/velero-operations.md`
+
+### Agentic Cluster Application Backups (CronJobs)
+
+Application-level backups for the agentic cluster using native backup tools. Required because `local-path` storage (hostPath) cannot be backed up by Velero.
+
+| Service | Schedule | Method | S3 Path | Retention |
+|---------|----------|--------|---------|-----------|
+| **PostgreSQL** | 2:00 AM | pg_dump | agentic/postgresql/ | 14 days |
+| **Qdrant** | 2:30 AM | Snapshot API | agentic/qdrant/ | 14 days |
+| **Redis** | 3:00 AM | RDB dump | agentic/redis/ | 7 days |
+| **Neo4j** | 3:30 AM | Cypher export | agentic/neo4j/ | 14 days |
+
+- **Storage**: Garage S3 bucket `backrest` with `agentic/` prefix
+- **Credentials**: Shared `backup-s3-credentials` secret (Infisical `/backups/garage`)
+- **Runbook**: `/home/agentic_lab/runbooks/infrastructure/agentic-backup-operations.md`
+
+**Services covered**:
+- PostgreSQL: Outline wiki, LangGraph checkpointer
+- Qdrant: Runbooks, entities, decisions, documentation, agent_events
+- Redis: Session data (low priority, regeneratable)
+- Neo4j: Knowledge graph relationships
 
 ### Backrest (VM/LXC File-Level Backups)
 
@@ -220,7 +247,8 @@ velero restore describe <restore-name>
 
 ## Related Runbooks
 
-- `/home/agentic_lab/runbooks/infrastructure/velero-operations.md` - K8s backup procedures
+- `/home/agentic_lab/runbooks/infrastructure/velero-operations.md` - K8s backup procedures (prod cluster only)
+- `/home/agentic_lab/runbooks/infrastructure/agentic-backup-operations.md` - Agentic cluster application backups
 - `/home/agentic_lab/runbooks/infrastructure/backrest-operations.md` - VM/LXC backup procedures
 - `/home/agentic_lab/runbooks/infrastructure/garage-operations.md` - S3 storage operations
 - `/home/agentic_lab/runbooks/infrastructure/pbs-operations.md` - PBS disaster recovery

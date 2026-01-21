@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agentic-backups
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: agentic-backups
+    app.kubernetes.io/part-of: agentic-platform
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/charlieshreck/agentic_lab.git
+    targetRevision: main
+    path: kubernetes/applications/backups
+  destination:
+    server: https://10.20.0.40:6443
+    namespace: ai-platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
