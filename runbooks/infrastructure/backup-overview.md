@@ -42,7 +42,7 @@
 | Monit K8s PVCs | Velero | Daily 2:30AM + Weekly Sunday 3:30AM | 7d + 30d | Garage |
 | IAC LXC (100) | Backrest | Daily 3AM | 14d + 4w | Garage |
 | Plex VM (450) | Backrest | Daily 4AM | 7d + 4w | Garage |
-| UniFi VM (451) | Backrest | Daily 5AM | 7d + 4w | Garage |
+| UniFi VM (451) | ❌ Disabled | - | - | - |
 | TrueNAS configs | Backrest | Weekly Sunday 6AM | 4w + 2m | Garage |
 | Critical VMs | PBS | Weekly Sunday 2AM | 4 weekly | TrueNAS PBS |
 
@@ -65,17 +65,19 @@ Velero handles Kubernetes-native backups including PVCs, ConfigMaps, Secrets, an
 ### Backrest (VM/LXC File-Level Backups)
 
 Backrest provides a web UI for managing restic-based backups of VMs and LXC containers.
+Backups run via SSH commandPrefix - restic executes on the remote host and streams data to Garage.
 
 | Plan | Host | Schedule | Paths | Retention |
 |------|------|----------|-------|-----------|
-| **iac-daily** | 10.10.0.100 | Daily 3AM | /root, /etc, /home | 14d, 4w |
-| **plex-daily** | 10.10.0.50 | Daily 4AM | /var/lib/plex | 7d, 4w |
-| **unifi-daily** | 10.10.0.51 | Daily 5AM | /var/lib/unifi | 7d, 4w |
+| **iac-daily** | 10.10.0.175 | Daily 3AM | /home, /root, /etc | 14d, 4w |
+| **plex-daily** | 10.10.0.50 | Daily 4AM | /opt/plex/config/..., /opt/plex/compose | 7d, 4w |
 | **truenas-weekly** | 10.20.0.103 | Sunday 6AM | /root | 4w, 2m |
+
+**Note**: UniFi VM (10.10.0.51) backup is currently **disabled** - SSH access requires password authentication. Needs manual SSH key setup.
 
 - **UI**: https://backrest.kernow.io or http://10.20.0.40:31115
 - **Backend**: Garage S3 (backrest bucket)
-- **SSH Access**: Via dedicated keypair stored in Infisical `/backups/backrest`
+- **SSH Key**: `ssh-ed25519 ...IJ...AAZ backrest-backup@kernow.io` (K8s secret `backrest-ssh-keys`)
 - **Runbook**: `/home/agentic_lab/runbooks/infrastructure/backrest-operations.md`
 
 ### PBS (Proxmox Backup Server - Disaster Recovery)
@@ -134,12 +136,14 @@ Backup failures are sent to Keep alert aggregation platform via:
 - Velero metrics (backup job failures)
 - AlertManager rules (backup-related alerts)
 
-## Infisical Secrets
+## Secrets
 
-| Path | Contains |
-|------|----------|
-| `/backups/garage` | ACCESS_KEY_ID, SECRET_ACCESS_KEY, ENDPOINT, ADMIN_TOKEN |
-| `/backups/backrest` | SSH_PRIVATE_KEY, SSH_PUBLIC_KEY |
+| Location | Contains |
+|----------|----------|
+| Infisical `/backups/garage` | ACCESS_KEY_ID, SECRET_ACCESS_KEY, ENDPOINT, ADMIN_TOKEN |
+| K8s secret `backrest-ssh-keys` | id_ed25519, id_ed25519.pub, config |
+
+**Note**: Backrest SSH keys are stored directly in Kubernetes secret `backrest-ssh-keys` (backrest namespace) rather than synced from Infisical due to API sync issues.
 
 ## Recovery Procedures
 

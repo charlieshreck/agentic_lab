@@ -62,12 +62,16 @@ Backrest provides a web UI for managing restic backups of VMs and LXC containers
 
 ## Configured Backup Plans
 
+Backrest uses **SSH commandPrefix** to run restic on remote hosts. This means restic runs on the target machine (not in the Backrest pod) and streams backup data to Garage S3.
+
 | Plan | Host | Paths | Excludes | Schedule | Retention |
 |------|------|-------|----------|----------|-----------|
-| **iac-daily** | iac (10.10.0.100) | /root, /etc, /home | /root/.cache, /root/.local/share/containers | 3AM daily | 14 daily, 4 weekly |
-| **plex-daily** | plex (10.10.0.50) | /var/lib/plex | Cache directories | 4AM daily | 7 daily, 4 weekly |
-| **unifi-daily** | unifi (10.10.0.51) | /var/lib/unifi | - | 5AM daily | 7 daily, 4 weekly |
-| **truenas-weekly** | truenas-hdd (10.20.0.103) | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
+| **iac-daily** | 10.10.0.175 | /home, /root, /etc | /root/.cache, /home/*/.cache, /root/.local/share/nvim | 3AM daily | 14 daily, 4 weekly |
+| **plex-daily** | 10.10.0.50 | /opt/plex/config/Library/Application Support/Plex Media Server, /opt/plex/compose | Cache, Logs directories | 4AM daily | 7 daily, 4 weekly |
+| **truenas-weekly** | 10.20.0.103 | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
+
+**Disabled Plans**:
+- **unifi-daily**: UniFi VM (10.10.0.51) requires password auth - SSH key not installed. Needs manual setup.
 
 ### Cron Expressions
 
@@ -75,56 +79,75 @@ Backrest provides a web UI for managing restic backups of VMs and LXC containers
 |------|------|---------|
 | iac-daily | `0 3 * * *` | Every day at 3:00 AM |
 | plex-daily | `0 4 * * *` | Every day at 4:00 AM |
-| unifi-daily | `0 5 * * *` | Every day at 5:00 AM |
 | truenas-weekly | `0 6 * * 0` | Every Sunday at 6:00 AM |
+
+### How SSH CommandPrefix Works
+
+Each plan has a `commandPrefix.backup` array that wraps the restic command with SSH:
+```json
+"commandPrefix": {
+  "backup": ["ssh", "-o", "StrictHostKeyChecking=no", "root@10.10.0.50"]
+}
+```
+
+This causes Backrest to execute: `ssh root@10.10.0.50 restic backup /path/to/backup ...`
+
+**Requirements on target hosts**:
+- `restic` binary installed (installed via package manager)
+- SSH public key in `/root/.ssh/authorized_keys`
+- Network access to Garage S3 (10.20.0.103:30188)
 
 ## SSH Configuration
 
-Backrest connects to backup targets via SSH. Keys and config are mounted from Kubernetes secrets.
+Backrest connects to backup targets via SSH using keys mounted from Kubernetes secrets.
+
+### SSH Key Details
+
+| Property | Value |
+|----------|-------|
+| **Type** | ed25519 |
+| **Comment** | backrest-backup@kernow.io |
+| **Public Key** | `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJiIOVl9I2skpBkJM+N+VVTTW06LNGKV+46o+P0f3AAZ backrest-backup@kernow.io` |
+
+### SSH Keys Location
+
+- **Kubernetes Secret**: `backrest-ssh-keys` in `backrest` namespace (primary source)
+- **Mounted Path**: `/root/.ssh/` in Backrest pod
+- **Note**: Keys stored directly in K8s secret (Infisical sync had API issues)
 
 ### SSH Config (mounted at `/root/.ssh/config`)
 
 ```
-Host iac
-  HostName 10.10.0.100
-  User root
-  IdentityFile /root/.ssh/id_ed25519
-
-Host plex
-  HostName 10.10.0.50
-  User root
-  IdentityFile /root/.ssh/id_ed25519
-
-Host unifi
-  HostName 10.10.0.51
-  User root
-  IdentityFile /root/.ssh/id_ed25519
-
-Host truenas-hdd
-  HostName 10.20.0.103
-  User root
-  IdentityFile /root/.ssh/id_ed25519
-
-Host truenas-media
-  HostName 10.20.0.100
-  User root
+Host *
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
   IdentityFile /root/.ssh/id_ed25519
 ```
 
-### SSH Keys Location
+### Target Host SSH Setup
 
-- **Infisical**: `/backups/backrest` - Contains SSH_PRIVATE_KEY, SSH_PUBLIC_KEY
-- **Kubernetes Secret**: `backrest-ssh-keys` in `backrest` namespace
-- **Mounted Path**: `/root/.ssh/` in Backrest pod
+The public key must be in `/root/.ssh/authorized_keys` on each target:
+
+| Host | IP | Status |
+|------|-----|--------|
+| IAC LXC | 10.10.0.175 | ✅ Configured |
+| Plex VM | 10.10.0.50 | ✅ Configured |
+| UniFi VM | 10.10.0.51 | ❌ Needs manual setup |
+| TrueNAS-HDD | 10.20.0.103 | ✅ Local (no SSH needed) |
 
 ### Adding SSH Key to New Host
 
 ```bash
-# Get public key from Infisical
-PUBLIC_KEY=$(infisical secrets get SSH_PUBLIC_KEY --path=/backups/backrest --plain)
+# The public key to install on targets
+PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJiIOVl9I2skpBkJM+N+VVTTW06LNGKV+46o+P0f3AAZ backrest-backup@kernow.io"
 
 # Add to target host
 ssh root@<target> "mkdir -p /root/.ssh && echo '$PUBLIC_KEY' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
+
+# Install restic on target (required for SSH commandPrefix)
+ssh root@<target> "apt update && apt install -y restic"  # Debian/Ubuntu
+# or
+ssh root@<target> "dnf install -y restic"  # RHEL/Fedora
 ```
 
 ## Common Operations
@@ -384,9 +407,34 @@ The restic repository password is stored in Backrest's encrypted config. If you 
 - `/home/agentic_lab/runbooks/infrastructure/pbs-operations.md` - PBS disaster recovery
 - `/home/agentic_lab/runbooks/infrastructure/velero-operations.md` - K8s backups
 
-## Infisical Secrets
+## Secrets
 
-| Path | Keys |
-|------|------|
-| `/backups/garage` | ACCESS_KEY_ID, SECRET_ACCESS_KEY, ENDPOINT |
-| `/backups/backrest` | SSH_PRIVATE_KEY, SSH_PUBLIC_KEY |
+| Location | Keys |
+|----------|------|
+| Infisical `/backups/garage` | ACCESS_KEY_ID, SECRET_ACCESS_KEY, ENDPOINT |
+| K8s Secret `backrest-ssh-keys` | id_ed25519, id_ed25519.pub, config |
+
+**Note**: SSH keys are stored directly in Kubernetes secret rather than Infisical due to API sync issues during initial setup.
+
+## Enabling UniFi Backup
+
+To enable the UniFi backup plan (currently disabled):
+
+1. SSH to the UniFi VM (requires password - no SSH key access currently):
+   ```bash
+   ssh root@10.10.0.51  # Will prompt for password
+   ```
+
+2. Add the SSH public key:
+   ```bash
+   mkdir -p /root/.ssh
+   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJiIOVl9I2skpBkJM+N+VVTTW06LNGKV+46o+P0f3AAZ backrest-backup@kernow.io" >> /root/.ssh/authorized_keys
+   chmod 600 /root/.ssh/authorized_keys
+   ```
+
+3. Install restic:
+   ```bash
+   apt update && apt install -y restic
+   ```
+
+4. Update Backrest config to add the unifi-daily plan (via Backrest UI)

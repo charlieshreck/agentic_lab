@@ -10,13 +10,20 @@ data:
     # LiteLLM Proxy Configuration
     # See: https://docs.litellm.ai/docs/proxy/configs
     #
-    # Gemini Flash Only - FREE TIER
-    # WARNING: Do not use Pro models without budget controls
+    # OLLAMA-ONLY Configuration
+    # All inference runs locally on Ollama (qwen2.5:7b)
+    # Complex issues escalate to Brain Trust (Outline) for human review
+    # Claude Code handles implementation after Brain Trust approval
 
     model_list:
-      # ===== TIER 1: Local/Free (Ollama) =====
-      # Use for: classification, filtering, simple tasks
+      # ===== PRIMARY: Ollama qwen2.5:7b =====
+      # Use for: ALL automated triage, runbook execution, MCP tool usage
       - model_name: tier1
+        litellm_params:
+          model: ollama/qwen2.5:7b
+          api_base: http://ollama:11434
+
+      - model_name: tier2
         litellm_params:
           model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
@@ -26,81 +33,47 @@ data:
           model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
 
-      - model_name: ollama-llama
+      # Default model alias (for backward compatibility)
+      - model_name: gemini/gemini-2.0-flash
         litellm_params:
-          model: ollama/llama3.1:8b
+          model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
 
-      # Local embeddings (when Gemini rate limited)
+      - model_name: gemini-pro
+        litellm_params:
+          model: ollama/qwen2.5:7b
+          api_base: http://ollama:11434
+
+      # ===== EMBEDDINGS: Ollama nomic-embed-text =====
+      - model_name: embeddings
+        litellm_params:
+          model: ollama/nomic-embed-text
+          api_base: http://ollama:11434
+
       - model_name: embeddings-local
         litellm_params:
           model: ollama/nomic-embed-text
           api_base: http://ollama:11434
 
-      # ===== TIER 2: Gemini (Free Tier, 1M Context) =====
-      # Use for: analysis, summaries, large context tasks
-      - model_name: tier2
-        litellm_params:
-          model: gemini/gemini-2.0-flash
-          api_key: os.environ/GEMINI_API_KEY
-
-      - model_name: gemini/gemini-2.0-flash
-        litellm_params:
-          model: gemini/gemini-2.0-flash
-          api_key: os.environ/GEMINI_API_KEY
-
-      - model_name: gemini-pro
-        litellm_params:
-          model: gemini/gemini-2.0-flash
-          api_key: os.environ/GEMINI_API_KEY
-
-      - model_name: gemini/gemini-2.0-pro
-        litellm_params:
-          model: gemini/gemini-2.0-flash
-          api_key: os.environ/GEMINI_API_KEY
-
-      # Gemini embeddings (primary)
-      - model_name: embeddings
-        litellm_params:
-          model: gemini/text-embedding-004
-          api_key: os.environ/GEMINI_API_KEY
-
-      # NOTE: Tier 3 (Claude) is accessed via claude-agent service,
-      # NOT through LiteLLM. This uses Claude Max subscription ($20/mo flat)
-      # instead of API calls. See: http://claude-agent:8000/agent/run
-
-    # Router settings - tiered fallbacks
+    # Router settings - all routes to Ollama
     router_settings:
       routing_strategy: simple-shuffle
-      num_retries: 1
-      retry_after: 0
-      timeout: 60
-      allowed_fails: 1
-      fallbacks:
-        # Tier 2 → Tier 1 (Gemini falls back to Ollama on rate limits)
-        - tier2:
-            - tier1
-        - gemini/gemini-2.0-flash:
-            - ollama-qwen
-        - gemini-pro:
-            - ollama-qwen
-        - gemini/gemini-2.0-pro:
-            - ollama-qwen
-        # Embeddings fallback (Gemini → local)
-        - embeddings:
-            - embeddings-local
+      num_retries: 2
+      retry_after: 1
+      timeout: 120
+      allowed_fails: 2
 
     # General settings
     general_settings:
       master_key: null
       drop_params: true
 
-    # Logging - track all requests to catch abuse
+    # Logging - track all requests
     litellm_settings:
       set_verbose: false
       json_logs: true
       store_audit_logs: true
-      request_timeout: 60
+      request_timeout: 120
 
     # Log every request with caller info
     environment_variables:

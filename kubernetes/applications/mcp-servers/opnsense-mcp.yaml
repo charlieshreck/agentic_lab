@@ -34,14 +34,20 @@ data:
     mcp = FastMCP(
         name="opnsense-mcp",
         instructions="""
-        MCP server for OPNsense firewall, AdGuard Home, and Unbound DNS management.
+        MCP server for OPNsense firewall, AdGuard Home, Unbound DNS, and Caddy reverse proxy management.
 
         Capabilities:
         - Firewall: View rules, interfaces, DHCP leases, gateway status
         - AdGuard Home: Stats, query logs, DNS config, filters, protection toggle
         - Unbound DNS: Stats, host overrides, cache management
+        - Caddy: List/add/delete reverse proxy entries, backend handlers, apply config
 
-        Use with care - incorrect firewall/DNS changes can cause connectivity issues.
+        Caddy Workflow for exposing a new service:
+        1. add_caddy_reverse_proxy(domain) - Get UUID
+        2. add_caddy_handle(uuid, backend_ip, backend_port)
+        3. reconfigure_caddy() - Apply changes
+
+        Use with care - incorrect firewall/DNS/proxy changes can cause connectivity issues.
         """
     )
 
@@ -380,6 +386,100 @@ data:
             return result
         except Exception as e:
             logger.error(f"Failed to update Unbound override: {e}")
+            return {"error": str(e)}
+
+
+    # =============================================================================
+    # Caddy Reverse Proxy Tools (via OPNsense API)
+    # =============================================================================
+
+    @mcp.tool()
+    async def list_caddy_reverse_proxies() -> Dict[str, Any]:
+        """List all Caddy reverse proxy domain entries."""
+        try:
+            return await opnsense_api("/caddy/ReverseProxy/searchReverseProxy", "POST")
+        except Exception as e:
+            logger.error(f"Failed to list Caddy reverse proxies: {e}")
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def list_caddy_handles() -> Dict[str, Any]:
+        """List all Caddy backend handlers."""
+        try:
+            return await opnsense_api("/caddy/ReverseProxy/searchHandle", "POST")
+        except Exception as e:
+            logger.error(f"Failed to list Caddy handles: {e}")
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def add_caddy_reverse_proxy(domain: str, description: str = "", dns_challenge: bool = True) -> Dict[str, Any]:
+        """
+        Add a new Caddy reverse proxy domain entry.
+
+        Args:
+            domain: Domain name (e.g., 'app.kernow.io')
+            description: Optional description
+            dns_challenge: Use DNS challenge for TLS (default True)
+
+        Returns:
+            UUID of created entry (use with add_caddy_handle)
+        """
+        try:
+            return await opnsense_api("/caddy/ReverseProxy/addReverseProxy", "POST", {
+                "reverse": {
+                    "enabled": "1",
+                    "FromDomain": domain,
+                    "description": description,
+                    "DnsChallenge": "1" if dns_challenge else "0"
+                }
+            })
+        except Exception as e:
+            logger.error(f"Failed to add Caddy reverse proxy: {e}")
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def add_caddy_handle(reverse_uuid: str, backend_host: str, backend_port: int, description: str = "Backend") -> Dict[str, Any]:
+        """
+        Add a backend handler to a Caddy reverse proxy entry.
+
+        Args:
+            reverse_uuid: UUID from add_caddy_reverse_proxy
+            backend_host: Backend IP or hostname (e.g., '10.20.0.40')
+            backend_port: Backend port (e.g., 31095)
+            description: Optional description
+        """
+        try:
+            return await opnsense_api("/caddy/ReverseProxy/addHandle", "POST", {
+                "handle": {
+                    "enabled": "1",
+                    "reverse": reverse_uuid,
+                    "HandleType": "handle",
+                    "HandleDirective": "reverse_proxy",
+                    "ToDomain": backend_host,
+                    "ToPort": str(backend_port),
+                    "description": description
+                }
+            })
+        except Exception as e:
+            logger.error(f"Failed to add Caddy handle: {e}")
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def delete_caddy_reverse_proxy(uuid: str) -> Dict[str, Any]:
+        """Delete a Caddy reverse proxy entry by UUID."""
+        try:
+            return await opnsense_api(f"/caddy/ReverseProxy/delReverseProxy/{uuid}", "POST")
+        except Exception as e:
+            logger.error(f"Failed to delete Caddy reverse proxy: {e}")
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def reconfigure_caddy() -> Dict[str, Any]:
+        """Apply pending Caddy configuration changes."""
+        try:
+            return await opnsense_api("/caddy/service/reconfigure", "POST")
+        except Exception as e:
+            logger.error(f"Failed to reconfigure Caddy: {e}")
             return {"error": str(e)}
 
 

@@ -1,4 +1,8 @@
 ---
+# DISABLED: Cloud LLM replaced with local Ollama inference
+# All automated triage/runbook execution now uses Ollama (qwen2.5:7b)
+# Complex issues escalate to Brain Trust (humans via Outline) not cloud LLMs
+# To re-enable: set replicas back to 3 and restore OAuth credentials
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,7 +12,7 @@ metadata:
     app: gemini-agent
     component: agent
 spec:
-  replicas: 3
+  replicas: 0  # DISABLED - using Ollama for all inference
   selector:
     matchLabels:
       app: gemini-agent

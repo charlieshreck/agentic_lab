@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""AdGuard Home MCP server for DNS and ad-blocking management."""
+"""AdGuard Home MCP server for DNS management."""
 import os
+import json
 import logging
-from typing import List, Dict, Any
+from typing import Optional, List, Dict, Any
+from enum import Enum
 from fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 import httpx
 
 logging.basicConfig(level=logging.INFO)
@@ -15,87 +17,231 @@ ADGUARD_USER = os.environ.get("ADGUARD_USER", "admin")
 ADGUARD_PASSWORD = os.environ.get("ADGUARD_PASSWORD", "")
 
 mcp = FastMCP(
-    name="adguard-mcp",
-    instructions="""
-    MCP server for AdGuard Home DNS management.
-    Provides tools to view DNS stats, blocked queries, and manage filtering.
-    """
+    name="adguard_mcp",
+    instructions="MCP server for AdGuard Home DNS. Provides tools for DNS statistics, query logs, and filtering status."
 )
 
+class ResponseFormat(str, Enum):
+    MARKDOWN = "markdown"
+    JSON = "json"
 
-async def adguard_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
-    """Make authenticated API call to AdGuard Home."""
-    auth = (ADGUARD_USER, ADGUARD_PASSWORD)
-    url = f"{ADGUARD_HOST}/{endpoint}"
+class BaseInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
 
+class QueryLogInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description="Output format")
+    limit: int = Field(default=50, description="Number of queries to return", ge=1, le=1000)
+    search: Optional[str] = Field(default=None, description="Filter by domain or client IP")
+
+async def _adguard_api(endpoint: str, method: str = "GET", data: dict = None) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
+        url = f"{ADGUARD_HOST}/{endpoint}"
         if method == "GET":
-            response = await client.get(url, auth=auth)
+            response = await client.get(url, auth=(ADGUARD_USER, ADGUARD_PASSWORD))
         else:
-            response = await client.post(url, auth=auth, json=data)
+            response = await client.post(url, auth=(ADGUARD_USER, ADGUARD_PASSWORD), json=data)
         response.raise_for_status()
         return response.json()
 
+def _handle_error(e: Exception) -> str:
+    if isinstance(e, httpx.HTTPStatusError):
+        status = e.response.status_code
+        if status == 401:
+            return "Error: Authentication failed. Check ADGUARD_USER and ADGUARD_PASSWORD."
+        elif status == 403:
+            return "Error: Access denied. User may lack admin privileges."
+        return f"Error: AdGuard API returned status {status}."
+    elif isinstance(e, httpx.TimeoutException):
+        return "Error: Request timed out. Check connectivity to AdGuard Home."
+    return f"Error: {type(e).__name__}: {str(e)}"
 
-@mcp.tool()
-async def get_stats() -> Dict[str, Any]:
-    """Get DNS query statistics."""
+@mcp.tool(
+    name="adguard_get_stats",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def adguard_get_stats(params: BaseInput) -> str:
+    """Get DNS statistics including total queries, blocked queries, and top clients."""
     try:
-        return await adguard_api("control/stats")
+        stats = await _adguard_api("control/stats")
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(stats, indent=2)
+
+        lines = ["# AdGuard DNS Statistics", ""]
+        lines.append(f"- **Total Queries**: {stats.get('num_dns_queries', 0):,}")
+        lines.append(f"- **Blocked**: {stats.get('num_blocked_filtering', 0):,}")
+        lines.append(f"- **Safe Browsing Blocked**: {stats.get('num_replaced_safebrowsing', 0):,}")
+        lines.append(f"- **Parental Blocked**: {stats.get('num_replaced_parental', 0):,}")
+        lines.append(f"- **Avg Processing Time**: {stats.get('avg_processing_time', 0):.2f}ms")
+        lines.append("")
+
+        if stats.get("top_queried_domains"):
+            lines.append("## Top Queried Domains")
+            for domain in list(stats["top_queried_domains"])[:10]:
+                for name, count in domain.items():
+                    lines.append(f"- {name}: {count:,}")
+            lines.append("")
+
+        if stats.get("top_blocked_domains"):
+            lines.append("## Top Blocked Domains")
+            for domain in list(stats["top_blocked_domains"])[:10]:
+                for name, count in domain.items():
+                    lines.append(f"- [BLOCK] {name}: {count:,}")
+
+        return "\n".join(lines)
     except Exception as e:
-        logger.error(f"Failed to get stats: {e}")
-        return {}
+        return _handle_error(e)
 
-
-@mcp.tool()
-async def get_query_log(limit: int = 100) -> List[Dict[str, Any]]:
-    """Get recent DNS query log."""
+@mcp.tool(
+    name="adguard_get_query_log",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def adguard_get_query_log(params: QueryLogInput) -> str:
+    """Get recent DNS query log with domain, client, and block status."""
     try:
-        result = await adguard_api(f"control/querylog?limit={limit}")
-        return result.get("data", [])
+        result = await _adguard_api(f"control/querylog?limit={params.limit}")
+        queries = result.get("data", [])
+
+        if params.search:
+            search = params.search.lower()
+            queries = [q for q in queries if search in str(q).lower()]
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({"queries": queries, "count": len(queries)}, indent=2)
+
+        lines = ["# DNS Query Log", "", f"Showing {len(queries)} queries", ""]
+        for q in queries[:50]:
+            question = q.get("question", {})
+            domain = question.get("name", "Unknown")
+            client = q.get("client", "Unknown")
+            reason = q.get("reason", "")
+            icon = "[BLOCK]" if reason else ""
+            lines.append(f"- {icon} `{domain}` from {client}" + (f" ({reason})" if reason else ""))
+
+        return "\n".join(lines)
     except Exception as e:
-        logger.error(f"Failed to get query log: {e}")
-        return []
+        return _handle_error(e)
 
-
-@mcp.tool()
-async def get_filtering_status() -> Dict[str, Any]:
-    """Get current filtering status and blocklists."""
+@mcp.tool(
+    name="adguard_get_filtering_status",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def adguard_get_filtering_status(params: BaseInput) -> str:
+    """Get current filtering configuration including enabled lists and rules count."""
     try:
-        return await adguard_api("control/filtering/status")
+        status = await _adguard_api("control/filtering/status")
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(status, indent=2)
+
+        enabled = "[OK] Enabled" if status.get("enabled") else "[ERR] Disabled"
+        lines = ["# Filtering Status", "", f"**Status**: {enabled}", ""]
+
+        filters = status.get("filters", [])
+        if filters:
+            lines.append("## Active Filter Lists")
+            for f in filters:
+                icon = "" if f.get("enabled") else "[ ]"
+                lines.append(f"- {icon} **{f.get('name')}**: {f.get('rules_count', 0):,} rules")
+            lines.append("")
+
+        user_rules = status.get("user_rules", [])
+        if user_rules:
+            lines.append(f"## Custom Rules: {len(user_rules)} rule(s)")
+
+        return "\n".join(lines)
     except Exception as e:
-        logger.error(f"Failed to get filtering status: {e}")
-        return {}
+        return _handle_error(e)
 
-
-@mcp.tool()
-async def get_blocked_services() -> List[str]:
-    """Get list of blocked services."""
+@mcp.tool(
+    name="adguard_list_rewrites",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+)
+async def adguard_list_rewrites(params: BaseInput) -> str:
+    """List all DNS rewrites (custom domain to IP mappings)."""
     try:
-        result = await adguard_api("control/blocked_services/list")
-        return result if isinstance(result, list) else []
+        rewrites = await _adguard_api("control/rewrite/list")
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({"rewrites": rewrites, "count": len(rewrites)}, indent=2)
+
+        lines = ["# DNS Rewrites", "", f"Total: {len(rewrites)} rewrites", ""]
+        for r in sorted(rewrites, key=lambda x: x.get("domain", "")):
+            domain = r.get("domain", "")
+            answer = r.get("answer", "")
+            lines.append(f"- `{domain}` -> `{answer}`")
+
+        return "\n".join(lines)
     except Exception as e:
-        logger.error(f"Failed to get blocked services: {e}")
-        return []
+        return _handle_error(e)
 
+class RewriteInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    domain: str = Field(description="Domain name (e.g., qdrant.kernow.io)")
+    answer: str = Field(description="IP address or target domain")
 
-@mcp.tool()
-async def get_clients() -> List[Dict[str, Any]]:
-    """Get configured clients."""
+@mcp.tool(
+    name="adguard_add_rewrite",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+)
+async def adguard_add_rewrite(params: RewriteInput) -> str:
+    """Add a DNS rewrite rule (domain to IP mapping)."""
     try:
-        result = await adguard_api("control/clients")
-        return result.get("clients", [])
+        await _adguard_api("control/rewrite/add", method="POST", data={
+            "domain": params.domain,
+            "answer": params.answer
+        })
+        return f" Added rewrite: `{params.domain}` -> `{params.answer}`"
     except Exception as e:
-        logger.error(f"Failed to get clients: {e}")
-        return []
+        return _handle_error(e)
 
+@mcp.tool(
+    name="adguard_delete_rewrite",
+    annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+)
+async def adguard_delete_rewrite(params: RewriteInput) -> str:
+    """Delete a DNS rewrite rule."""
+    try:
+        await _adguard_api("control/rewrite/delete", method="POST", data={
+            "domain": params.domain,
+            "answer": params.answer
+        })
+        return f" Deleted rewrite: `{params.domain}` -> `{params.answer}`"
+    except Exception as e:
+        return _handle_error(e)
 
-def main():
-    import uvicorn
-    port = int(os.environ.get("PORT", "8000"))
-    logger.info(f"Starting AdGuard MCP server on port {port}")
-    uvicorn.run(mcp.get_app(), host="0.0.0.0", port=port)
+# ============================================================================
+# REST API for discovery/automation
+# ============================================================================
 
+async def rest_rewrites(request):
+    """REST endpoint to list rewrites."""
+    try:
+        rewrites = await _adguard_api("control/rewrite/list")
+        return JSONResponse({"status": "ok", "data": rewrites})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+# ============================================================================
+# REST API
+# ============================================================================
+
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
+from starlette.responses import JSONResponse
+
+async def rest_health(request):
+    """Health check endpoint."""
+    return JSONResponse({"status": "healthy"})
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    rest_routes = [
+        Route("/health", rest_health, methods=["GET"]),
+        Route("/api/rewrites", rest_rewrites, methods=["GET"]),
+    ]
+    mcp_app = mcp.http_app()
+    app = Starlette(
+        routes=rest_routes + [Mount("/", app=mcp_app)],
+        lifespan=mcp_app.lifespan
+    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -18,6 +18,50 @@ spec:
         app: ollama
         component: inference
     spec:
+      # Init container to pre-pull required models before accepting traffic
+      initContainers:
+      - name: model-puller
+        image: ollama/ollama:0.5.4
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Start Ollama server in background
+          /bin/ollama serve &
+          sleep 5
+
+          # Pull required models (qwen2.5:7b for reasoning, nomic-embed-text for embeddings)
+          echo "Pulling qwen2.5:7b..."
+          /bin/ollama pull qwen2.5:7b
+
+          echo "Pulling nomic-embed-text..."
+          /bin/ollama pull nomic-embed-text
+
+          echo "All models pulled successfully!"
+          # Give models a moment to settle
+          sleep 2
+        env:
+        - name: OLLAMA_HOST
+          value: "127.0.0.1:11434"
+        - name: OLLAMA_MODELS
+          value: "/root/.ollama/models"
+        # AMD GPU support for init container too
+        - name: HSA_OVERRIDE_GFX_VERSION
+          value: "10.3.0"
+        volumeMounts:
+        - name: ollama-models
+          mountPath: /root/.ollama
+        - name: dri
+          mountPath: /dev/dri
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "8Gi"
+          limits:
+            cpu: "4000m"
+            memory: "12Gi"
+        securityContext:
+          privileged: true
       containers:
       - name: ollama
         image: ollama/ollama:0.5.4
@@ -32,18 +76,28 @@ spec:
           value: "/root/.ollama/models"
         - name: OLLAMA_KEEP_ALIVE
           value: "5m"
+        # Increased parallel requests for handling multiple simultaneous queries
         - name: OLLAMA_NUM_PARALLEL
-          value: "2"
+          value: "4"
+        # AMD GPU acceleration (Radeon 680M is RDNA2 = gfx1030)
+        - name: HSA_OVERRIDE_GFX_VERSION
+          value: "10.3.0"
+        # Enable GPU compute
+        - name: OLLAMA_GPU_LAYERS
+          value: "-1"
         resources:
           requests:
             cpu: "2000m"
-            memory: "4Gi"
+            memory: "8Gi"
           limits:
             cpu: "8000m"
             memory: "16Gi"
         volumeMounts:
         - name: ollama-models
           mountPath: /root/.ollama
+        # Mount GPU device for AMD acceleration
+        - name: dri
+          mountPath: /dev/dri
         readinessProbe:
           httpGet:
             path: /
@@ -58,6 +112,13 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
+        securityContext:
+          privileged: true
+      volumes:
+      - name: dri
+        hostPath:
+          path: /dev/dri
+          type: Directory
   volumeClaimTemplates:
   - metadata:
       name: ollama-models

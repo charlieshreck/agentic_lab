@@ -1,4 +1,8 @@
 ---
+# DISABLED: Cloud LLM replaced with local Ollama inference
+# Validation now handled by Ollama (qwen2.5:7b) or Brain Trust humans
+# Claude Code (CLI) is still used for implementation after Brain Trust approval
+# To re-enable: set replicas back to 3 and restore OAuth credentials
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,7 +12,7 @@ metadata:
     app: claude-agent
     component: agent
 spec:
-  replicas: 3
+  replicas: 0  # DISABLED - using Ollama for all inference
   selector:
     matchLabels:
       app: claude-agent

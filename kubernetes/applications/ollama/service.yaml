@@ -6,9 +6,11 @@ metadata:
   labels:
     app: ollama
 spec:
+  type: NodePort
   selector:
     app: ollama
   ports:
   - port: 11434
     targetPort: 11434
+    nodePort: 31434
     name: http

@@ -82,11 +82,21 @@ data:
     GEMINI_FLASH_MODEL = os.environ.get("GEMINI_FLASH_MODEL", "gemini/gemini-2.0-flash")
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
 
-    # Thresholds and configuration
-    RUNBOOK_MATCH_THRESHOLD = float(os.environ.get("RUNBOOK_MATCH_THRESHOLD", "0.75"))
+    # Thresholds and configuration - TIERED RUNBOOK MATCHING
+    # >= 0.95: EXACT match - execute runbook as-is
+    # >= 0.80: SIMILAR match - execute with tweaks, propose runbook update PR
+    # <  0.80: NO_MATCH - escalate to Brain Trust (humans via Outline)
+    RUNBOOK_EXACT_THRESHOLD = float(os.environ.get("RUNBOOK_EXACT_THRESHOLD", "0.95"))
+    RUNBOOK_SIMILAR_THRESHOLD = float(os.environ.get("RUNBOOK_SIMILAR_THRESHOLD", "0.80"))
+    # Legacy threshold for backward compatibility
+    RUNBOOK_MATCH_THRESHOLD = RUNBOOK_SIMILAR_THRESHOLD
     MIN_CONFIDENCE_FOR_LOCAL_FIX = float(os.environ.get("MIN_CONFIDENCE_FOR_LOCAL_FIX", "0.7"))
     AUTO_APPROVE_MIN_SUCCESSES = int(os.environ.get("AUTO_APPROVE_MIN_SUCCESSES", "5"))
     CONTEXT_CACHE_TTL = int(os.environ.get("CONTEXT_CACHE_TTL", "3600"))
+
+    # Brain Trust Escalation - Outline collection for human review
+    BRAIN_TRUST_COLLECTION_ID = os.environ.get("BRAIN_TRUST_COLLECTION_ID", "9bd8c738-4505-494a-a867-74349a887dc6")
+    OUTLINE_MCP_URL = os.environ.get("OUTLINE_MCP_URL", "http://outline-mcp:8000")
 
     # Static context cache (refreshed hourly for cost savings)
     _static_context_cache = {}
@@ -869,6 +879,268 @@ data:
                 logger.error("Matrix bot call failed: %s", e)
                 return {"error": str(e)}
 
+    # ============================================================================
+    # BRAIN TRUST ESCALATION - Outline-based human review workflow
+    # ============================================================================
+
+    async def call_outline_mcp(tool_name: str, **kwargs) -> dict:
+        """Call Outline MCP for wiki document operations."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    OUTLINE_MCP_URL + "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": tool_name, "arguments": kwargs}
+                    }
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("result", {}).get("content", [])
+                    if content:
+                        text = content[0].get("text", "{}")
+                        try:
+                            return json.loads(text)
+                        except:
+                            return {"result": text}
+                return {"error": f"HTTP {response.status_code}"}
+            except Exception as e:
+                logger.error(f"Outline MCP call failed: {e}")
+                return {"error": str(e)}
+
+    def format_brain_trust_document(alert: dict, context: dict, reason: str, suggestions: list = None) -> str:
+        """Format an escalation document for Brain Trust review in Outline."""
+        now = datetime.utcnow().isoformat()
+        doc = f"""# {alert.get('alertname', 'Unknown Alert')} - Escalated {now[:10]}
+
+## Alert Details
+| Field | Value |
+|-------|-------|
+| Severity | {alert.get('severity', 'warning')} |
+| Source | {alert.get('source', ['alertmanager'])} |
+| Time | {alert.get('startsAt', now)} |
+| Namespace | {alert.get('namespace', 'default')} |
+
+### Description
+{alert.get('description', 'No description provided')}
+
+### Labels
+```json
+{json.dumps(alert.get('labels', {}), indent=2)}
+```
+
+## Context Gathered (via MCPs)
+
+"""
+        # Add gathered context
+        if context.get("gathered_info"):
+            for key, value in context["gathered_info"].items():
+                doc += f"### {key}\n```\n{str(value)[:2000]}\n```\n\n"
+
+        if context.get("diagnosis"):
+            doc += f"""### Diagnosis Results
+- Result: {context['diagnosis'].get('diagnosis_result', 'unknown')}
+- Confidence: {context['diagnosis'].get('confidence', 0):.0%}
+
+"""
+
+        doc += f"""## Why Escalated
+**Reason**: {reason}
+
+Ollama (qwen2.5:7b) analyzed this alert but determined it requires human review because:
+- {reason}
+
+"""
+
+        if suggestions:
+            doc += """## Suggested Approaches
+The following approaches were considered by Ollama:
+
+"""
+            for i, suggestion in enumerate(suggestions, 1):
+                doc += f"{i}. **{suggestion.get('name', 'Suggestion')}**\n"
+                doc += f"   - {suggestion.get('description', 'No description')}\n"
+                if suggestion.get('risk'):
+                    doc += f"   - Risk: {suggestion['risk']}\n"
+                doc += "\n"
+
+        doc += """## Brain Trust Decision
+<!-- Human reviewer: Fill in your decision below -->
+
+### Approved Solution
+_Describe the solution to implement_
+
+### Implementation Notes
+_Any special considerations_
+
+### Assigned To
+_Who will implement (e.g., "Claude Code session")_
+
+---
+*This document was auto-generated by the LangGraph Alert Handler.*
+*Collection: Brain Trust Review*
+"""
+        return doc
+
+    async def escalate_to_brain_trust(alert: dict, context: dict, reason: str, suggestions: list = None) -> dict:
+        """
+        Escalate an alert to Brain Trust (humans) via Outline wiki.
+
+        This is the new escalation path replacing cloud LLM escalation.
+        Creates a document in the Brain Trust Review collection for human review.
+
+        Args:
+            alert: Alert details dict
+            context: Gathered context including diagnosis, MCP data
+            reason: Why Ollama couldn't handle this autonomously
+            suggestions: Optional list of suggested approaches
+
+        Returns:
+            Dict with escalation status and document link
+        """
+        logger.info(f"Escalating to Brain Trust: {alert.get('alertname')} - {reason}")
+
+        # Format the escalation document
+        doc_content = format_brain_trust_document(alert, context, reason, suggestions)
+        doc_title = f"{alert.get('alertname', 'Alert')} - Escalated {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+
+        # Create document in Outline via MCP
+        result = await call_outline_mcp(
+            "create_document",
+            title=doc_title,
+            collection_id=BRAIN_TRUST_COLLECTION_ID,
+            text=doc_content,
+            publish=True
+        )
+
+        if "error" in result:
+            logger.error(f"Failed to create Brain Trust document: {result['error']}")
+            # Fallback: notify via Matrix with error details
+            await call_matrix("message", {
+                "room_id": os.environ.get("ALERT_ROOM_ID", "!alerts:agentic.local"),
+                "message": f"⚠️ **BRAIN TRUST ESCALATION FAILED**\n\nAlert: {alert.get('alertname')}\nReason: {reason}\nError: {result['error']}\n\nPlease review manually."
+            })
+            return {"status": "error", "error": result["error"]}
+
+        # Notify via Matrix using the new /brain-trust endpoint
+        doc_id = result.get("id", "unknown")
+        outline_url = f"https://outline.kernow.io/doc/{doc_id}"
+
+        # Build context summary for notification
+        context_summary = None
+        if context:
+            diagnosis = context.get("diagnosis", {})
+            if diagnosis:
+                context_summary = f"Diagnosis: {diagnosis.get('summary', 'N/A')[:300]}"
+
+        await call_matrix("brain-trust", {
+            "alert_name": alert.get("alertname", "Unknown Alert"),
+            "alert_id": alert.get("alert_id", alert.get("fingerprint", str(hash(str(alert)))[:12])),
+            "severity": alert.get("severity", "info"),
+            "reason": reason,
+            "outline_url": outline_url,
+            "outline_doc_id": doc_id,
+            "context_summary": context_summary,
+            "suggestions": suggestions
+        })
+
+        logger.info(f"Created Brain Trust document: {doc_id}")
+        return {
+            "status": "escalated",
+            "document_id": doc_id,
+            "collection": "Brain Trust Review",
+            "reason": reason
+        }
+
+    async def propose_runbook_update(runbook_match: dict, tweaks: list, execution_result: dict) -> dict:
+        """
+        After executing a SIMILAR runbook with tweaks, propose an update.
+
+        Creates a document in Brain Trust Review suggesting runbook improvements
+        based on what worked.
+
+        Args:
+            runbook_match: The original matched runbook
+            tweaks: List of tweaks/modifications made
+            execution_result: The result of executing with tweaks
+
+        Returns:
+            Dict with proposal status
+        """
+        logger.info(f"Proposing runbook update for: {runbook_match.get('name')}")
+
+        doc_content = f"""# Runbook Update Proposal: {runbook_match.get('name')}
+
+## Summary
+A similar alert was handled using runbook **{runbook_match.get('name')}** with modifications.
+The modifications were successful and should be considered for incorporation.
+
+## Original Runbook
+- **ID**: {runbook_match.get('id')}
+- **Match Score**: {runbook_match.get('score', 0):.0%}
+- **Version**: {runbook_match.get('version', 1)}
+
+## Modifications Made
+The following tweaks were applied to handle this specific case:
+
+"""
+        for i, tweak in enumerate(tweaks, 1):
+            doc_content += f"{i}. {tweak}\n"
+
+        doc_content += f"""
+
+## Execution Result
+- **Status**: {'Success' if execution_result.get('success') else 'Partial'}
+- **Confidence**: {execution_result.get('confidence', 0):.0%}
+- **Diagnosis**: {execution_result.get('diagnosis_result', 'N/A')}
+
+## Recommendation
+Consider updating the runbook to handle this case natively. Options:
+1. Add new trigger patterns to capture this alert type
+2. Add conditional logic to the fix steps
+3. Create a new runbook variant for this specific scenario
+
+## Brain Trust Decision
+<!-- Human reviewer: Approve update, create variant, or dismiss -->
+
+---
+*Auto-generated by LangGraph runbook learning system*
+"""
+
+        result = await call_outline_mcp(
+            "create_document",
+            title=f"Runbook Update: {runbook_match.get('name')} - {datetime.utcnow().strftime('%Y-%m-%d')}",
+            collection_id=BRAIN_TRUST_COLLECTION_ID,
+            text=doc_content,
+            publish=True
+        )
+
+        if "error" not in result:
+            doc_id = result.get("id", "unknown")
+            outline_url = f"https://outline.kernow.io/doc/{doc_id}"
+
+            # Notify via Matrix using the new /runbook-proposal endpoint
+            await call_matrix("runbook-proposal", {
+                "alert_name": execution_result.get("alert_name", "Unknown Alert"),
+                "runbook_title": runbook_match.get("name", "Unknown Runbook"),
+                "tweaks_made": "\n".join(f"- {t}" for t in tweaks[:5]),
+                "outline_url": outline_url,
+                "execution_success": execution_result.get("success", True)
+            })
+
+        return result
+
+    def classify_runbook_match(score: float) -> str:
+        """Classify runbook match into EXACT, SIMILAR, or NO_MATCH."""
+        if score >= RUNBOOK_EXACT_THRESHOLD:
+            return "EXACT"
+        elif score >= RUNBOOK_SIMILAR_THRESHOLD:
+            return "SIMILAR"
+        else:
+            return "NO_MATCH"
+
     async def call_coroot_mcp(tool_name: str, **kwargs) -> dict:
         """Call Coroot MCP for metrics and anomaly data."""
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1399,30 +1671,58 @@ data:
     async def call_claude_agent(prompt: str, context: dict = None, allowed_tools: list = None,
                                 priority: int = None, use_queue: bool = False, timeout: int = 300):
         """
-        Route complex tasks to Gemini via LiteLLM.
+        DEPRECATED: Cloud LLM escalation replaced with Brain Trust (Outline) escalation.
 
-        NOTE: Claude escalation DISABLED to prevent subscription abuse.
-        All tasks now go through Gemini (local LLM).
+        This function now uses Ollama (qwen2.5:7b) for analysis and escalates
+        complex issues to Brain Trust (humans via Outline wiki) instead of cloud LLMs.
+
+        For backward compatibility, this still returns a response string.
+        Callers should migrate to escalate_to_brain_trust() for new code.
 
         Args:
             prompt: The task prompt
             context: Optional context dict
-            allowed_tools: List of allowed tools (ignored - Gemini doesn't support tools)
+            allowed_tools: Ignored (Ollama uses procedural tool calls via LangGraph)
             priority: Queue priority (ignored)
             use_queue: Ignored
             timeout: Timeout in seconds
         """
-        # DISABLED: Claude escalation - use Gemini for all tasks
-        logger.info("Routing task to Gemini (Claude disabled)")
-        return await call_litellm([{"role": "user", "content": prompt}])
+        logger.info("Processing with Ollama (qwen2.5:7b) - cloud LLMs disabled")
+
+        # Use Ollama via LiteLLM for analysis
+        analysis = await call_litellm([
+            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ])
+
+        # Check if Ollama indicates it needs human help
+        lower_analysis = analysis.lower() if analysis else ""
+        needs_human = any(phrase in lower_analysis for phrase in [
+            "i cannot", "i'm not sure", "need human", "escalate", "unclear",
+            "insufficient information", "requires approval", "beyond my capability"
+        ])
+
+        if needs_human and context:
+            # Extract alert info from context if available
+            alert = context.get("alert", {"alertname": "Unknown", "description": prompt[:200]})
+            await escalate_to_brain_trust(
+                alert=alert,
+                context=context,
+                reason="Ollama analysis indicates human review needed",
+                suggestions=[{"name": "Ollama Analysis", "description": analysis[:500]}]
+            )
+            return f"ESCALATED TO BRAIN TRUST: {analysis[:500]}..."
+
+        return analysis
 
     def should_use_claude(assessment: dict) -> bool:
-        """Determine if task should be routed to Claude based on complexity.
-
-        NOTE: DISABLED - always returns False to prevent subscription abuse.
-        All tasks now handled by Gemini via LiteLLM.
         """
-        return False  # Claude disabled - use Gemini for everything
+        DEPRECATED: Determine if task should be routed to Claude.
+
+        This function is kept for backward compatibility but always returns False.
+        Complex tasks now escalate to Brain Trust (humans via Outline) instead of cloud LLMs.
+        """
+        return False  # Cloud LLMs disabled - use Ollama + Brain Trust escalation
 
     def build_assessment_prompt(alert, similar):
         return """Analyze this alert and provide assessment:
@@ -1444,7 +1744,13 @@ data:
     Respond with JSON array containing objects with: name, description, impact, risk, commands"""
 
     async def assess_alert(state):
-        """Assess alert by searching for diagnostic runbooks and running diagnosis."""
+        """Assess alert using TIERED runbook matching with Brain Trust escalation.
+
+        Match Types:
+        - EXACT (>= 0.95): Execute runbook as-is
+        - SIMILAR (>= 0.80): Execute with tweaks, propose runbook update
+        - NO_MATCH (< 0.80): Escalate to Brain Trust (humans via Outline)
+        """
         alert = state["alert"]
         alert_text = f"{alert.get('alertname', '')} {alert.get('description', '')}"
 
@@ -1454,45 +1760,52 @@ data:
 
         runbook_match = None
         executor_result = None
+        match_type = "NO_MATCH"
 
-        # Step 2: If we found a v2 diagnostic runbook, run the executor
-        if runbooks and runbooks[0].get("score", 0) >= RUNBOOK_MATCH_THRESHOLD:
+        # Step 2: Classify match using tiered thresholds
+        if runbooks and runbooks[0].get("score", 0) > 0:
             match = runbooks[0]
-            logger.info(f"Found matching runbook (score: {match.get('score'):.2f})")
+            score = match.get("score", 0)
+            match_type = classify_runbook_match(score)
+            logger.info(f"Runbook match: {match.get('name', 'Unknown')} (score: {score:.2f}, type: {match_type})")
 
-            if match.get("version") == 2 and match.get("runbook"):
-                # V2 diagnostic runbook - run full diagnosis
-                runbook = match["runbook"]
-                logger.info(f"Running diagnostic runbook: {runbook.name}")
+            # Only process if we have at least a SIMILAR match
+            if match_type in ["EXACT", "SIMILAR"]:
+                if match.get("version") == 2 and match.get("runbook"):
+                    # V2 diagnostic runbook - run full diagnosis
+                    runbook = match["runbook"]
+                    logger.info(f"Running diagnostic runbook: {runbook.name} (match: {match_type})")
 
-                executor = RunbookExecutor(runbook, alert)
-                executor_result = await executor.execute()
+                    executor = RunbookExecutor(runbook, alert)
+                    executor_result = await executor.execute()
 
-                runbook_match = {
-                    "id": match["id"],
-                    "score": match["score"],
-                    "name": runbook.name,
-                    "version": 2,
-                    "runbook": runbook,
-                    "executor": executor,
-                    "executor_result": executor_result
-                }
-            else:
-                # V1 legacy runbook
-                runbook_match = {
-                    "id": match["id"],
-                    "score": match["score"],
-                    "name": match.get("name", "Unknown"),
-                    "version": 1,
-                    "steps": match.get("steps", []),
-                    "fix_command": match.get("fix_command", "")
-                }
+                    runbook_match = {
+                        "id": match["id"],
+                        "score": score,
+                        "name": runbook.name,
+                        "version": 2,
+                        "match_type": match_type,
+                        "runbook": runbook,
+                        "executor": executor,
+                        "executor_result": executor_result
+                    }
+                else:
+                    # V1 legacy runbook
+                    runbook_match = {
+                        "id": match["id"],
+                        "score": score,
+                        "name": match.get("name", "Unknown"),
+                        "version": 1,
+                        "match_type": match_type,
+                        "steps": match.get("steps", []),
+                        "fix_command": match.get("fix_command", "")
+                    }
 
-        # Step 3: Build assessment from executor results or LLM
+        # Step 3: Build assessment based on match type and executor results
         if executor_result:
             assessment = {
                 "domain": "infrastructure",
-                "complexity": "low" if executor_result.get("action") == "fix_ready" else "high",
+                "complexity": "low" if executor_result.get("action") == "fix_ready" else "medium",
                 "requires_approval": executor_result.get("requires_approval", True),
                 "confidence": executor_result.get("confidence", 0),
                 "diagnosis_result": executor_result.get("diagnosis_result", "unknown"),
@@ -1500,13 +1813,23 @@ data:
                 "escalation_reason": executor_result.get("escalation_reason"),
                 "similar_runbook": runbook_match.get("name") if runbook_match else None,
                 "similarity_score": runbook_match.get("score", 0) if runbook_match else 0,
+                "match_type": match_type,
                 "recommended_topic": "infrastructure"
             }
-        else:
-            # No matching runbook - use LLM for basic assessment
+
+            # SIMILAR matches may need tweaks - flag for potential runbook update
+            if match_type == "SIMILAR":
+                assessment["needs_runbook_update"] = True
+                assessment["tweaks_applied"] = []  # Will be populated during execution
+
+        elif match_type == "NO_MATCH":
+            # No matching runbook - use Ollama for basic assessment, then escalate
             prompt = build_assessment_prompt(alert, runbooks)
-            logger.info("No diagnostic runbook found, assessing with local LLM...")
-            result = await call_litellm([{"role": "user", "content": prompt}])
+            logger.info("No matching runbook (score < 0.80) - assessing with Ollama...")
+            result = await call_litellm([
+                {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ])
 
             try:
                 clean_result = result.strip()
@@ -1518,33 +1841,59 @@ data:
             except:
                 assessment = {
                     "domain": "infrastructure",
-                    "complexity": "high",  # Unknown = escalate to Claude
+                    "complexity": "high",
                     "requires_approval": True,
                     "recommended_topic": "infrastructure"
                 }
-            assessment["escalated"] = True  # No runbook means escalate
-            assessment["escalation_reason"] = "No matching diagnostic runbook found"
+
+            # Mark for Brain Trust escalation
+            assessment["escalated"] = True
+            assessment["match_type"] = "NO_MATCH"
+            assessment["escalation_reason"] = "No matching runbook found (score < 0.80) - escalating to Brain Trust"
+            assessment["ollama_analysis"] = result[:1000] if result else None
+        else:
+            # Should not reach here, but handle edge case
+            assessment = {
+                "domain": "infrastructure",
+                "complexity": "high",
+                "requires_approval": True,
+                "escalated": True,
+                "match_type": match_type,
+                "escalation_reason": "Unexpected assessment path",
+                "recommended_topic": "infrastructure"
+            }
 
         return {
             "assessment": assessment,
             "runbook_match": runbook_match or {},
-            "handled_locally": False
+            "match_type": match_type,
+            "handled_locally": match_type in ["EXACT", "SIMILAR"] and not assessment.get("escalated", False)
         }
 
     async def generate_solutions(state):
-        """Generate solutions using diagnostic runbook results or escalate to Claude."""
+        """Generate solutions using TIERED runbook matching with Brain Trust escalation.
+
+        Match handling:
+        - EXACT (>= 0.95): Execute runbook as documented
+        - SIMILAR (>= 0.80): Execute with Ollama-determined tweaks, propose runbook update
+        - NO_MATCH (< 0.80): Escalate to Brain Trust (humans via Outline)
+        """
         alert = state["alert"]
         assessment = state["assessment"]
         runbook_match = state.get("runbook_match", {})
+        match_type = state.get("match_type", runbook_match.get("match_type", "NO_MATCH"))
 
-        # Case 1: V2 diagnostic runbook with executor result
+        # =====================================================================
+        # Case 1: EXACT or SIMILAR match with V2 diagnostic runbook
+        # =====================================================================
         if runbook_match.get("version") == 2 and runbook_match.get("executor_result"):
             executor_result = runbook_match["executor_result"]
             runbook = runbook_match.get("runbook")
 
             if executor_result.get("action") == "fix_ready":
                 # Diagnosis passed, fix is ready to apply
-                logger.info(f"Runbook diagnosis passed (confidence: {executor_result.get('confidence', 0):.2f})")
+                logger.info(f"Runbook diagnosis passed (confidence: {executor_result.get('confidence', 0):.2f}, match: {match_type})")
+
                 solutions = [{
                     "name": f"Apply Runbook: {runbook.name}",
                     "description": f"Diagnosis: {executor_result.get('diagnosis_result', 'confirmed')} (confidence: {executor_result.get('confidence', 0):.0%})",
@@ -1552,48 +1901,61 @@ data:
                     "risk": "low",
                     "fix_steps": executor_result.get("fix_steps", []),
                     "source": "diagnostic_runbook",
+                    "match_type": match_type,
                     "runbook_id": runbook_match.get("id"),
                     "runbook": runbook,
                     "executor": runbook_match.get("executor"),
                     "gathered_info": executor_result.get("gathered_info", {})
                 }]
-                return {"solutions": solutions, "handled_locally": True}
+
+                # For SIMILAR matches, flag for potential runbook update after execution
+                if match_type == "SIMILAR":
+                    solutions[0]["propose_update"] = True
+                    solutions[0]["similarity_score"] = runbook_match.get("score", 0)
+
+                return {"solutions": solutions, "handled_locally": True, "match_type": match_type}
 
             elif executor_result.get("action") == "escalate":
-                # Diagnosis requires escalation - send to Claude with all gathered info
-                logger.info(f"Escalating to Claude: {executor_result.get('escalation_reason')}")
-                escalation_msg = executor_result.get("escalation_message", "")
-
-                # Use priority queue based on alert severity
-                severity = alert.get("severity", "warning")
-                result = await call_claude_agent(
-                    escalation_msg,
-                    context={
-                        "alert": alert,
-                        "assessment": assessment,
-                        "gathered_info": executor_result.get("gathered_info", {}),
-                        "diagnosis": executor_result.get("diagnosis", {})
-                    },
-                    allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch"],
-                    priority=severity_to_priority(severity)
-                )
-
-                # Parse and store new runbook from Claude
-                new_runbook = parse_runbook_from_claude(result, alert)
-                if new_runbook:
-                    await store_runbook_qdrant(new_runbook)
-                    logger.info(f"Stored new diagnostic runbook: {new_runbook.name}")
+                # Diagnosis determined escalation is needed - escalate to Brain Trust
+                logger.info(f"Escalating to Brain Trust: {executor_result.get('escalation_reason')}")
 
                 # Update escalation stats
                 await update_runbook_stats(runbook_match.get("id"), success=False, escalated=True)
 
-                # Parse solutions from Claude
-                solutions = _parse_solutions_from_response(result, alert)
-                return {"solutions": solutions, "handled_locally": False, "escalated_to_claude": True}
+                # Escalate to Brain Trust (humans via Outline) instead of cloud LLM
+                escalation_result = await escalate_to_brain_trust(
+                    alert=alert,
+                    context={
+                        "assessment": assessment,
+                        "gathered_info": executor_result.get("gathered_info", {}),
+                        "diagnosis": {
+                            "result": executor_result.get("diagnosis_result"),
+                            "confidence": executor_result.get("confidence"),
+                            "execution_log": executor_result.get("execution_log", [])
+                        }
+                    },
+                    reason=executor_result.get("escalation_reason", "Runbook executor determined escalation needed"),
+                    suggestions=[]
+                )
 
-        # Case 2: V1 legacy runbook
-        elif runbook_match.get("version") == 1 and runbook_match.get("score", 0) >= RUNBOOK_MATCH_THRESHOLD:
-            logger.info(f"Using legacy runbook: {runbook_match.get('name')}")
+                # Return escalation status as solution
+                solutions = [{
+                    "name": f"Brain Trust Review: {alert.get('alertname', 'Unknown')}",
+                    "description": f"Escalated to Brain Trust for human review. Reason: {executor_result.get('escalation_reason')}",
+                    "impact": "pending",
+                    "risk": "pending",
+                    "source": "brain_trust_escalation",
+                    "escalation_document": escalation_result.get("document_id"),
+                    "requires_human_action": True
+                }]
+                return {"solutions": solutions, "handled_locally": False, "escalated_to_brain_trust": True}
+
+        # =====================================================================
+        # Case 2: SIMILAR or EXACT match with V1 legacy runbook
+        # =====================================================================
+        elif runbook_match.get("version") == 1 and match_type in ["EXACT", "SIMILAR"]:
+            logger.info(f"Using legacy runbook: {runbook_match.get('name')} (match: {match_type})")
+
             solutions = [{
                 "name": f"Apply Runbook: {runbook_match.get('name')}",
                 "description": "Legacy runbook (no diagnostic verification)",
@@ -1602,50 +1964,92 @@ data:
                 "commands": runbook_match.get("steps", []),
                 "fix_command": runbook_match.get("fix_command"),
                 "source": "legacy_runbook",
+                "match_type": match_type,
                 "runbook_id": runbook_match.get("id")
             }]
-            return {"solutions": solutions, "handled_locally": True}
 
-        # Case 3: No runbook - escalate to Claude for new runbook creation
-        logger.info("No matching runbook - escalating to Claude for analysis and runbook creation")
-        escalation_prompt = "NEW ALERT - NO EXISTING RUNBOOK\n\n"
-        escalation_prompt += "ALERT DETAILS:\n"
-        escalation_prompt += f"- Name: {alert.get('alertname', 'Unknown')}\n"
-        escalation_prompt += f"- Severity: {alert.get('severity', 'warning')}\n"
-        escalation_prompt += f"- Description: {alert.get('description', 'No description')}\n"
-        escalation_prompt += f"- Namespace: {alert.get('namespace', 'default')}\n"
-        escalation_prompt += f"- Labels: {json.dumps(alert.get('labels', {}))}\n\n"
-        escalation_prompt += "TASK:\n"
-        escalation_prompt += "1. Investigate this alert type\n"
-        escalation_prompt += "2. Determine the root cause and best fix approach\n"
-        escalation_prompt += "3. Create a diagnostic runbook for future occurrences\n\n"
-        escalation_prompt += "REQUIRED RUNBOOK FORMAT:\n"
-        escalation_prompt += "Return a runbook definition as JSON at the end with this structure:\n"
-        escalation_prompt += '{"runbook_name": "...", "runbook_description": "...", '
-        escalation_prompt += '"triggers": {"alert_patterns": [...], "keywords": [...]}, '
-        escalation_prompt += '"diagnosis_checks": [{"name": "...", "command": "kubectl ...", "look_for": [...]}], '
-        escalation_prompt += '"fix_steps": [{"name": "...", "command": "..."}], '
-        escalation_prompt += '"validation": [{"name": "...", "command": "...", "expected": "..."}]}\n\n'
-        escalation_prompt += "Provide your analysis first, then the runbook JSON."
+            # For SIMILAR matches, flag for potential runbook update
+            if match_type == "SIMILAR":
+                solutions[0]["propose_update"] = True
+                solutions[0]["similarity_score"] = runbook_match.get("score", 0)
 
-        # Use priority queue based on alert severity
-        severity = alert.get("severity", "warning")
-        result = await call_claude_agent(
-            escalation_prompt,
-            context={"alert": alert},
-            allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch"],
-            priority=severity_to_priority(severity)
+            return {"solutions": solutions, "handled_locally": True, "match_type": match_type}
+
+        # =====================================================================
+        # Case 3: NO_MATCH - Escalate to Brain Trust
+        # =====================================================================
+        logger.info("No matching runbook (score < 0.80) - escalating to Brain Trust for human review")
+
+        # Use Ollama to generate initial analysis and suggestions
+        analysis_prompt = f"""Analyze this alert and provide suggestions:
+
+ALERT: {alert.get('alertname', 'Unknown')}
+SEVERITY: {alert.get('severity', 'warning')}
+DESCRIPTION: {alert.get('description', 'No description')}
+NAMESPACE: {alert.get('namespace', 'default')}
+LABELS: {json.dumps(alert.get('labels', {}))}
+
+Provide:
+1. Likely root cause
+2. Recommended investigation steps
+3. Potential fix approaches (if any are obvious)
+
+Format as JSON with fields: root_cause, investigation_steps, fix_suggestions"""
+
+        ollama_analysis = await call_litellm([
+            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+            {"role": "user", "content": analysis_prompt}
+        ])
+
+        # Try to parse Ollama's suggestions
+        suggestions = []
+        try:
+            clean_result = ollama_analysis.strip()
+            if "```json" in clean_result:
+                clean_result = clean_result.split("```json")[1].split("```")[0]
+            elif "```" in clean_result:
+                clean_result = clean_result.split("```")[1].split("```")[0]
+            parsed = json.loads(clean_result.strip())
+
+            if parsed.get("fix_suggestions"):
+                for i, fix in enumerate(parsed["fix_suggestions"][:3]):
+                    suggestions.append({
+                        "name": f"Suggestion {i+1}: {fix if isinstance(fix, str) else fix.get('name', 'Fix')}",
+                        "description": fix if isinstance(fix, str) else fix.get('description', str(fix)),
+                        "risk": "unknown"
+                    })
+        except:
+            # If parsing fails, include raw analysis as suggestion
+            suggestions = [{
+                "name": "Ollama Analysis",
+                "description": ollama_analysis[:800] if ollama_analysis else "Analysis failed",
+                "risk": "unknown"
+            }]
+
+        # Escalate to Brain Trust
+        escalation_result = await escalate_to_brain_trust(
+            alert=alert,
+            context={
+                "assessment": assessment,
+                "ollama_analysis": ollama_analysis[:2000] if ollama_analysis else None
+            },
+            reason="No matching runbook found (score < 0.80 threshold)",
+            suggestions=suggestions
         )
 
-        # Parse and store new runbook from Claude
-        new_runbook = parse_runbook_from_claude(result, alert)
-        if new_runbook:
-            await store_runbook_qdrant(new_runbook)
-            logger.info(f"Stored new diagnostic runbook: {new_runbook.name}")
+        # Return escalation status as solution
+        solutions = [{
+            "name": f"Brain Trust Review Required: {alert.get('alertname', 'Unknown')}",
+            "description": f"No matching runbook found. Escalated to Brain Trust for human analysis and runbook creation.",
+            "impact": "pending",
+            "risk": "pending",
+            "source": "brain_trust_escalation",
+            "escalation_document": escalation_result.get("document_id"),
+            "ollama_suggestions": suggestions,
+            "requires_human_action": True
+        }]
 
-        # Parse solutions from Claude
-        solutions = _parse_solutions_from_response(result, alert)
-        return {"solutions": solutions, "handled_locally": False, "escalated_to_claude": True}
+        return {"solutions": solutions, "handled_locally": False, "escalated_to_brain_trust": True}
 
     def _parse_solutions_from_response(result: str, alert: dict) -> list:
         """Parse solutions from Claude's response."""
@@ -2528,11 +2932,24 @@ spec:
               value: "gemini/gemini-2.0-flash"
             - name: EMBEDDING_MODEL
               value: "embeddings"
-            # Thresholds
+            # Tiered Runbook Matching Thresholds
+            # >= EXACT: Execute as-is
+            # >= SIMILAR (but < EXACT): Execute with tweaks, propose runbook update
+            # < SIMILAR: Escalate to Brain Trust (humans via Outline)
+            - name: RUNBOOK_EXACT_THRESHOLD
+              value: "0.95"
+            - name: RUNBOOK_SIMILAR_THRESHOLD
+              value: "0.80"
+            # Legacy threshold (backward compatibility, equals SIMILAR)
             - name: RUNBOOK_MATCH_THRESHOLD
-              value: "0.75"
+              value: "0.80"
             - name: CONTEXT_CACHE_TTL
               value: "3600"
+            # Brain Trust Escalation (Outline wiki)
+            - name: BRAIN_TRUST_COLLECTION_ID
+              value: "9bd8c738-4505-494a-a867-74349a887dc6"
+            - name: OUTLINE_MCP_URL
+              value: "http://outline-mcp:8000"
           # Import ALL MCP server URLs from shared ConfigMap
           # Source: /home/.mcp.json via sync-mcp-config.sh
           envFrom:
