@@ -4,57 +4,21 @@ metadata:
   name: openwebui
   namespace: ai-platform
   labels:
-    app.kubernetes.io/name: openwebui
-    app.kubernetes.io/component: ui
+    app: openwebui
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: openwebui
+      app: openwebui
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: openwebui
-        app.kubernetes.io/component: ui
+        app: openwebui
     spec:
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
-        seccompProfile:
-          type: RuntimeDefault
-      initContainers:
-        - name: fix-permissions
-          image: busybox:1.36
-          command: ['sh', '-c', 'chown -R 1000:1000 /app/backend/data || true']
-          volumeMounts:
-            - name: openwebui-data
-              mountPath: /app/backend/data
-          securityContext:
-            runAsUser: 0
-            runAsNonRoot: false
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-              add:
-                - CHOWN
-            seccompProfile:
-              type: RuntimeDefault
       containers:
         - name: openwebui
           image: ghcr.io/open-webui/open-webui:main
           imagePullPolicy: Always
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 1000
-            runAsGroup: 1000
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-            seccompProfile:
-              type: RuntimeDefault
           ports:
             - name: http
               containerPort: 8080
@@ -63,26 +27,24 @@ spec:
             # Ollama connection (same namespace)
             - name: OLLAMA_BASE_URL
               value: "http://ollama:11434"
-            # Authentication disabled for homelab use
-            - name: WEBUI_AUTH
+            # Secret key for sessions
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: WEBUI_SECRET_KEY
+            # Disable signup, single user mode for homelab
+            - name: ENABLE_SIGNUP
               value: "false"
-            # Database path
-            - name: DATA_DIR
-              value: "/app/backend/data"
-            # Disable telemetry
-            - name: ANONYMIZED_TELEMETRY
+            - name: DEFAULT_USER_ROLE
+              value: "user"
+            # Enable Ollama, disable OpenAI
+            - name: ENABLE_OPENAI_API
               value: "false"
-            - name: SCARF_NO_ANALYTICS
+            - name: ENABLE_OLLAMA_API
               value: "true"
-            - name: DO_NOT_TRACK
-              value: "true"
-            # Enable document upload for RAG
-            - name: ENABLE_RAG_WEB_SEARCH
-              value: "false"
-            - name: ENABLE_RAG_HYBRID_SEARCH
-              value: "false"
           volumeMounts:
-            - name: openwebui-data
+            - name: data
               mountPath: /app/backend/data
           resources:
             requests:
@@ -94,18 +56,16 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: http
-            initialDelaySeconds: 60
+              port: 8080
+            initialDelaySeconds: 30
             periodSeconds: 30
-            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /health
-              port: http
-            initialDelaySeconds: 30
+              port: 8080
+            initialDelaySeconds: 10
             periodSeconds: 10
-            failureThreshold: 10
       volumes:
-        - name: openwebui-data
+        - name: data
           persistentVolumeClaim:
             claimName: openwebui-data

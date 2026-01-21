@@ -4,11 +4,11 @@ metadata:
   name: openwebui
   namespace: ai-platform
   labels:
-    app.kubernetes.io/name: openwebui
+    app: openwebui
 spec:
   type: NodePort
   selector:
-    app.kubernetes.io/name: openwebui
+    app: openwebui
   ports:
     - name: http
       port: 8080

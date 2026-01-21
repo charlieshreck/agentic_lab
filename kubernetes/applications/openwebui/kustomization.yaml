@@ -7,8 +7,3 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
-
-labels:
-  - pairs:
-      app.kubernetes.io/part-of: ai-platform
-    includeSelectors: false
