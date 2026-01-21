@@ -109,7 +109,9 @@ spec:
 
                   # Clean up old backups (keep 14 days)
                   echo "=== Cleaning old backups ==="
-                  CUTOFF_DATE=$(date -d "14 days ago" +%Y%m%d 2>/dev/null || date -v-14d +%Y%m%d)
+                  # Calculate cutoff date (14 days ago) using epoch seconds (busybox compatible)
+                  CUTOFF_EPOCH=$(($(date +%s) - 86400*14))
+                  CUTOFF_DATE=$(date -d "@${CUTOFF_EPOCH}" +%Y%m%d 2>/dev/null || date -D %s -d "${CUTOFF_EPOCH}" +%Y%m%d)
 
                   aws s3 ls "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/" \
                     --endpoint-url "${S3_ENDPOINT}" | while read -r line; do
