@@ -173,6 +173,10 @@ metadata:
   namespace: ai-platform
   labels:
     app.kubernetes.io/name: outline
+  annotations:
+    # Prevent ArgoCD from deleting this PVC during sync/prune
+    argocd.argoproj.io/sync-options: Delete=false
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
     - ReadWriteOnce
