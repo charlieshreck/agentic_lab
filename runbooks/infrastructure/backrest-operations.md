@@ -69,7 +69,8 @@ Backrest uses **SSH commandPrefix** to run restic on remote hosts. This means re
 | **iac-daily** | 10.10.0.175 | /home, /root, /etc | /root/.cache, /home/*/.cache, /root/.local/share/nvim | 3AM daily | 14 daily, 4 weekly |
 | **plex-daily** | 10.10.0.50 | /opt/plex/config/Library/Application Support/Plex Media Server, /opt/plex/compose | Cache, Logs directories | 4AM daily | 7 daily, 4 weekly |
 | **unifi-daily** | 10.10.0.51 | Container volumes (uosserver_data, uosserver_var_lib_unifi) | Logs | 5AM daily | 7 daily, 4 weekly |
-| **truenas-weekly** | 10.20.0.103 | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
+| **truenas-hdd-weekly** | 10.20.0.103 | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
+| **truenas-media-weekly** | 10.20.0.100 | /root | - | 7AM Sundays | 4 weekly, 2 monthly |
 
 ### Cron Expressions
 
@@ -78,7 +79,8 @@ Backrest uses **SSH commandPrefix** to run restic on remote hosts. This means re
 | iac-daily | `0 3 * * *` | Every day at 3:00 AM |
 | plex-daily | `0 4 * * *` | Every day at 4:00 AM |
 | unifi-daily | `0 5 * * *` | Every day at 5:00 AM |
-| truenas-weekly | `0 6 * * 0` | Every Sunday at 6:00 AM |
+| truenas-hdd-weekly | `0 6 * * 0` | Every Sunday at 6:00 AM |
+| truenas-media-weekly | `0 7 * * 0` | Every Sunday at 7:00 AM |
 
 ### How SSH CommandPrefix Works
 
@@ -95,6 +97,16 @@ This causes Backrest to execute: `ssh root@10.10.0.50 restic backup /path/to/bac
 - `restic` binary installed (installed via package manager)
 - SSH public key in `/root/.ssh/authorized_keys`
 - Network access to Garage S3 (10.20.0.103:30188)
+
+### Path Validation Workaround
+
+Backrest validates that backup paths exist **locally** before running SSH commands. For remote backups (Plex, UniFi), we use an init container to create empty directory structures in the pod that match the remote paths. This satisfies path validation while the actual backup runs on the remote host via SSH.
+
+The init container creates:
+- `/opt/plex/config/Library/Application Support/Plex Media Server`
+- `/opt/plex/compose`
+- `/home/uosserver/.local/share/containers/storage/volumes/uosserver_data/_data`
+- `/home/uosserver/.local/share/containers/storage/volumes/uosserver_var_lib_unifi/_data`
 
 ## SSH Configuration
 

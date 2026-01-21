@@ -47,6 +47,29 @@ spec:
       labels:
         app: backrest
     spec:
+      initContainers:
+        # Create directory structure for remote backup path validation
+        # Backrest validates paths exist locally before running SSH backups
+        - name: init-backup-paths
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              # Plex paths
+              mkdir -p "/opt/plex/config/Library/Application Support/Plex Media Server"
+              mkdir -p "/opt/plex/compose"
+              # UniFi paths
+              mkdir -p "/home/uosserver/.local/share/containers/storage/volumes/uosserver_data/_data"
+              mkdir -p "/home/uosserver/.local/share/containers/storage/volumes/uosserver_var_lib_unifi/_data"
+              echo "Backup path directories created"
+          volumeMounts:
+            - name: backup-paths
+              mountPath: /opt
+              subPath: opt
+            - name: backup-paths
+              mountPath: /home
+              subPath: home
       containers:
         - name: backrest
           image: garethgeorge/backrest:latest
@@ -83,6 +106,12 @@ spec:
             - name: ssh-keys
               mountPath: /root/.ssh
               readOnly: true
+            - name: backup-paths
+              mountPath: /opt
+              subPath: opt
+            - name: backup-paths
+              mountPath: /home/uosserver
+              subPath: home/uosserver
           resources:
             requests:
               cpu: 100m
@@ -101,6 +130,8 @@ spec:
           secret:
             secretName: backrest-ssh-keys
             defaultMode: 0600
+        - name: backup-paths
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
