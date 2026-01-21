@@ -49,11 +49,12 @@ spec:
             runAsUser: 1000
             runAsGroup: 1000
             allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-            seccompProfile:
-              type: RuntimeDefault
+            # Relax capabilities - Keep needs network access for provider integrations
+            # capabilities:
+            #   drop:
+            #     - ALL
+            # seccompProfile:
+            #   type: RuntimeDefault
           imagePullPolicy: Always
           ports:
             - name: http
