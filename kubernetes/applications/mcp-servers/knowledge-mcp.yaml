@@ -29,8 +29,8 @@ data:
     logger = logging.getLogger(__name__)
 
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
-    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
+    OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
 
     mcp = FastMCP(
         name="knowledge-mcp",
@@ -44,14 +44,14 @@ data:
     # ============================================================================
 
     async def get_embedding(text: str) -> List[float]:
-        """Get embeddings via LiteLLM (Gemini text-embedding-004)."""
+        """Get embeddings via Ollama (nomic-embed-text, 768 dimensions)."""
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{LITELLM_URL}/v1/embeddings",
-                json={"model": EMBEDDING_MODEL, "input": text}
+                f"{OLLAMA_URL}/api/embeddings",
+                json={"model": EMBEDDING_MODEL, "prompt": text}
             )
             response.raise_for_status()
-            return response.json()["data"][0]["embedding"]
+            return response.json()["embedding"]
 
     async def qdrant_search(collection: str, vector: List[float], limit: int = 5, filter_: Optional[dict] = None) -> List[dict]:
         """Search Qdrant collection with optional filter."""
@@ -1425,7 +1425,7 @@ data:
         logger.info(f"Starting knowledge MCP on port {port}")
         logger.info("Collections: runbooks, documentation, entities, decisions, agent_events")
         logger.info(f"Qdrant URL: {QDRANT_URL}")
-        logger.info(f"LiteLLM URL: {LITELLM_URL}")
+        logger.info(f"Ollama URL: {OLLAMA_URL}")
 
         rest_routes = [
             Route("/health", rest_health, methods=["GET"]),
@@ -1500,10 +1500,10 @@ spec:
               value: "8000"
             - name: QDRANT_URL
               value: "http://qdrant:6333"
-            - name: LITELLM_URL
-              value: "http://litellm:4000"
+            - name: OLLAMA_URL
+              value: "http://ollama:11434"
             - name: EMBEDDING_MODEL
-              value: "embeddings"
+              value: "nomic-embed-text"
           volumeMounts:
             - name: code
               mountPath: /code

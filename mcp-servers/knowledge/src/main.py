@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
 
 mcp = FastMCP(
     name="knowledge-mcp",
@@ -90,14 +90,14 @@ class DeviceTypeInfo(BaseModel):
 
 
 async def get_embedding(text: str) -> List[float]:
-    """Get embedding vector from LiteLLM (Gemini text-embedding-004)."""
+    """Get embedding vector from Ollama (nomic-embed-text, 768 dimensions)."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
-            f"{LITELLM_URL}/v1/embeddings",
-            json={"model": EMBEDDING_MODEL, "input": text}
+            f"{OLLAMA_URL}/api/embeddings",
+            json={"model": EMBEDDING_MODEL, "prompt": text}
         )
         response.raise_for_status()
-        return response.json()["data"][0]["embedding"]
+        return response.json()["embedding"]
 
 
 async def qdrant_search(
