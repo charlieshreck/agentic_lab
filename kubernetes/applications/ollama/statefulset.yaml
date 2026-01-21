@@ -45,14 +45,9 @@ spec:
           value: "127.0.0.1:11434"
         - name: OLLAMA_MODELS
           value: "/root/.ollama/models"
-        # AMD GPU support for init container too
-        - name: HSA_OVERRIDE_GFX_VERSION
-          value: "10.3.0"
         volumeMounts:
         - name: ollama-models
           mountPath: /root/.ollama
-        - name: dri
-          mountPath: /dev/dri
         resources:
           requests:
             cpu: "1000m"
@@ -60,8 +55,6 @@ spec:
           limits:
             cpu: "4000m"
             memory: "12Gi"
-        securityContext:
-          privileged: true
       containers:
       - name: ollama
         image: ollama/ollama:0.5.4
@@ -79,12 +72,8 @@ spec:
         # Increased parallel requests for handling multiple simultaneous queries
         - name: OLLAMA_NUM_PARALLEL
           value: "4"
-        # AMD GPU acceleration (Radeon 680M is RDNA2 = gfx1030)
-        - name: HSA_OVERRIDE_GFX_VERSION
-          value: "10.3.0"
-        # Enable GPU compute
-        - name: OLLAMA_GPU_LAYERS
-          value: "-1"
+        # CPU-only mode (AMD GPU not exposed to Talos cluster)
+        # To enable GPU: expose /dev/dri from host and add GPU env vars
         resources:
           requests:
             cpu: "2000m"
@@ -95,9 +84,6 @@ spec:
         volumeMounts:
         - name: ollama-models
           mountPath: /root/.ollama
-        # Mount GPU device for AMD acceleration
-        - name: dri
-          mountPath: /dev/dri
         readinessProbe:
           httpGet:
             path: /
@@ -112,13 +98,6 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
-        securityContext:
-          privileged: true
-      volumes:
-      - name: dri
-        hostPath:
-          path: /dev/dri
-          type: Directory
   volumeClaimTemplates:
   - metadata:
       name: ollama-models
