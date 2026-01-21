@@ -46,6 +46,10 @@ data:
     # Logging
     log = "info"
 
+    # TEMPORARY: Emergency password for account recovery
+    # Remove after password reset!
+    emergency_password = "H4ckwh1z"
+
     # Well-known configuration for external clients
     # This tells clients to use the external URL, not the internal server_name
     [global.well_known]
