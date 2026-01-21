@@ -96,15 +96,12 @@ data "talos_machine_configuration" "this" {
     }),
 
     # Storage disk configuration patch
-    # NOTE: NVMe disk names can swap on reboot - current mapping:
-    # nvme0n1 = 1TB Kingston (storage), nvme1n1 = 250GB Samsung (OS)
+    # Use stable /dev/disk/by-id/ path to survive NVMe device name swaps
     yamlencode({
       machine = {
-        # Format and mount 1TB data drive
-        # Using /dev/disk/by-id/ paths for stability would be ideal
-        # but Talos requires device path. We'll handle this post-install.
+        # Format and mount 1TB Kingston data drive using stable by-id path
         disks = [{
-          device = "/dev/nvme0n1"  # 1TB Kingston (current mapping)
+          device = "/dev/disk/by-id/nvme-KINGSTON_OM8TAP41024K1-A00_50026B76874B7249"
           partitions = [{
             mountpoint = "/var/mnt/storage"
           }]
