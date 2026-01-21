@@ -42,7 +42,7 @@
 | Monit K8s PVCs | Velero | Daily 2:30AM + Weekly Sunday 3:30AM | 7d + 30d | Garage |
 | IAC LXC (100) | Backrest | Daily 3AM | 14d + 4w | Garage |
 | Plex VM (450) | Backrest | Daily 4AM | 7d + 4w | Garage |
-| UniFi VM (451) | ❌ Disabled | - | - | - |
+| UniFi VM (451) | Backrest | Daily 5AM | 7d + 4w | Garage |
 | TrueNAS configs | Backrest | Weekly Sunday 6AM | 4w + 2m | Garage |
 | Critical VMs | PBS | Weekly Sunday 2AM | 4 weekly | TrueNAS PBS |
 
@@ -71,9 +71,8 @@ Backups run via SSH commandPrefix - restic executes on the remote host and strea
 |------|------|----------|-------|-----------|
 | **iac-daily** | 10.10.0.175 | Daily 3AM | /home, /root, /etc | 14d, 4w |
 | **plex-daily** | 10.10.0.50 | Daily 4AM | /opt/plex/config/..., /opt/plex/compose | 7d, 4w |
+| **unifi-daily** | 10.10.0.51 | Daily 5AM | UniFi OS container volumes (~800MB) | 7d, 4w |
 | **truenas-weekly** | 10.20.0.103 | Sunday 6AM | /root | 4w, 2m |
-
-**Note**: UniFi VM (10.10.0.51) backup is currently **disabled** - SSH access requires password authentication. Needs manual SSH key setup.
 
 - **UI**: https://backrest.kernow.io or http://10.20.0.40:31115
 - **Backend**: Garage S3 (backrest bucket)

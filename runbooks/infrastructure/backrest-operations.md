@@ -68,10 +68,8 @@ Backrest uses **SSH commandPrefix** to run restic on remote hosts. This means re
 |------|------|-------|----------|----------|-----------|
 | **iac-daily** | 10.10.0.175 | /home, /root, /etc | /root/.cache, /home/*/.cache, /root/.local/share/nvim | 3AM daily | 14 daily, 4 weekly |
 | **plex-daily** | 10.10.0.50 | /opt/plex/config/Library/Application Support/Plex Media Server, /opt/plex/compose | Cache, Logs directories | 4AM daily | 7 daily, 4 weekly |
+| **unifi-daily** | 10.10.0.51 | Container volumes (uosserver_data, uosserver_var_lib_unifi) | Logs | 5AM daily | 7 daily, 4 weekly |
 | **truenas-weekly** | 10.20.0.103 | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
-
-**Disabled Plans**:
-- **unifi-daily**: UniFi VM (10.10.0.51) requires password auth - SSH key not installed. Needs manual setup.
 
 ### Cron Expressions
 
@@ -79,6 +77,7 @@ Backrest uses **SSH commandPrefix** to run restic on remote hosts. This means re
 |------|------|---------|
 | iac-daily | `0 3 * * *` | Every day at 3:00 AM |
 | plex-daily | `0 4 * * *` | Every day at 4:00 AM |
+| unifi-daily | `0 5 * * *` | Every day at 5:00 AM |
 | truenas-weekly | `0 6 * * 0` | Every Sunday at 6:00 AM |
 
 ### How SSH CommandPrefix Works
@@ -132,7 +131,7 @@ The public key must be in `/root/.ssh/authorized_keys` on each target:
 |------|-----|--------|
 | IAC LXC | 10.10.0.175 | ✅ Configured |
 | Plex VM | 10.10.0.50 | ✅ Configured |
-| UniFi VM | 10.10.0.51 | ❌ Needs manual setup |
+| UniFi VM | 10.10.0.51 | ✅ Configured |
 | TrueNAS-HDD | 10.20.0.103 | ✅ Local (no SSH needed) |
 
 ### Adding SSH Key to New Host
@@ -415,26 +414,3 @@ The restic repository password is stored in Backrest's encrypted config. If you 
 | K8s Secret `backrest-ssh-keys` | id_ed25519, id_ed25519.pub, config |
 
 **Note**: SSH keys are stored directly in Kubernetes secret rather than Infisical due to API sync issues during initial setup.
-
-## Enabling UniFi Backup
-
-To enable the UniFi backup plan (currently disabled):
-
-1. SSH to the UniFi VM (requires password - no SSH key access currently):
-   ```bash
-   ssh root@10.10.0.51  # Will prompt for password
-   ```
-
-2. Add the SSH public key:
-   ```bash
-   mkdir -p /root/.ssh
-   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJiIOVl9I2skpBkJM+N+VVTTW06LNGKV+46o+P0f3AAZ backrest-backup@kernow.io" >> /root/.ssh/authorized_keys
-   chmod 600 /root/.ssh/authorized_keys
-   ```
-
-3. Install restic:
-   ```bash
-   apt update && apt install -y restic
-   ```
-
-4. Update Backrest config to add the unifi-daily plan (via Backrest UI)
