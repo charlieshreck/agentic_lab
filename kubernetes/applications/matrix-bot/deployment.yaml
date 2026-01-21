@@ -17,6 +17,19 @@ spec:
         app: matrix-bot
         component: interaction-layer
     spec:
+      initContainers:
+      - name: wait-for-conduit
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Conduit to be ready..."
+          until wget -q -O- http://conduit:6167/_matrix/client/versions; do
+            echo "Conduit not ready, retrying in 5s..."
+            sleep 5
+          done
+          echo "Conduit is ready!"
       containers:
       - name: matrix-bot
         image: python:3.11-slim
@@ -46,10 +59,10 @@ spec:
           name: http
         resources:
           requests:
-            memory: "128Mi"
-            cpu: "50m"
+            memory: "256Mi"
+            cpu: "100m"
           limits:
-            memory: "512Mi"
+            memory: "768Mi"
             cpu: "500m"
         volumeMounts:
         - name: code
