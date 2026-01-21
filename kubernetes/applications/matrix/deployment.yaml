@@ -36,7 +36,7 @@ spec:
             add: ["CHOWN"]
       containers:
       - name: conduit
-        image: matrixconduit/matrix-conduit:v0.10.2
+        image: matrixconduit/matrix-conduit:v0.10.11
         ports:
         - containerPort: 6167
           name: http
