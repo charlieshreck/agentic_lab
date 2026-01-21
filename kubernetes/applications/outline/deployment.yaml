@@ -84,17 +84,25 @@ spec:
                   name: outline-credentials
                   key: UTILS_SECRET
 
-            # GitHub OAuth
-            - name: GITHUB_CLIENT_ID
+            # Discord OAuth
+            - name: DISCORD_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: outline-credentials
-                  key: GITHUB_CLIENT_ID
-            - name: GITHUB_CLIENT_SECRET
+                  key: DISCORD_CLIENT_ID
+            - name: DISCORD_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: outline-credentials
-                  key: GITHUB_CLIENT_SECRET
+                  key: DISCORD_CLIENT_SECRET
+            # DISCORD_SERVER_ID restricts login to members of a specific Discord server
+            # Without this, any Discord user can create a new team on re-auth
+            - name: DISCORD_SERVER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: outline-credentials
+                  key: DISCORD_SERVER_ID
+                  optional: true
 
             # File storage
             - name: FILE_STORAGE
