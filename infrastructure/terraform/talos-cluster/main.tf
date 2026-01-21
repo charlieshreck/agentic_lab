@@ -42,7 +42,9 @@ data "talos_machine_configuration" "this" {
     yamlencode({
       machine = {
         install = {
-          image = "ghcr.io/siderolabs/installer:${var.talos_version}"
+          # Factory image with AMD GPU extensions (amdgpu + amd-ucode)
+          # Schematic: https://factory.talos.dev/schematics/b6ab12edc37d4a92a0705f4f2f12952d5a1a3f38b51783422b56810b60e230fd
+          image = "factory.talos.dev/installer/b6ab12edc37d4a92a0705f4f2f12952d5a1a3f38b51783422b56810b60e230fd:${var.talos_version}"
           wipe  = true  # Force clean install
           # Use stable disk selector by model name (survives reboots)
           diskSelector = {
@@ -61,13 +63,12 @@ data "talos_machine_configuration" "this" {
           }]
           nameservers = var.dns_servers
         }
-        # NOTE: amdgpu module requires custom Talos extension
-        # Uncomment when using factory.talos.dev image with AMD GPU extension
-        # kernel = {
-        #   modules = [{
-        #     name = "amdgpu"
-        #   }]
-        # }
+        # AMD GPU support - load amdgpu kernel module
+        kernel = {
+          modules = [{
+            name = "amdgpu"
+          }]
+        }
         sysctls = {
           # Optimize for AI workloads
           "vm.max_map_count" = "262144"  # For Qdrant
