@@ -15,7 +15,7 @@ data:
     logging.basicConfig(level=logging.INFO)
     HOMEPAGE_HOST = os.environ.get("HOMEPAGE_HOST", "http://homepage.default.svc:3000")
 
-    mcp = FastMCP(name="homepage-mcp", instructions="MCP server for Homepage dashboard integration.")
+    mcp = FastMCP(name="homepage-mcp", instructions="MCP server for Homepage dashboard integration.", stateless_http=True)
 
     @mcp.tool()
     async def list_services() -> Dict[str, Any]:

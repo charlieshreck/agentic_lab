@@ -31,7 +31,8 @@ data:
 
     mcp = FastMCP(
         name="keep_mcp",
-        instructions="MCP server for Keep alert aggregation platform. Keep receives alerts from AlertManager, Gatus, TrueNAS, Proxmox and forwards to LangGraph after deduplication/correlation. Capabilities: providers, workflows, alerts, incidents, dedup rules, correlation rules."
+        instructions="MCP server for Keep alert aggregation platform. Keep receives alerts from AlertManager, Gatus, TrueNAS, Proxmox and forwards to LangGraph after deduplication/correlation. Capabilities: providers, workflows, alerts, incidents, dedup rules, correlation rules.",
+        stateless_http=True
     )
 
     # ==========================================================================

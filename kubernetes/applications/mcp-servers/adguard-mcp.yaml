@@ -26,7 +26,8 @@ data:
 
     mcp = FastMCP(
         name="adguard_mcp",
-        instructions="MCP server for AdGuard Home DNS. Provides tools for DNS statistics, query logs, and filtering status."
+        instructions="MCP server for AdGuard Home DNS. Provides tools for DNS statistics, query logs, and filtering status.",
+        stateless_http=True
     )
 
     class ResponseFormat(str, Enum):

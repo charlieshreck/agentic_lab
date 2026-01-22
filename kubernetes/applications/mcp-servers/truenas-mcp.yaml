@@ -35,7 +35,8 @@ data:
 
     mcp = FastMCP(
         name="truenas_mcp",
-        instructions="MCP server for TrueNAS storage. Supports two instances: 'hdd' (bulk storage) and 'media' (media files). List instances first to see available options."
+        instructions="MCP server for TrueNAS storage. Supports two instances: 'hdd' (bulk storage) and 'media' (media files). List instances first to see available options.",
+        stateless_http=True
     )
 
     class ResponseFormat(str, Enum):

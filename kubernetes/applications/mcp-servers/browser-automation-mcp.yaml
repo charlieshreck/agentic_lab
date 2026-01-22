@@ -35,7 +35,8 @@ data:
 
     mcp = FastMCP(
         name="browser-automation-mcp",
-        instructions="MCP server for browser automation. Navigate pages, take screenshots, click elements, type text."
+        instructions="MCP server for browser automation. Navigate pages, take screenshots, click elements, type text.",
+        stateless_http=True
     )
 
     class NavigateResult(BaseModel):

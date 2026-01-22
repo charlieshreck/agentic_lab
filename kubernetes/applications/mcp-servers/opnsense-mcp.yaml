@@ -48,7 +48,8 @@ data:
         3. reconfigure_caddy() - Apply changes
 
         Use with care - incorrect firewall/DNS/proxy changes can cause connectivity issues.
-        """
+        """,
+        stateless_http=True
     )
 
 

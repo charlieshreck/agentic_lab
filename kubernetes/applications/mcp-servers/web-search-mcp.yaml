@@ -30,7 +30,8 @@ data:
 
     mcp = FastMCP(
         name="web-search-mcp",
-        instructions="MCP server for web search using SearXNG. Search web, news, images, and fetch page content."
+        instructions="MCP server for web search using SearXNG. Search web, news, images, and fetch page content.",
+        stateless_http=True
     )
 
     class SearchResult(BaseModel):

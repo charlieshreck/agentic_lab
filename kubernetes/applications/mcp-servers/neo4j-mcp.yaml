@@ -36,7 +36,8 @@ data:
         instructions="""MCP server for Neo4j knowledge graph operations.
         Use for relationship queries, dependency analysis, impact assessment.
         KEY TOOLS: query_graph, get_entity_context, find_dependencies, get_impact_analysis
-        Neo4j: relationships, dependencies. Qdrant: semantic similarity, text search."""
+        Neo4j: relationships, dependencies. Qdrant: semantic similarity, text search.""",
+        stateless_http=True
     )
 
     class QueryResult(BaseModel):

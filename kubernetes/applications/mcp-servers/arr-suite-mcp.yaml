@@ -76,7 +76,8 @@ data:
         - Tautulli: Plex statistics (activity, history, stats)
         - Transmission: Torrent downloads (list, add, pause, remove)
         - SABnzbd: Usenet downloads (queue, history, pause)
-        """
+        """,
+        stateless_http=True
     )
 
     # ==========================================================================

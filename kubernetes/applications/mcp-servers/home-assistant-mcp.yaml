@@ -34,7 +34,8 @@ data:
         instructions="""Comprehensive Home Assistant MCP server.
         Supports: lights, switches, climate, covers, fans, locks, scenes, scripts,
         media players, automations, and notifications.
-        Use list_entities(domain) to discover available devices."""
+        Use list_entities(domain) to discover available devices.""",
+        stateless_http=True
     )
 
     # ============================================================================

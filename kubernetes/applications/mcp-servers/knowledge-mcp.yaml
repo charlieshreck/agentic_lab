@@ -36,7 +36,8 @@ data:
         name="knowledge-mcp",
         instructions="""MCP server for comprehensive knowledge base operations.
         Collections: runbooks, documentation, entities, decisions, agent_events.
-        Use for semantic search, entity lookup, runbook management, and decision tracking."""
+        Use for semantic search, entity lookup, runbook management, and decision tracking.""",
+        stateless_http=True
     )
 
     # ============================================================================

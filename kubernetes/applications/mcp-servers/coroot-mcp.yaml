@@ -47,7 +47,8 @@ data:
 
     mcp = FastMCP(
         name="coroot-mcp",
-        instructions="MCP server for Coroot observability. Query metrics, anomalies, service dependencies, and alerts."
+        instructions="MCP server for Coroot observability. Query metrics, anomalies, service dependencies, and alerts.",
+        stateless_http=True
     )
 
     class ServiceMetrics(BaseModel):

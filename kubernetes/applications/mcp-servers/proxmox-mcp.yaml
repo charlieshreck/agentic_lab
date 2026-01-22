@@ -27,7 +27,8 @@ data:
 
     mcp = FastMCP(
         name="proxmox_mcp",
-        instructions="MCP server for Proxmox VE hypervisor management. Provides tools to list nodes, VMs, containers, and manage VM lifecycle."
+        instructions="MCP server for Proxmox VE hypervisor management. Provides tools to list nodes, VMs, containers, and manage VM lifecycle.",
+        stateless_http=True
     )
 
     # Enums

@@ -23,7 +23,8 @@ data:
 
     mcp = FastMCP(
         name="reddit-mcp",
-        instructions="Reddit MCP server for browsing subreddits, searching posts, and reading discussions."
+        instructions="Reddit MCP server for browsing subreddits, searching posts, and reading discussions.",
+        stateless_http=True
     )
 
     async def _reddit_get(endpoint: str) -> dict:

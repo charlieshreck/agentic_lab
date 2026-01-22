@@ -21,7 +21,7 @@ data:
     INFISICAL_WORKSPACE_ID = os.environ.get("INFISICAL_WORKSPACE_ID", "")
     INFISICAL_ENVIRONMENT = os.environ.get("INFISICAL_ENVIRONMENT", "prod")
 
-    mcp = FastMCP(name="infisical-mcp", instructions="MCP server for Infisical secrets management. Supports listing, reading, and creating secrets.")
+    mcp = FastMCP(name="infisical-mcp", instructions="MCP server for Infisical secrets management. Supports listing, reading, and creating secrets.", stateless_http=True)
 
     _access_token: Optional[str] = None
 

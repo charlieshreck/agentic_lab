@@ -23,7 +23,8 @@ data:
 
     mcp = FastMCP(
         name="wikipedia-mcp",
-        instructions="Wikipedia MCP server for searching articles, getting summaries, and retrieving knowledge."
+        instructions="Wikipedia MCP server for searching articles, getting summaries, and retrieving knowledge.",
+        stateless_http=True
     )
 
     async def _wiki_rest(endpoint: str) -> dict:

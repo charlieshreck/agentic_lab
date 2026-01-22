@@ -36,7 +36,8 @@ data:
         instructions="""MCP server for Tasmota smart device control.
         Provides tools to control power, configure WiFi/MQTT, and manage devices.
         Tasmota devices expose HTTP API at /cm?cmnd=<command>.
-        Common commands: Power, Status, WifiConfig, MqttHost, Upgrade."""
+        Common commands: Power, Status, WifiConfig, MqttHost, Upgrade.""",
+        stateless_http=True
     )
 
     def load_devices() -> Dict[str, dict]:

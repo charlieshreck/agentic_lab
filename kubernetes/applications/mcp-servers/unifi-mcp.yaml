@@ -97,7 +97,8 @@ data:
         - Configure RF optimization settings
 
         IMPORTANT: Destructive operations (delete, block, restart) require confirmation=true parameter.
-        """
+        """,
+        stateless_http=True
     )
 
     # === Input Models ===

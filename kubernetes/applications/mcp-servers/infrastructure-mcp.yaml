@@ -100,7 +100,8 @@ data:
         name="infrastructure-mcp",
         instructions="""MCP server for comprehensive Kubernetes cluster operations.
         Provides tools for pods, deployments, services, jobs, events, ArgoCD apps, and more.
-        Manages multiple clusters: agentic (default), prod. Use cluster parameter to target specific clusters."""
+        Manages multiple clusters: agentic (default), prod. Use cluster parameter to target specific clusters.""",
+        stateless_http=True
     )
 
     # ============================================================================

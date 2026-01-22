@@ -25,7 +25,8 @@ data:
 
     mcp = FastMCP(
         name="github-mcp",
-        instructions="GitHub MCP server for repository operations, issues, PRs, and code search."
+        instructions="GitHub MCP server for repository operations, issues, PRs, and code search.",
+        stateless_http=True
     )
 
     class ResponseFormat(str, Enum):

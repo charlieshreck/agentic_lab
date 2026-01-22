@@ -28,7 +28,8 @@ data:
 
     mcp = FastMCP(
         name="vikunja-mcp",
-        instructions="MCP for managing tasks, ideas, and planning boards in Vikunja."
+        instructions="MCP for managing tasks, ideas, and planning boards in Vikunja.",
+        stateless_http=True
     )
 
     # ============================================================================

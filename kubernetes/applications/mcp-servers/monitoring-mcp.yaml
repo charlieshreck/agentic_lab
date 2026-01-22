@@ -37,7 +37,8 @@ data:
 
     mcp = FastMCP(
         name="monitoring-mcp",
-        instructions="Query metrics, logs, alerts, and dashboards from the monitoring stack."
+        instructions="Query metrics, logs, alerts, and dashboards from the monitoring stack.",
+        stateless_http=True
     )
 
     # ============================================================================

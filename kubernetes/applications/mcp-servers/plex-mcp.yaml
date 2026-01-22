@@ -35,7 +35,8 @@ data:
         instructions="""Plex Media Server management MCP.
         Capabilities: server status, library management, active sessions,
         transcode monitoring, GPU utilization, and library refresh.
-        Use get_server_status first to verify connectivity."""
+        Use get_server_status first to verify connectivity.""",
+        stateless_http=True
     )
 
     # ============================================================================

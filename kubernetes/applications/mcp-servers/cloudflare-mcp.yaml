@@ -25,7 +25,8 @@ data:
 
     mcp = FastMCP(
         name="cloudflare_mcp",
-        instructions="MCP server for Cloudflare. Provides tools for DNS zone management, DNS records, and Cloudflare Tunnel status."
+        instructions="MCP server for Cloudflare. Provides tools for DNS zone management, DNS records, and Cloudflare Tunnel status.",
+        stateless_http=True
     )
 
     class ResponseFormat(str, Enum):
