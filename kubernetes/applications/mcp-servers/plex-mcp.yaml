@@ -1,3 +1,9 @@
+# =============================================================================
+# DEPRECATED: This MCP is now consolidated into media-mcp
+# New endpoint: media-mcp.agentic.kernow.io (or 10.20.0.40:31123)
+# Source: https://github.com/charlieshreck/mcp-servers/tree/main/domains/media
+# This file is kept for reference only - do not deploy new instances
+# =============================================================================
 ---
 apiVersion: v1
 kind: ConfigMap
