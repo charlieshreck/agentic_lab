@@ -15,35 +15,23 @@ metadata:
     app.kubernetes.io/component: shared-config
   annotations:
     description: "Shared MCP server configuration for all AI agents"
-    generated-at: "2026-01-22T11:05:16Z"
+    generated-at: "2026-01-22T13:35:39Z"
     source-file: "/home/.mcp.json"
 data:
   INFISICAL_MCP_URL: "http://infisical-mcp:8000"
-  COROOT_MCP_URL: "http://coroot-mcp:8000"
   PROXMOX_MCP_URL: "http://proxmox-mcp:8000"
   INFRASTRUCTURE_MCP_URL: "http://infrastructure-mcp:8000"
   KNOWLEDGE_MCP_URL: "http://knowledge-mcp:8000"
   OPNSENSE_MCP_URL: "http://opnsense-mcp:8000"
-  ADGUARD_MCP_URL: "http://adguard-mcp:8000"
   CLOUDFLARE_MCP_URL: "http://cloudflare-mcp:8000"
-  UNIFI_MCP_URL: "http://unifi-mcp:8000"
   TRUENAS_MCP_URL: "http://truenas-mcp:8000"
-  HOME_ASSISTANT_MCP_URL: "http://home-assistant-mcp:8000"
-  ARR_SUITE_MCP_URL: "http://arr-suite-mcp:8000"
-  HOMEPAGE_MCP_URL: "http://homepage-mcp:8000"
-  WEB_SEARCH_MCP_URL: "http://web-search-mcp:8000"
-  BROWSER_AUTOMATION_MCP_URL: "http://browser-automation-mcp:8000"
-  PLEX_MCP_URL: "http://plex-mcp:8000"
   VIKUNJA_MCP_URL: "http://vikunja-mcp:8000"
   NEO4J_MCP_URL: "http://neo4j-mcp:8000"
-  TASMOTA_MCP_URL: "http://tasmota-mcp:8000"
-  MONITORING_MCP_URL: "http://monitoring-mcp:8000"
-  KEEP_MCP_URL: "http://keep-mcp:8000"
-  GITHUB_MCP_URL: "http://github-mcp:8000"
-  WIKIPEDIA_MCP_URL: "http://wikipedia-mcp:8000"
-  REDDIT_MCP_URL: "http://reddit-mcp:8000"
   OUTLINE_MCP_URL: "http://outline-mcp:8000"
-  OBSERVABILITY_MCP_URL: "http://observability-mcp:8000"
+  OBSERVABILITY_MCP_URL: "http://observability-mcp.agentic.kernow.io"
+  EXTERNAL_MCP_URL: "http://external-mcp.agentic.kernow.io"
+  MEDIA_MCP_URL: "http://media-mcp.agentic.kernow.io"
+  HOME_MCP_URL: "http://home-mcp.agentic.kernow.io"
   # Full MCP config as JSON (for dynamic parsing)
   MCP_SERVERS_JSON: |
-    {"servers":[{"name":"infisical","url":"http://null-mcp:8000"},{"name":"coroot","url":"http://null-mcp:8000"},{"name":"proxmox","url":"http://null-mcp:8000"},{"name":"infrastructure","url":"http://null-mcp:8000"},{"name":"knowledge","url":"http://null-mcp:8000"},{"name":"opnsense","url":"http://null-mcp:8000"},{"name":"adguard","url":"http://null-mcp:8000"},{"name":"cloudflare","url":"http://null-mcp:8000"},{"name":"unifi","url":"http://null-mcp:8000"},{"name":"truenas","url":"http://null-mcp:8000"},{"name":"home-assistant","url":"http://null-mcp:8000"},{"name":"arr-suite","url":"http://null-mcp:8000"},{"name":"homepage","url":"http://null-mcp:8000"},{"name":"web-search","url":"http://null-mcp:8000"},{"name":"browser-automation","url":"http://null-mcp:8000"},{"name":"plex","url":"http://null-mcp:8000"},{"name":"vikunja","url":"http://null-mcp:8000"},{"name":"neo4j","url":"http://null-mcp:8000"},{"name":"tasmota","url":"http://null-mcp:8000"},{"name":"monitoring","url":"http://null-mcp:8000"},{"name":"keep","url":"http://null-mcp:8000"},{"name":"github","url":"http://null-mcp:8000"},{"name":"wikipedia","url":"http://null-mcp:8000"},{"name":"reddit","url":"http://null-mcp:8000"},{"name":"outline","url":"http://null-mcp:8000"},{"name":"observability","url":"http://null-mcp:8000"}]}
+    {"servers":[{"name":"infisical","url":"http://null-mcp:8000"},{"name":"proxmox","url":"http://null-mcp:8000"},{"name":"infrastructure","url":"http://null-mcp:8000"},{"name":"knowledge","url":"http://null-mcp:8000"},{"name":"opnsense","url":"http://null-mcp:8000"},{"name":"cloudflare","url":"http://null-mcp:8000"},{"name":"truenas","url":"http://null-mcp:8000"},{"name":"vikunja","url":"http://null-mcp:8000"},{"name":"neo4j","url":"http://null-mcp:8000"},{"name":"outline","url":"http://null-mcp:8000"},{"name":"observability","url":"http://observability-mcp.agentic.kernow.io"},{"name":"external","url":"http://external-mcp.agentic.kernow.io"},{"name":"media","url":"http://media-mcp.agentic.kernow.io"},{"name":"home","url":"http://home-mcp.agentic.kernow.io"}]}
