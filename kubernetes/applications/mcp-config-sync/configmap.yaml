@@ -90,7 +90,7 @@ data:
                 raise Exception(f"kubectl apply failed: {result.stderr}")
 
             # Restart deployments to pick up new config
-            for deployment in ["claude-agent", "langgraph"]:
+            for deployment in ["langgraph"]:
                 subprocess.run(
                     ["kubectl", "--kubeconfig", KUBECONFIG, "rollout", "restart",
                      f"deployment/{deployment}", "-n", NAMESPACE],

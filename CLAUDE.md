@@ -24,82 +24,55 @@ This repository contains the infrastructure and application code for a **self-im
 
 ### Key Components
 
-#### 1. Split-Role AI Architecture
+#### 1. AI Architecture
 | Role | Model | Responsibility |
 |------|-------|----------------|
-| **Workhorse** | Gemini 2.0 Pro (via LiteLLM) | Alert response, runbook execution, code fixes, maintenance |
-| **Validator** | Claude (via claude-agent) | Reviews Gemini outputs, auto-corrects minor issues, flags major issues |
+| **Agent** | Ollama (qwen2.5:7b) via LiteLLM | Alert response, runbook execution, automated operations |
+| **Orchestrator** | LangGraph | Graph-based agent routing, state management, tool orchestration |
 | **Architect** | Claude Code (with Charlie) | Architecture decisions, planning, context-aware review sessions |
 
-- **Inference**: LiteLLM proxy routing to Gemini Pro (1M token context)
-- **Embeddings**: Gemini text-embedding-004 (768 dimensions)
+- **Inference**: LiteLLM proxy routing to local Ollama (qwen2.5:7b)
+- **Embeddings**: Ollama nomic-embed-text (local embeddings)
+- **Manual Interface**: OpenWebUI for direct Ollama chat
 
 #### 2. Vector Knowledge Base
 - **Engine**: Qdrant vector database
 - **Collections**: runbooks, decisions, validations, documentation, **entities**, **device_types**, capability_gaps, skill_gaps, user_feedback
 - **Purpose**: RAG for context-aware decisions, learning from outcomes, **network entity intelligence**
-- **Embeddings**: Gemini text-embedding-004 (768 dimensions)
+- **Embeddings**: Ollama nomic-embed-text (local, 768 dimensions)
 
 #### 3. Orchestration
 - **LangGraph**: Graph-based agent routing and state management
 - **State**: PostgreSQL checkpointer for conversation history
 - **Cache**: Redis for semantic caching and job queues
-- **MCP Servers**: Custom servers for infrastructure, search, and automation (see below)
-- **Context Sources**: Full context injection via Gemini's 1M token window
+- **MCP Servers**: 6 consolidated domain MCPs for infrastructure, observability, knowledge, home, media, external
+- **Context Sources**: Full context injection via Qdrant RAG
 
-#### 3a. Available MCP Servers
-| Server | Description | Key Tools |
-|--------|-------------|-----------|
-| `infrastructure-mcp` | Cluster state, kubectl, talosctl | kubectl_get_pods, kubectl_logs, talosctl_health |
-| `coroot-mcp` | Observability, metrics, anomalies | get_service_metrics, get_anomalies, get_alerts |
-| `knowledge-mcp` | Qdrant vector DB + **entity intelligence** | search_runbooks, search_entities, get_entity, get_device_type_info |
-| `opnsense-mcp` | Firewall/router management | get_dhcp_leases, get_firewall_rules, get_gateway_status |
-| `unifi-mcp` | Network infrastructure | list_clients, list_devices, get_health, get_alarms |
-| `proxmox-mcp` | Hypervisor management | list_vms, start_vm, stop_vm, get_vm_status |
-| `truenas-mcp` | Storage management | list_pools, list_datasets, list_shares, get_disk_status |
-| `home-assistant-mcp` | Smart home control | list_lights, turn_on_light, list_climate, get_sensors |
-| `tasmota-mcp` | Tasmota device control | tasmota_power, tasmota_status, tasmota_wifi_config, tasmota_mqtt_config |
-| `web-search-mcp` | Web search via SearXNG | web_search, get_page_content, search_news |
-| `browser-automation-mcp` | Headless browser (Playwright) | navigate, screenshot, click, type_text |
-| `infisical-mcp` | Secrets management | list_secrets, get_secret (read-only) |
-| `monitoring-mcp` | Monitoring stack (monit cluster) | query_metrics, list_alerts, query_logs, list_dashboards, get_endpoint_status |
-| `keep-mcp` | Alert aggregation & correlation | list_alerts, list_incidents, list_workflows, acknowledge_alert |
-| `github-mcp` | GitHub repository operations | github_get_repo, github_list_issues, github_get_pr, github_search_code |
-| `wikipedia-mcp` | Wikipedia knowledge retrieval | wikipedia_search, wikipedia_summary, wikipedia_article, wikipedia_related |
-| `reddit-mcp` | Reddit browsing & search | reddit_hot, reddit_search, reddit_post, reddit_comments |
-| `outline-mcp` | Outline wiki document management | list_documents, search_documents, get_collection_structure, create_document |
+#### 3a. Domain MCP Servers
 
-**Usage**: MCP servers are configured in `.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
+6 consolidated domain MCPs provide all tool capabilities:
 
-**Access**: All MCP servers run in the agentic cluster (ai-platform namespace) with NodePort exposure on `10.20.0.40`:
+| Domain | Endpoint | Components |
+|--------|----------|------------|
+| `observability-mcp` | observability-mcp.agentic.kernow.io | Keep alerts, Coroot metrics, VictoriaMetrics, AlertManager, Grafana, Gatus |
+| `infrastructure-mcp` | infrastructure-mcp.agentic.kernow.io | Kubernetes, Proxmox, TrueNAS, Cloudflare, OPNsense, Caddy, Infisical |
+| `knowledge-mcp` | knowledge-mcp.agentic.kernow.io | Qdrant (runbooks, entities), Neo4j graph, Outline wiki, Vikunja tasks |
+| `home-mcp` | home-mcp.agentic.kernow.io | Home Assistant, Tasmota (26 devices), UniFi network, AdGuard DNS, Homepage |
+| `media-mcp` | media-mcp.agentic.kernow.io | Plex, Sonarr, Radarr, Prowlarr, Overseerr, Tautulli, Transmission, SABnzbd |
+| `external-mcp` | external-mcp.agentic.kernow.io | SearXNG web search, GitHub, Reddit, Wikipedia, Playwright browser |
 
-| Server | NodePort | Health Check |
-|--------|----------|--------------|
-| infisical-mcp | 31080 | `curl http://10.20.0.40:31080/health` |
-| coroot-mcp | 31081 | `curl http://10.20.0.40:31081/health` |
-| proxmox-mcp | 31082 | `curl http://10.20.0.40:31082/health` |
-| infrastructure-mcp | 31083 | `curl http://10.20.0.40:31083/health` |
-| knowledge-mcp | 31084 | `curl http://10.20.0.40:31084/health` |
-| opnsense-mcp | 31085 | `curl http://10.20.0.40:31085/health` |
-| adguard-mcp | 31086 | `curl http://10.20.0.40:31086/health` |
-| cloudflare-mcp | 31087 | `curl http://10.20.0.40:31087/health` |
-| unifi-mcp | 31088 | `curl http://10.20.0.40:31088/health` |
-| truenas-mcp | 31089 | `curl http://10.20.0.40:31089/health` |
-| home-assistant-mcp | 31090 | `curl http://10.20.0.40:31090/health` |
-| arr-suite-mcp | 31091 | `curl http://10.20.0.40:31091/health` |
-| homepage-mcp | 31092 | `curl http://10.20.0.40:31092/health` |
-| web-search-mcp | 31093 | `curl http://10.20.0.40:31093/health` |
-| browser-automation-mcp | 31094 | `curl http://10.20.0.40:31094/health` |
-| plex-mcp | 31096 | `curl http://10.20.0.40:31096/health` |
-| vikunja-mcp | 31097 | `curl http://10.20.0.40:31097/health` |
-| neo4j-mcp | 31098 | `curl http://10.20.0.40:31098/health` |
-| tasmota-mcp | 31100 | `curl http://10.20.0.40:31100/health` |
-| monitoring-mcp | 31101 | `curl http://10.20.0.40:31101/health` |
-| github-mcp | 31111 | `curl http://10.20.0.40:31111/health` |
-| wikipedia-mcp | 31112 | `curl http://10.20.0.40:31112/health` |
-| reddit-mcp | 31104 | `curl http://10.20.0.40:31104/health` |
-| keep-mcp | 31107 | `curl http://10.20.0.40:31107/health` |
-| outline-mcp | 31114 | `curl http://10.20.0.40:31114/health` |
+**Usage**: MCP servers are configured in `/home/.mcp.json`. Tools are available to both Claude Code sessions and LangGraph agents.
+
+**Access**: All domain MCPs run in the agentic cluster (ai-platform namespace) with DNS-based ingress:
+
+| Domain MCP | Health Check |
+|------------|--------------|
+| observability-mcp | `curl http://observability-mcp.agentic.kernow.io/health` |
+| infrastructure-mcp | `curl http://infrastructure-mcp.agentic.kernow.io/health` |
+| knowledge-mcp | `curl http://knowledge-mcp.agentic.kernow.io/health` |
+| home-mcp | `curl http://home-mcp.agentic.kernow.io/health` |
+| media-mcp | `curl http://media-mcp.agentic.kernow.io/health` |
+| external-mcp | `curl http://external-mcp.agentic.kernow.io/health` |
 
 **IMPORTANT**: MCP servers are ONLY in the agentic cluster. Do NOT deploy MCPs to prod or monit clusters.
 
@@ -119,9 +92,9 @@ The knowledge MCP includes **complete visibility into every device on the networ
 
 **Coverage**: Every device on the network - hardware and software, physical and virtual, managed and unmanaged. Entities include IP, MAC, hostname, manufacturer, model, location, capabilities, and control interfaces.
 
-#### 3c. Neo4j Knowledge Graph (via neo4j-mcp)
+#### 3c. Neo4j Knowledge Graph (via knowledge-mcp)
 
-The neo4j-mcp provides **relationship-aware queries** complementing Qdrant's semantic search:
+The knowledge-mcp includes Neo4j for **relationship-aware queries** complementing Qdrant's semantic search:
 
 | Tool | Purpose |
 |------|---------|
@@ -466,17 +439,18 @@ Comprehensive architecture documentation is available in the `docs/` directory:
 - GitOps-native configuration
 - Perfect for infrastructure as code
 
-### Why Gemini as Workhorse?
-- **1M token context window**: Comprehensive context injection, no need for complex RAG chunking
-- **Cost effective**: Lower cost than Claude for high-volume operational tasks
-- **Fast**: Good latency for real-time alert response
-- **Embeddings**: Built-in text-embedding-004 model
+### Why Local Ollama (not Cloud APIs)?
+- **Cost**: Zero per-token costs, unlimited usage
+- **Privacy**: All inference runs locally, no data leaves the network
+- **Latency**: Direct local inference, no network round-trip
+- **Reliability**: No API rate limits or quota issues
+- **Model**: qwen2.5:7b provides good balance of capability and speed
 
-### Why Claude as Validator?
-- **Superior reasoning**: Better at catching edge cases and subtle issues
-- **Security focus**: Excellent at identifying security vulnerabilities
-- **Architectural thinking**: Good at suggesting improvements
-- **Batch processing**: Cost-effective for daily validation runs
+### Why LangGraph for Orchestration?
+- **Graph-based**: Complex multi-step workflows with conditional routing
+- **Stateful**: PostgreSQL checkpointing for conversation history
+- **Tool orchestration**: Native MCP integration for tool calling
+- **Extensible**: Easy to add new nodes and edges for new capabilities
 
 ### Why Matrix/Element (not Telegram)?
 - **Self-hosted**: Full control with Conduit server (~128MB RAM)
@@ -492,7 +466,7 @@ Comprehensive architecture documentation is available in the `docs/` directory:
 - Snapshots for backup/restore
 
 ### Why Auto-Evolution?
-- **MCP auto-generation**: When Gemini needs a capability, Claude builds it
+- **MCP auto-generation**: When LangGraph needs a capability, Claude Code builds it
 - **Skill auto-generation**: Repeated queries become slash commands
 - **Runbook learning**: Patterns become formal procedures
 - **Human approval**: All auto-generated code requires approval before deployment
@@ -502,7 +476,7 @@ Comprehensive architecture documentation is available in the `docs/` directory:
 ## Security Considerations
 
 1. **Network Isolation**: 10.20.0.0/24 isolated from production
-2. **PII Detection**: Presidio + GLiNER scan before cloud API calls
+2. **Local Inference**: All LLM inference runs locally on Ollama (no data leaves network)
 3. **Secrets Management**: Infisical (never hardcoded)
 4. **RBAC**: Kubernetes RBAC for service accounts
 5. **Audit**: All agent decisions logged to Qdrant with human feedback
@@ -542,15 +516,16 @@ Machine Identity credentials are stored securely for programmatic access to Infi
 ### Current Secret Paths
 ```
 /agentic-platform/
-├── Gemini/
-│   └── GEMINI_API_KEY        # LiteLLM uses for Gemini Pro/Flash/Embeddings
-├── claude/
-│   └── (OAuth tokens)        # Claude Agent service credentials
 ├── matrix/
 │   └── MATRIX_PASSWORD       # Matrix bot user password
+├── mcp/
+│   └── (various MCP secrets) # API keys for MCP server backends
 └── infisical/
     └── (internal)            # Operator credentials
 ```
+
+**Note**: Gemini and Claude API keys were retired when migrating to local Ollama.
+See `/home/agentic_lab/archive/retired-cloud-llm/README.md` for details.
 
 ### Machine Identity Details
 - **Workspace ID**: 9383e039-68ca-4bab-bc3c-aa06fdb82627
