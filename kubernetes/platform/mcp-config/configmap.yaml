@@ -15,7 +15,7 @@ metadata:
     app.kubernetes.io/component: shared-config
   annotations:
     description: "Shared MCP server configuration for all AI agents"
-    generated-at: "2026-01-22T13:35:39Z"
+    generated-at: "2026-01-22T13:35:48Z"
     source-file: "/home/.mcp.json"
 data:
   INFISICAL_MCP_URL: "http://infisical-mcp:8000"
