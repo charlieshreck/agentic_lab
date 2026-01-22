@@ -19,7 +19,6 @@ resources:
   - truenas-mcp.yaml
   - homepage-mcp.yaml
   - infisical-mcp.yaml
-  - coroot-mcp.yaml
   # Web search and browser automation
   - searxng.yaml
   - web-search-mcp.yaml
@@ -32,10 +31,6 @@ resources:
   - neo4j-mcp.yaml
   # IoT / Smart home
   - tasmota-mcp.yaml
-  # Monitoring stack
-  - monitoring-mcp.yaml
-  # Alert aggregation
-  - keep-mcp.yaml
   # Research and development
   - github-mcp.yaml
   - wikipedia-mcp.yaml
