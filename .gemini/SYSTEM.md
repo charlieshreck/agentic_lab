@@ -67,37 +67,29 @@ When messaging via Matrix:
 
 ## Available Resources
 
-### MCP Servers (14 total - synced from /home/.mcp.json)
+### MCP Servers (6 Domain MCPs - synced from /home/.mcp.json)
 
-**Domain MCPs (Consolidated):**
+All 25 individual MCPs have been consolidated into 6 domain-based MCPs:
 
-| Domain | URL | Consolidates |
-|--------|-----|--------------|
-| `observability` | observability-mcp.agentic.kernow.io | Keep, Coroot, VictoriaMetrics, AlertManager, Grafana, Gatus |
-| `external` | external-mcp.agentic.kernow.io | web-search, github, reddit, wikipedia, browser-automation |
-| `media` | media-mcp.agentic.kernow.io | plex, arr-suite (Sonarr, Radarr, Prowlarr, Overseerr, Tautulli, Transmission, SABnzbd) |
-| `home` | home-mcp.agentic.kernow.io | home-assistant, tasmota (26 devices), unifi, adguard, homepage |
+| Domain | URL | Consolidates | ~Tools |
+|--------|-----|--------------|--------|
+| `observability` | observability-mcp.agentic.kernow.io | Keep, Coroot, VictoriaMetrics, AlertManager, Grafana, Gatus | ~45 |
+| `external` | external-mcp.agentic.kernow.io | web-search, github, reddit, wikipedia, browser-automation | ~57 |
+| `media` | media-mcp.agentic.kernow.io | plex, arr-suite (Sonarr, Radarr, Prowlarr, Overseerr, Tautulli, Transmission, SABnzbd) | ~42 |
+| `home` | home-mcp.agentic.kernow.io | home-assistant, tasmota (26 devices), unifi, adguard, homepage | ~98 |
+| `knowledge` | knowledge-mcp.agentic.kernow.io | Qdrant vector DB, runbooks, entities, Neo4j graph, Outline wiki, Vikunja tasks | ~105 |
+| `infrastructure` | infrastructure-mcp.agentic.kernow.io | K8s/kubectl, ArgoCD, Proxmox VMs, TrueNAS storage, Cloudflare DNS, OPNsense firewall, Infisical secrets | ~95 |
 
-**Individual MCPs (Not Yet Consolidated):**
+**Tool Prefixes by Domain:**
 
-| Server | Purpose | NodePort |
-|--------|---------|----------|
-| `infrastructure` | K8s cluster ops (kubectl, ArgoCD, pods, deployments) | 31083 |
-| `knowledge` | Qdrant vector DB, runbooks, docs, **network entities** | 31084 |
-| `neo4j` | Knowledge graph queries, dependencies, impact analysis | 31098 |
-| `proxmox` | VMs, LXCs, hypervisor nodes, resource usage | 31082 |
-| `truenas` | Storage pools, datasets, ZFS health, shares | 31089 |
-| `opnsense` | Firewall rules, DHCP leases, gateway status, DNS | 31085 |
-| `cloudflare` | DNS records, tunnels, zone management | 31087 |
-| `vikunja` | Task management, kanban boards | 31097 |
-| `outline` | Outline wiki document and collection management | 31114 |
-| `infisical` | Secrets management (read-only) | 31080 |
-
-**Tool Prefixes for Domain MCPs:**
-- `observability-mcp`: keep_*, coroot_*, query_*, grafana_*, gatus_*
-- `external-mcp`: websearch_*, github_*, reddit_*, wikipedia_*, browser_*
-- `media-mcp`: plex_*, sonarr_*, radarr_*, prowlarr_*, overseerr_*, tautulli_*, transmission_*, sabnzbd_*
-- `home-mcp`: ha_*, tasmota_*, unifi_*, adguard_*, homepage_*
+| Domain | Prefixes |
+|--------|----------|
+| `observability` | keep_*, coroot_*, query_*, list_alerts, grafana_*, gatus_* |
+| `external` | web_search, github_*, reddit_*, wikipedia_*, navigate, screenshot, click, type_text |
+| `media` | plex_*, sonarr_*, radarr_*, prowlarr_*, overseerr_*, tautulli_*, transmission_*, sabnzbd_* |
+| `home` | list_entities, turn_on/off_*, set_climate_*, tasmota_*, unifi_*, adguard_*, homepage_* |
+| `knowledge` | search_runbooks, search_entities, search_documentation, query_graph, search_documents, list_tasks |
+| `infrastructure` | kubectl_*, argocd_*, proxmox_*, truenas_*, cloudflare_*, get_interfaces, get_firewall_rules, list_secrets |
 
 ### Qdrant Collections
 - `runbooks`: Operational procedures
@@ -119,7 +111,7 @@ When messaging via Matrix:
 
 ## Network Entity Knowledge
 
-You have **complete knowledge of every device on the network** via the `knowledge-mcp` entity tools.
+You have **complete knowledge of every device on the network** via the `knowledge` domain MCP (knowledge-mcp.agentic.kernow.io).
 
 ### Entity Search Tools
 
