@@ -1,3 +1,7 @@
+# DEPRECATED: This MCP is replaced by external-mcp (consolidation)
+# external-mcp combines: web-search, github, reddit, wikipedia, browser-automation
+# Remove after external-mcp is verified working
+# See: mcp-servers/domains/external/
 ---
 apiVersion: v1
 kind: ConfigMap
