@@ -487,6 +487,8 @@ Comprehensive architecture documentation is available in the `docs/` directory:
 
 Machine Identity credentials are stored securely for programmatic access to Infisical secrets.
 
+> **IMPORTANT**: See [`docs/infisical-structure.md`](./docs/infisical-structure.md) for the canonical secret structure and naming conventions. All new secrets MUST follow this structure.
+
 ### Location
 ```
 /root/.config/infisical/
@@ -497,35 +499,37 @@ Machine Identity credentials are stored securely for programmatic access to Infi
 
 ### Usage
 ```bash
-# Get a secret
-/root/.config/infisical/secrets.sh get /agentic-platform/telegram BOT_TOKEN
+# Get a secret (use domain-aligned paths)
+/root/.config/infisical/secrets.sh get /infrastructure/proxmox-ruapehu TOKEN_SECRET
 
 # Set a secret
-/root/.config/infisical/secrets.sh set /agentic-platform/llm API_KEY "value"
+/root/.config/infisical/secrets.sh set /external/github TOKEN "ghp_xxx..."
 
 # List secrets at path
-/root/.config/infisical/secrets.sh list /agentic-platform
+/root/.config/infisical/secrets.sh list /infrastructure/cloudflare
 
 # List folders
-/root/.config/infisical/secrets.sh folders /agentic-platform
+/root/.config/infisical/secrets.sh folders /
 
 # Create folder
-/root/.config/infisical/secrets.sh mkdir /agentic-platform newservice
+/root/.config/infisical/secrets.sh mkdir /media jellyfin
 ```
 
-### Current Secret Paths
+### Secret Path Structure (Domain-Aligned)
 ```
-/agentic-platform/
-├── matrix/
-│   └── MATRIX_PASSWORD       # Matrix bot user password
-├── mcp/
-│   └── (various MCP secrets) # API keys for MCP server backends
-└── infisical/
-    └── (internal)            # Operator credentials
+/
+├── infrastructure/    # Proxmox, TrueNAS, Cloudflare, OPNsense, AdGuard
+├── observability/     # Grafana, Keep, Coroot, AlertManager
+├── knowledge/         # Qdrant, Neo4j, Outline, Vikunja, PostgreSQL
+├── home/              # Home Assistant, Tasmota, UniFi, MQTT
+├── media/             # Plex, Sonarr, Radarr, Transmission, etc.
+├── external/          # GitHub, OpenRouter, Gemini, SearXNG
+├── platform/          # ArgoCD, Matrix, OpenWebUI, LiteLLM
+└── backups/           # Garage S3, Backrest, Velero
 ```
 
-**Note**: Gemini and Claude API keys were retired when migrating to local Ollama.
-See `/home/agentic_lab/archive/retired-cloud-llm/README.md` for details.
+**Full documentation**: [`docs/infisical-structure.md`](./docs/infisical-structure.md)
+**Migration plan**: [`docs/infisical-migration-plan.md`](./docs/infisical-migration-plan.md)
 
 ### Machine Identity Details
 - **Workspace ID**: 9383e039-68ca-4bab-bc3c-aa06fdb82627
