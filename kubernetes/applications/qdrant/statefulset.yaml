@@ -122,9 +122,6 @@ spec:
   volumeClaimTemplates:
   - metadata:
       name: qdrant-storage
-      annotations:
-        argocd.argoproj.io/sync-options: Delete=false
-        helm.sh/resource-policy: keep
     spec:
       accessModes: ["ReadWriteOnce"]
       storageClassName: local-path
@@ -133,9 +130,6 @@ spec:
           storage: 50Gi
   - metadata:
       name: qdrant-snapshots
-      annotations:
-        argocd.argoproj.io/sync-options: Delete=false
-        helm.sh/resource-policy: keep
     spec:
       accessModes: ["ReadWriteOnce"]
       storageClassName: local-path

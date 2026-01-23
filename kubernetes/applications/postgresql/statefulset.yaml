@@ -73,10 +73,6 @@ spec:
   volumeClaimTemplates:
   - metadata:
       name: postgresql-data
-      annotations:
-        # Prevent ArgoCD from deleting this PVC during sync/prune
-        argocd.argoproj.io/sync-options: Delete=false
-        helm.sh/resource-policy: keep
     spec:
       accessModes: ["ReadWriteOnce"]
       storageClassName: local-path

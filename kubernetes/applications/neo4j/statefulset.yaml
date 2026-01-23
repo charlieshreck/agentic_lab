@@ -123,9 +123,6 @@ spec:
   volumeClaimTemplates:
   - metadata:
       name: neo4j-data
-      annotations:
-        argocd.argoproj.io/sync-options: Delete=false
-        helm.sh/resource-policy: keep
     spec:
       accessModes: ["ReadWriteOnce"]
       storageClassName: local-path
@@ -134,9 +131,6 @@ spec:
           storage: 50Gi
   - metadata:
       name: neo4j-logs
-      annotations:
-        argocd.argoproj.io/sync-options: Delete=false
-        helm.sh/resource-policy: keep
     spec:
       accessModes: ["ReadWriteOnce"]
       storageClassName: local-path
@@ -145,9 +139,6 @@ spec:
           storage: 5Gi
   - metadata:
       name: neo4j-plugins
-      annotations:
-        argocd.argoproj.io/sync-options: Delete=false
-        helm.sh/resource-policy: keep
     spec:
       accessModes: ["ReadWriteOnce"]
       storageClassName: local-path
