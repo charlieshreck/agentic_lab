@@ -6,8 +6,8 @@ namespace: ai-platform
 resources:
   - configmap.yaml
   - infisical-secrets.yaml
-  - infrastructure-mcp.yaml
-  - knowledge-mcp.yaml
+  # NOTE: infrastructure-mcp and knowledge-mcp are now managed by domain-mcps app
+  # from the kernow-mcp-servers repo (canonical source for domain MCPs)
   - home-assistant-mcp.yaml
   - arr-suite-mcp.yaml
   # New MCP servers
