@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm
+  namespace: ai-platform
+  labels:
+    app: litellm
+    component: inference-proxy
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: litellm.agentic.kernow.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: litellm
+            port:
+              number: 4000
+        path: /
+        pathType: Prefix
