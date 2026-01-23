@@ -44,15 +44,17 @@ data:
           model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
 
-      # ===== EMBEDDINGS: Gemini text-embedding-004 =====
-      # Using Gemini embeddings - Ollama nomic-embed-text has async bug in LiteLLM
+      # ===== EMBEDDINGS: Local Ollama nomic-embed-text =====
+      # Local embeddings - no external API dependency
       - model_name: embeddings
         litellm_params:
-          model: gemini/text-embedding-004
+          model: ollama/nomic-embed-text
+          api_base: http://ollama:11434
 
       - model_name: text-embedding-004
         litellm_params:
-          model: gemini/text-embedding-004
+          model: ollama/nomic-embed-text
+          api_base: http://ollama:11434
 
     # Router settings - all routes to Ollama
     router_settings:
