@@ -32,12 +32,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: postgresql-credentials
-              key: username
+              key: USERNAME
         - name: POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
               name: postgresql-credentials
-              key: password
+              key: PASSWORD
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
         resources:

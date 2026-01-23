@@ -66,12 +66,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: postgresql-credentials
-                  key: username
+                  key: USERNAME
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: postgresql-credentials
-                  key: password
+                  key: PASSWORD
             - name: DATABASE_URL
               value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgresql:5432/outline"
             - name: PGSSLMODE

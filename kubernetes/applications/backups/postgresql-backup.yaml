@@ -36,12 +36,12 @@ spec:
                   valueFrom:
                     secretKeyRef:
                       name: postgresql-credentials
-                      key: username
+                      key: USERNAME
                 - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef:
                       name: postgresql-credentials
-                      key: password
+                      key: PASSWORD
                 - name: BACKUP_BUCKET
                   value: "backrest"
                 - name: BACKUP_PREFIX
