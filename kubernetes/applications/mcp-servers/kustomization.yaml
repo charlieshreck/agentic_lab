@@ -33,3 +33,5 @@ resources:
   - tasmota-mcp.yaml
   # Documentation
   - outline-mcp.yaml
+  # Knowledge reconciliation
+  - knowledge-reconcile-cronjob.yaml

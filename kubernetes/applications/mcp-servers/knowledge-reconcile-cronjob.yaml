@@ -1,0 +1,68 @@
+---
+# CronJob to reconcile Qdrant ↔ Neo4j dual-index
+# Runs weekly on Sunday at 3am UTC
+# Detects and fixes:
+# - Orphaned Qdrant entries (not in Neo4j)
+# - Missing Qdrant entries (in Neo4j but not indexed)
+# - Stale embeddings (content_hash mismatch)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: knowledge-reconcile
+  namespace: ai-platform
+  labels:
+    app: knowledge-mcp
+    component: reconcile
+spec:
+  schedule: "0 3 * * 0"  # Weekly Sunday 3am UTC
+  concurrencyPolicy: Forbid  # Don't run if previous job still running
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: reconcile
+              image: curlimages/curl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Starting Qdrant ↔ Neo4j reconciliation..."
+                  echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  echo ""
+
+                  # Call reconcile webhook
+                  RESULT=$(curl -s -X POST \
+                    "http://knowledge-mcp.ai-platform.svc.cluster.local:8000/webhooks/reconcile" \
+                    -H "Content-Type: application/json" \
+                    -w "\n%{http_code}")
+
+                  HTTP_CODE=$(echo "$RESULT" | tail -1)
+                  BODY=$(echo "$RESULT" | sed '$d')
+
+                  echo "Response (HTTP $HTTP_CODE):"
+                  echo "$BODY" | head -c 2000
+
+                  if [ "$HTTP_CODE" != "200" ]; then
+                    echo ""
+                    echo "Reconciliation failed with HTTP $HTTP_CODE"
+                    exit 1
+                  fi
+
+                  echo ""
+                  echo "Reconciliation complete"
+          restartPolicy: OnFailure
+---
+# Manual reconciliation job template
+# Use: kubectl create job --from=cronjob/knowledge-reconcile knowledge-reconcile-manual -n ai-platform
+#
+# Or trigger directly:
+# curl -X POST http://knowledge-mcp.ai-platform.svc.cluster.local:8000/webhooks/reconcile
+#
+# Query params:
+# - dry_run=true: Detect issues without fixing
+# - fix_orphans=false: Skip deleting orphans
+# - fix_missing=false: Skip re-indexing missing
+# - fix_stale=false: Skip re-indexing stale
