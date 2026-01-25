@@ -28,6 +28,11 @@ spec:
                 secretKeyRef:
                   name: silverbullet-credentials
                   key: SB_USER
+            - name: SB_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: silverbullet-credentials
+                  key: SB_AUTH_TOKEN
           volumeMounts:
             - name: data
               mountPath: /space
