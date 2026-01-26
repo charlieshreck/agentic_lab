@@ -72,7 +72,7 @@ spec:
               name: grafana-credentials
               key: PASSWORD
         - name: OPERATOR_USER_ID
-          value: "@charlie:agentic.local"
+          value: "@chaz:agentic.local"
         ports:
         - containerPort: 8000
           name: http
