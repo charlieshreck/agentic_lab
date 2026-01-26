@@ -54,6 +54,25 @@ spec:
           value: "http://qdrant:6333"
         - name: ALERT_ROOM_ID
           value: "!P3BHXqELzL12n7uDOd:agentic.local"
+        - name: REDIS_URL
+          value: "redis://redis:6379/1"
+        - name: GRAFANA_URL
+          valueFrom:
+            secretKeyRef:
+              name: grafana-credentials
+              key: HOST
+        - name: GRAFANA_USER
+          valueFrom:
+            secretKeyRef:
+              name: grafana-credentials
+              key: USERNAME
+        - name: GRAFANA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-credentials
+              key: PASSWORD
+        - name: OPERATOR_USER_ID
+          value: "@charlie:agentic.local"
         ports:
         - containerPort: 8000
           name: http
