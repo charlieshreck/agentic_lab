@@ -47,7 +47,7 @@ spec:
           valueFrom:
             secretKeyRef:
               name: matrix-bot-credentials
-              key: MATRIX_PASSWORD
+              key: PASSWORD
         - name: LANGGRAPH_URL
           value: "http://langgraph:8000"
         - name: QDRANT_URL
