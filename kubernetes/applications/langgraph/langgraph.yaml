@@ -2219,6 +2219,7 @@ data:
         }
 
     async def record_outcome(state):
+        # 1. Record decision (existing behaviour - keep)
         await call_knowledge_mcp("record", "POST", {
             "collection": "decisions",
             "data": {
@@ -2231,6 +2232,45 @@ data:
                 "timestamp": datetime.utcnow().isoformat()
             }
         })
+
+        # 2. Log execution event with rich context (Project 03 - Gap 1 fix)
+        event_result = await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+            "event_type": "runbook.execution",
+            "description": f"Executed solution for {state['alert'].get('alertname', state['alert'].get('name', 'unknown alert'))}",
+            "source_agent": "langgraph",
+            "metadata": {
+                "alert_id": state["alert"]["id"],
+                "alert_name": state["alert"].get("alertname", state["alert"].get("name")),
+                "runbook_id": state.get("runbook_id"),
+                "service_name": state["alert"].get("labels", {}).get("service"),
+                "namespace": state["alert"].get("namespace", state["alert"].get("labels", {}).get("namespace")),
+                "alert_fingerprint": state["alert"].get("fingerprint", state["alert"].get("id")),
+                "endpoint": state["alert"].get("labels", {}).get("endpoint"),
+                "match_type": state["assessment"].get("match_type"),
+                "confidence": state["assessment"].get("confidence"),
+                "success": state["execution_result"].get("success", False),
+            },
+            "resolution": "completed" if state["execution_result"].get("success") else "failed",
+        })
+
+        # 3. Trigger validation with 5-min cooling period (Gemini R2)
+        event_id = event_result.get("event_id")
+        if event_id:
+            initial_state = {
+                "event_id": event_id,
+                "triggered_by": "langgraph-auto",
+                "event": {},
+                "runbook": None,
+                "reported_success": state["execution_result"].get("success", False),
+                "ground_truth": {},
+                "verdict": "pending",
+                "confidence": 0.0,
+                "actual_success": None,
+                "signal_count": 0,
+                "validation_recorded": False,
+            }
+            asyncio.create_task(_delayed_validation(initial_state, delay_seconds=300))
+
         return {}
 
     def should_request_approval(state):
@@ -2238,6 +2278,346 @@ data:
         if assessment.get("requires_approval", True):
             return "request_approval"
         return "execute_solution"
+
+    # ============================================================================
+    # VALIDATION SUBGRAPH - Project 03: Evaluator System
+    # 4-node workflow: fetch_context → gather_truth → compute_verdict → record_validation
+    # ============================================================================
+
+    # Consolidated MCP URLs for observability tools
+    OBSERVABILITY_MCP_URL = os.environ.get("OBSERVABILITY_MCP_URL", "http://observability-mcp:8000")
+
+    class ValidationState(TypedDict):
+        event_id: str
+        triggered_by: str  # langgraph-auto, human, pattern-detector
+        event: dict
+        runbook: Optional[dict]
+        reported_success: bool
+        ground_truth: dict
+        verdict: str  # pending, confirmed, false_positive, false_negative, uncertain
+        confidence: float
+        actual_success: Optional[bool]
+        signal_count: int
+        validation_recorded: bool
+
+    async def call_mcp_tool(mcp_url: str, tool_name: str, arguments: dict = None) -> dict:
+        """Generic MCP tool caller using JSON-RPC protocol."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    mcp_url + "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": tool_name, "arguments": arguments or {}}
+                    }
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("result", {}).get("content", [])
+                    if content:
+                        return json.loads(content[0].get("text", "{}"))
+                return {}
+            except Exception as e:
+                logger.warning(f"MCP tool call failed ({tool_name}): {e}")
+                return {}
+
+    async def fetch_validation_context(state: ValidationState) -> dict:
+        """Node 1: Fetch event and runbook from knowledge-mcp."""
+        event_id = state["event_id"]
+        logger.info(f"[VALIDATE] Fetching context for event {event_id}")
+
+        # Get event details
+        event = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_event", {"event_id": event_id})
+        if not event or event.get("error"):
+            logger.error(f"[VALIDATE] Event {event_id} not found: {event}")
+            return {
+                "event": {},
+                "runbook": None,
+                "reported_success": False,
+                "verdict": "uncertain",
+                "confidence": 0.0,
+            }
+
+        # Get runbook if referenced
+        runbook = None
+        runbook_id = event.get("metadata", {}).get("runbook_id")
+        if runbook_id:
+            runbook = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_runbook", {"runbook_id": runbook_id})
+
+        reported_success = event.get("metadata", {}).get("success", event.get("resolution") == "completed")
+
+        return {
+            "event": event,
+            "runbook": runbook,
+            "reported_success": bool(reported_success),
+        }
+
+    async def gather_ground_truth(state: ValidationState) -> dict:
+        """Node 2: Query observability sources for actual state."""
+        event = state.get("event", {})
+        metadata = event.get("metadata", {})
+        ground_truth = {}
+        signal_count = 0
+
+        if not event:
+            return {"ground_truth": {}, "signal_count": 0}
+
+        # Check Keep alert state
+        alert_fingerprint = metadata.get("alert_fingerprint") or metadata.get("alert_id")
+        if alert_fingerprint:
+            try:
+                alert_state = await call_mcp_tool(OBSERVABILITY_MCP_URL, "keep_get_alert", {"alert_id": alert_fingerprint})
+                if alert_state and not alert_state.get("error"):
+                    ground_truth["alert_state"] = {
+                        "status": alert_state.get("status"),
+                        "resolved": alert_state.get("status") in ("resolved", "inactive"),
+                    }
+                    signal_count += 1
+            except Exception as e:
+                logger.warning(f"[VALIDATE] Keep check failed: {e}")
+
+        # Check Coroot service health
+        service_name = metadata.get("service_name")
+        if service_name:
+            try:
+                service_metrics = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_metrics", {"service": service_name})
+                if service_metrics and not service_metrics.get("error"):
+                    ground_truth["service_health"] = service_metrics
+                    signal_count += 1
+            except Exception as e:
+                logger.warning(f"[VALIDATE] Coroot check failed: {e}")
+
+        # Check Gatus endpoint status
+        endpoint = metadata.get("endpoint")
+        if endpoint:
+            try:
+                gatus_status = await call_mcp_tool(OBSERVABILITY_MCP_URL, "gatus_get_endpoint_status", {"endpoint": endpoint})
+                if gatus_status and not gatus_status.get("error"):
+                    ground_truth["endpoint_status"] = gatus_status
+                    signal_count += 1
+            except Exception as e:
+                logger.warning(f"[VALIDATE] Gatus check failed: {e}")
+
+        # Check Kubernetes pod state if namespace/service available
+        namespace = metadata.get("namespace")
+        if namespace and service_name:
+            try:
+                pods = await call_mcp_tool(
+                    INFRASTRUCTURE_MCP_URL, "kubectl_get_pods",
+                    {"namespace": namespace, "label_selector": f"app={service_name}"}
+                )
+                if pods and not pods.get("error"):
+                    pod_list = pods if isinstance(pods, list) else pods.get("pods", [])
+                    running_count = sum(1 for p in pod_list if isinstance(p, dict) and p.get("status") == "Running")
+                    ground_truth["kubernetes"] = {
+                        "total_pods": len(pod_list),
+                        "running_pods": running_count,
+                        "healthy": running_count > 0,
+                    }
+                    signal_count += 1
+            except Exception as e:
+                logger.warning(f"[VALIDATE] Kubernetes check failed: {e}")
+
+        logger.info(f"[VALIDATE] Gathered {signal_count} ground truth signals")
+        return {"ground_truth": ground_truth, "signal_count": signal_count}
+
+    async def compute_verdict(state: ValidationState) -> dict:
+        """Node 3: Deterministic verdict first, Ollama fallback if uncertain (Gemini R1)."""
+        reported_success = state.get("reported_success", False)
+        ground_truth = state.get("ground_truth", {})
+        signal_count = state.get("signal_count", 0)
+
+        # No signals = uncertain
+        if signal_count == 0:
+            logger.info("[VALIDATE] No ground truth signals, verdict: uncertain")
+            return {
+                "verdict": "uncertain",
+                "confidence": 0.3,
+                "actual_success": None,
+            }
+
+        # Deterministic evaluation
+        success_signals = 0
+        failure_signals = 0
+
+        # Check alert state
+        alert = ground_truth.get("alert_state", {})
+        if alert:
+            if alert.get("resolved"):
+                success_signals += 1
+            else:
+                failure_signals += 1
+
+        # Check service health
+        service = ground_truth.get("service_health", {})
+        if service:
+            health_status = service.get("status", "")
+            if health_status in ("OK", "healthy", "ok"):
+                success_signals += 1
+            elif health_status:
+                failure_signals += 1
+
+        # Check endpoint
+        endpoint = ground_truth.get("endpoint_status", {})
+        if endpoint:
+            if endpoint.get("healthy", endpoint.get("status") == "up"):
+                success_signals += 1
+            else:
+                failure_signals += 1
+
+        # Check kubernetes
+        k8s = ground_truth.get("kubernetes", {})
+        if k8s:
+            if k8s.get("healthy"):
+                success_signals += 1
+            else:
+                failure_signals += 1
+
+        # Determine actual success from signals
+        total_signals = success_signals + failure_signals
+        if total_signals == 0:
+            actual_success = None
+            verdict = "uncertain"
+            confidence = 0.3
+        elif success_signals > failure_signals:
+            actual_success = True
+            confidence = min(0.5 + (success_signals / signal_count) * 0.5, 1.0)
+            verdict = "confirmed" if reported_success else "false_negative"
+        else:
+            actual_success = False
+            confidence = min(0.5 + (failure_signals / signal_count) * 0.5, 1.0)
+            verdict = "false_positive" if reported_success else "confirmed"
+
+        # If confidence is low, try Ollama for nuanced analysis (Gemini R1)
+        if confidence < 0.7 and signal_count > 0:
+            try:
+                analysis_prompt = f"""Analyze this runbook execution validation:
+
+    Reported success: {reported_success}
+    Ground truth signals: {json.dumps(ground_truth, indent=2, default=str)}
+
+    Based on the ground truth data, did the execution actually succeed?
+    Respond with JSON: {{"actual_success": true/false/null, "confidence": 0.0-1.0, "reasoning": "..."}}"""
+
+                llm_result = await call_gemini(analysis_prompt)
+                if llm_result:
+                    try:
+                        parsed = json.loads(llm_result)
+                        llm_success = parsed.get("actual_success")
+                        llm_confidence = parsed.get("confidence", 0.5)
+                        if llm_confidence > confidence:
+                            actual_success = llm_success
+                            confidence = llm_confidence
+                            if actual_success is True:
+                                verdict = "confirmed" if reported_success else "false_negative"
+                            elif actual_success is False:
+                                verdict = "false_positive" if reported_success else "confirmed"
+                            else:
+                                verdict = "uncertain"
+                            logger.info(f"[VALIDATE] LLM refined verdict: {verdict} (confidence {confidence})")
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+            except Exception as e:
+                logger.warning(f"[VALIDATE] LLM fallback failed: {e}")
+
+        logger.info(f"[VALIDATE] Verdict: {verdict}, confidence: {confidence:.2f}, actual_success: {actual_success}")
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "actual_success": actual_success,
+        }
+
+    async def record_validation(state: ValidationState) -> dict:
+        """Node 4: Record validation result back to knowledge-mcp."""
+        event_id = state["event_id"]
+        verdict = state.get("verdict", "uncertain")
+        confidence = state.get("confidence", 0.0)
+
+        validation_payload = {
+            "validated": True,
+            "validated_at": datetime.utcnow().isoformat(),
+            "validated_by": state.get("triggered_by", "langgraph-auto"),
+            "verdict": verdict,
+            "confidence": confidence,
+            "actual_success": state.get("actual_success"),
+            "signal_count": state.get("signal_count", 0),
+            "ground_truth": state.get("ground_truth", {}),
+        }
+
+        # Update event with validation
+        result = await call_mcp_tool(KNOWLEDGE_MCP_URL, "update_event", {
+            "event_id": event_id,
+            "validation": validation_payload,
+            "resolution": "validated" if verdict == "confirmed" else "needs_review",
+        })
+
+        # If false positive, block runbook from autonomous execution (Gemini R3)
+        if verdict == "false_positive":
+            event = state.get("event", {})
+            runbook_id = event.get("metadata", {}).get("runbook_id")
+            if runbook_id:
+                logger.warning(f"[VALIDATE] FALSE POSITIVE detected for runbook {runbook_id}, blocking autonomous execution")
+                # Log autonomy.blocked event
+                await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+                    "event_type": "autonomy.blocked",
+                    "description": f"Runbook {runbook_id} blocked from autonomous execution due to false positive in event {event_id}",
+                    "source_agent": "validation-workflow",
+                    "metadata": {
+                        "runbook_id": runbook_id,
+                        "event_id": event_id,
+                        "verdict": verdict,
+                        "confidence": confidence,
+                    },
+                })
+                # Downgrade runbook to manual
+                await call_mcp_tool(KNOWLEDGE_MCP_URL, "update_runbook", {
+                    "runbook_id": runbook_id,
+                    "automation_level": "manual",
+                })
+
+        # Log validation completed event
+        await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+            "event_type": "validation.completed",
+            "description": f"Validation of event {event_id}: {verdict} (confidence {confidence:.2f})",
+            "source_agent": "validation-workflow",
+            "metadata": {
+                "event_id": event_id,
+                "verdict": verdict,
+                "confidence": confidence,
+                "triggered_by": state.get("triggered_by", "langgraph-auto"),
+            },
+        })
+
+        logger.info(f"[VALIDATE] Recorded validation for {event_id}: {verdict}")
+        return {"validation_recorded": True}
+
+    def create_validation_workflow():
+        """Create the 4-node validation SubGraph."""
+        workflow = StateGraph(ValidationState)
+        workflow.add_node("fetch_context", fetch_validation_context)
+        workflow.add_node("gather_truth", gather_ground_truth)
+        workflow.add_node("compute_verdict", compute_verdict)
+        workflow.add_node("record_validation", record_validation)
+        workflow.set_entry_point("fetch_context")
+        workflow.add_edge("fetch_context", "gather_truth")
+        workflow.add_edge("gather_truth", "compute_verdict")
+        workflow.add_edge("compute_verdict", "record_validation")
+        workflow.add_edge("record_validation", END)
+        return workflow.compile()
+
+    validation_graph = create_validation_workflow()
+
+    async def _delayed_validation(initial_state: dict, delay_seconds: int = 300):
+        """Run validation after a cooling period (Gemini R2)."""
+        logger.info(f"[VALIDATE] Scheduled validation for event {initial_state['event_id']} in {delay_seconds}s")
+        await asyncio.sleep(delay_seconds)
+        try:
+            await validation_graph.ainvoke(initial_state)
+            logger.info(f"[VALIDATE] Delayed validation completed for {initial_state['event_id']}")
+        except Exception as e:
+            logger.error(f"[VALIDATE] Delayed validation failed: {e}")
 
     def create_workflow():
         workflow = StateGraph(AgentState)
@@ -2409,6 +2789,109 @@ data:
     @app.get("/status")
     async def get_status():
         return {"pending_count": len(pending_approvals), "auto_executed": 0, "active_runbooks": 0, "learning_queue": 0}
+
+    # ============================================================================
+    # VALIDATION ENDPOINTS - Project 03: Evaluator System
+    # ============================================================================
+
+    class ValidateRequest(BaseModel):
+        event_id: str
+        triggered_by: str = "human"
+
+    class ValidateCandidatesRequest(BaseModel):
+        max_candidates: int = 10
+
+    @app.post("/validate", status_code=202)
+    async def validate_event(request: ValidateRequest):
+        """Trigger validation workflow for a specific event.
+
+        For human-triggered: runs immediately (no cooling period).
+        For langgraph-auto: uses 5-minute cooling period.
+        """
+        initial_state = {
+            "event_id": request.event_id,
+            "triggered_by": request.triggered_by,
+            "event": {},
+            "runbook": None,
+            "reported_success": False,
+            "ground_truth": {},
+            "verdict": "pending",
+            "confidence": 0.0,
+            "actual_success": None,
+            "signal_count": 0,
+            "validation_recorded": False,
+        }
+
+        if request.triggered_by == "langgraph-auto":
+            # Delayed validation with 5-minute cooling period (Gemini R2)
+            asyncio.create_task(_delayed_validation(initial_state, delay_seconds=300))
+            return {"status": "scheduled", "event_id": request.event_id, "delay_seconds": 300}
+        else:
+            # Immediate validation for human-triggered
+            asyncio.create_task(validation_graph.ainvoke(initial_state))
+            return {"status": "processing", "event_id": request.event_id}
+
+    @app.post("/validate-candidates", status_code=202)
+    async def validate_candidates(request: ValidateCandidatesRequest):
+        """Trigger validation for autonomy upgrade candidates.
+
+        Called by pattern-detector to validate candidates before notification.
+        """
+        # Get autonomy candidates from knowledge-mcp
+        candidates = await call_mcp_tool(KNOWLEDGE_MCP_URL, "list_autonomy_candidates", {
+            "min_executions": 5,
+            "min_success_rate": 0.7,
+        })
+
+        if not candidates or isinstance(candidates, dict) and candidates.get("error"):
+            return {"status": "no_candidates", "candidates": 0, "validations_queued": 0}
+
+        # Limit candidates
+        candidates = candidates[:request.max_candidates] if isinstance(candidates, list) else []
+
+        queued = 0
+        for candidate in candidates:
+            # Get recent execution events for this runbook
+            runbook_id = candidate.get("id")
+            if not runbook_id:
+                continue
+
+            # Find recent execution events for this runbook
+            recent_events = await call_mcp_tool(KNOWLEDGE_MCP_URL, "list_recent_events", {
+                "event_type": "runbook.execution",
+                "limit": 5,
+            })
+
+            if isinstance(recent_events, list):
+                for event in recent_events:
+                    event_meta = event.get("metadata", {})
+                    if event_meta.get("runbook_id") == runbook_id:
+                        # Check if already validated
+                        if not event.get("validation"):
+                            event_id = event.get("id") or event.get("event_id")
+                            if event_id:
+                                initial_state = {
+                                    "event_id": event_id,
+                                    "triggered_by": "pattern-detector",
+                                    "event": {},
+                                    "runbook": None,
+                                    "reported_success": event_meta.get("success", False),
+                                    "ground_truth": {},
+                                    "verdict": "pending",
+                                    "confidence": 0.0,
+                                    "actual_success": None,
+                                    "signal_count": 0,
+                                    "validation_recorded": False,
+                                }
+                                asyncio.create_task(validation_graph.ainvoke(initial_state))
+                                queued += 1
+
+        logger.info(f"[VALIDATE] Queued {queued} validations for {len(candidates)} candidates")
+        return {
+            "status": "processing",
+            "candidates": len(candidates),
+            "validations_queued": queued,
+        }
 
     class QueryRequest(BaseModel):
         prompt: str

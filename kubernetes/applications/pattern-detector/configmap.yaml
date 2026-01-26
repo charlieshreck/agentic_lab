@@ -38,6 +38,7 @@ data:
     # Configuration
     QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
     MATRIX_WEBHOOK_URL = os.getenv("MATRIX_WEBHOOK_URL", "")
+    LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://langgraph:8000")
     DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
@@ -290,29 +291,40 @@ data:
             autonomy_level = metadata.get("autonomy_level", "manual")
 
             # Check if eligible for upgrade
-            if execution_count >= 10 and success_rate >= 0.9:
-                if autonomy_level == "manual":
-                    candidates.append({
-                        "type": "autonomy_candidate",
-                        "runbook_id": runbook.get("id"),
-                        "title": runbook.get("title"),
-                        "success_rate": success_rate,
-                        "execution_count": execution_count,
-                        "current_level": autonomy_level,
-                        "target_level": "prompted",
-                        "suggestion": f"Upgrade '{runbook.get('title')}' to prompted ({success_rate:.0%} success)"
-                    })
-                elif autonomy_level == "prompted" and success_rate >= 0.95:
-                    candidates.append({
-                        "type": "autonomy_candidate",
-                        "runbook_id": runbook.get("id"),
-                        "title": runbook.get("title"),
-                        "success_rate": success_rate,
-                        "execution_count": execution_count,
-                        "current_level": autonomy_level,
-                        "target_level": "standard",
-                        "suggestion": f"Upgrade '{runbook.get('title')}' to standard ({success_rate:.0%} success)"
-                    })
+            # Thresholds: manual→prompted (70%), prompted→standard (85%), standard→autonomous (95%)
+            if autonomy_level == "manual" and execution_count >= 5 and success_rate >= 0.7:
+                candidates.append({
+                    "type": "autonomy_candidate",
+                    "runbook_id": runbook.get("id"),
+                    "title": runbook.get("title"),
+                    "success_rate": success_rate,
+                    "execution_count": execution_count,
+                    "current_level": autonomy_level,
+                    "target_level": "prompted",
+                    "suggestion": f"Upgrade '{runbook.get('title')}' to prompted ({success_rate:.0%} success)"
+                })
+            elif autonomy_level == "prompted" and execution_count >= 10 and success_rate >= 0.85:
+                candidates.append({
+                    "type": "autonomy_candidate",
+                    "runbook_id": runbook.get("id"),
+                    "title": runbook.get("title"),
+                    "success_rate": success_rate,
+                    "execution_count": execution_count,
+                    "current_level": autonomy_level,
+                    "target_level": "standard",
+                    "suggestion": f"Upgrade '{runbook.get('title')}' to standard ({success_rate:.0%} success)"
+                })
+            elif autonomy_level == "standard" and execution_count >= 20 and success_rate >= 0.95:
+                candidates.append({
+                    "type": "autonomy_candidate",
+                    "runbook_id": runbook.get("id"),
+                    "title": runbook.get("title"),
+                    "success_rate": success_rate,
+                    "execution_count": execution_count,
+                    "current_level": autonomy_level,
+                    "target_level": "autonomous",
+                    "suggestion": f"Upgrade '{runbook.get('title')}' to autonomous ({success_rate:.0%} success)"
+                })
 
         for c in candidates:
             print(f"[AUTONOMY] {c['title']}: {c['current_level']} → {c['target_level']}")
@@ -449,6 +461,20 @@ data:
 
         # Log the analysis
         log_analysis_event(findings)
+
+        # Trigger validation for autonomy candidates before notification
+        autonomy_items = [f for f in findings if f.get("type") == "autonomy_candidate"]
+        if autonomy_items and not DRY_RUN:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        f"{LANGGRAPH_URL}/validate-candidates",
+                        json={"max_candidates": 10}
+                    )
+                    result = response.json()
+                    print(f"[VALIDATE] Triggered validation: {result}")
+            except Exception as e:
+                print(f"[WARN] Failed to trigger validation: {e}")
 
         # Send summary notification if there are actionable findings
         actionable = [f for f in findings if f.get("type") in ("autonomy_candidate", "failing_runbook")]

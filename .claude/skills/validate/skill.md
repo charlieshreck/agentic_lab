@@ -1,6 +1,6 @@
 # Validate Skill
 
-This skill provides human-triggered validation of runbook executions against ground truth from the observability stack.
+This skill provides human-triggered validation of runbook executions against ground truth from the observability stack, powered by the LangGraph validation SubGraph.
 
 ## When to Use
 
@@ -19,103 +19,91 @@ Use this skill when:
 /validate --autonomy-candidates   # Validate all pending promotion candidates
 ```
 
-## Validation Process
+## Validation Method
 
-### Step 1: Retrieve Execution Event
+All validation is routed through the LangGraph validation SubGraph, which implements a 4-node workflow:
 
-Use knowledge-mcp to get the execution event:
-```
-get_event(event_id)
-```
+1. **fetch_context** - Gets event + runbook from knowledge-mcp
+2. **gather_truth** - Queries observability-mcp (Keep, Coroot, Gatus) and infrastructure-mcp (kubectl)
+3. **compute_verdict** - Deterministic logic first, Ollama/LiteLLM fallback if uncertain
+4. **record_validation** - Writes structured validation back to knowledge-mcp
 
-This returns:
-- `runbook_id`: Which runbook was executed
-- `timestamp`: When it ran
-- `success`: Reported success/failure
-- `output`: Execution output/logs
-- `alert_fingerprint`: Related alert (if any)
-- `service_name`: Affected service (if any)
+### Single Event Validation
 
-### Step 2: Retrieve Runbook Definition
-
-Use knowledge-mcp to get the runbook:
-```
-get_runbook(runbook_id)
+```bash
+# POST to LangGraph validation endpoint
+curl -X POST http://langgraph:8000/validate \
+  -H "Content-Type: application/json" \
+  -d '{"event_id": "<event_id>", "triggered_by": "human"}'
 ```
 
-This returns:
-- `title`: Runbook name
-- `steps`: What it does
-- `expected_outcome`: What success looks like
-- `success_criteria`: How to verify success
+Human-triggered validations run immediately (no cooling period).
 
-### Step 3: Gather Ground Truth
+### Batch Validation (Autonomy Candidates)
 
-Query observability sources to determine what actually happened:
-
-#### Keep (Alert State)
-If the execution was for an alert:
+```bash
+# POST to LangGraph validate-candidates endpoint
+curl -X POST http://langgraph:8000/validate-candidates \
+  -H "Content-Type: application/json" \
+  -d '{"max_candidates": 10}'
 ```
-keep_get_alert(alert_fingerprint)
-```
-Check: Is the alert resolved? When did it resolve?
 
-#### Prometheus/VictoriaMetrics (Metrics)
-If success criteria includes metrics:
-```
-query_metrics(query, start_time, end_time)
-```
-Check: Did the metric improve after execution?
+### Check Results
 
-#### Coroot (Service Health)
-If a service was involved:
-```
-coroot_get_service_metrics(service_name)
-```
-Check: Is the service healthy now?
+After validation completes, the event will have a `validation` field:
 
-#### Gatus (Endpoint Status)
-If an endpoint was involved:
 ```
-gatus_get_endpoint_status(endpoint)
+knowledge-mcp: get_event(<event_id>)
 ```
-Check: Is the endpoint responding?
 
-#### Kubernetes (Pod/Deployment State)
-If Kubernetes resources were involved:
-```
-kubectl_get_pods(namespace, label_selector)
-kubectl_get_deployments(namespace)
-```
-Check: Are pods running? Is deployment healthy?
-
-### Step 4: Compare and Evaluate
-
-Compare the reported outcome against ground truth:
-
-| Reported | Ground Truth | Verdict |
-|----------|--------------|---------|
-| Success  | Confirmed    | ✅ Validated |
-| Success  | Not confirmed| ⚠️ False positive |
-| Failure  | Confirmed    | ✅ Validated |
-| Failure  | Success seen | ⚠️ False negative |
-
-### Step 5: Record Validation
-
-Update the event with validation results:
-```
-update_event(
-  event_id=event_id,
-  validation={
+Returns:
+```json
+{
+  "validation": {
     "validated": true,
-    "validated_at": "ISO timestamp",
-    "validated_by": "human-triggered",
-    "verdict": "confirmed|false_positive|false_negative|uncertain",
-    "confidence": 0.0-1.0,
-    "ground_truth": {...}
+    "validated_at": "2026-01-26T08:30:00",
+    "validated_by": "human",
+    "verdict": "confirmed",
+    "confidence": 0.95,
+    "actual_success": true,
+    "signal_count": 3,
+    "ground_truth": {
+      "alert_state": {"status": "resolved", "resolved": true},
+      "service_health": {"status": "OK"},
+      "kubernetes": {"total_pods": 2, "running_pods": 2, "healthy": true}
+    }
   }
-)
+}
 ```
+
+## Workflow for Each Command
+
+### `/validate <event_id>`
+
+1. Call `POST http://langgraph:8000/validate` with `{"event_id": "<event_id>", "triggered_by": "human"}`
+2. Wait a few seconds for processing
+3. Call `get_event(<event_id>)` via knowledge-mcp to retrieve the validation result
+4. Display the verdict, confidence, and ground truth summary
+
+### `/validate --runbook <runbook_id>`
+
+1. Call `list_recent_events(event_type="runbook.execution", limit=20)` via knowledge-mcp
+2. Filter events where `metadata.runbook_id == <runbook_id>`
+3. For each unvalidated event, call `POST http://langgraph:8000/validate`
+4. Wait for processing, then retrieve and display results in a table
+
+### `/validate --last <n>`
+
+1. Call `list_recent_events(event_type="runbook.execution", limit=<n>)` via knowledge-mcp
+2. For each unvalidated event, call `POST http://langgraph:8000/validate`
+3. Wait for processing, then retrieve and display results
+
+### `/validate --autonomy-candidates`
+
+1. Call `POST http://langgraph:8000/validate-candidates` with `{"max_candidates": 10}`
+2. Wait for processing
+3. Call `list_autonomy_candidates()` via knowledge-mcp
+4. For each candidate, get recent events and display validation status
 
 ## Response Format
 
@@ -139,7 +127,7 @@ update_event(
 {✅ Confirmed | ⚠️ False Positive | ⚠️ False Negative | ❓ Uncertain}
 
 **Confidence:** {0.0-1.0}
-**Evidence:** {brief summary}
+**Signals checked:** {signal_count}
 ```
 
 ### Batch Validation (Runbook Audit)
@@ -164,6 +152,23 @@ Last {n} executions:
 {Ready for promotion | Needs investigation | Block promotion}
 ```
 
+## Verdict Types
+
+| Verdict | Meaning | Autonomy Impact |
+|---------|---------|-----------------|
+| confirmed | Reported outcome matches ground truth | Counts toward promotion |
+| false_positive | Reported success, actually failed | **Blocks runbook** (downgraded to manual) |
+| false_negative | Reported failure, actually succeeded | No impact (conservative) |
+| uncertain | Insufficient signals (confidence < 0.7) | Not counted |
+
+## Key Design Decisions
+
+- **Deterministic first**: Pure Python logic evaluates ground truth signals before any LLM call
+- **LLM fallback**: Only invoked if deterministic logic returns confidence < 0.7
+- **5-minute cooling**: Auto-triggered validations wait 5 minutes for metrics to settle
+- **False positive = block**: Runbooks producing false positives are immediately downgraded to manual (Gemini R3)
+- **Pydantic enforced**: All validation results pass through ValidationResult schema (Gemini R4)
+
 ## Ground Truth Sources by Domain
 
 | Domain | Primary Source | Secondary Source |
@@ -177,14 +182,15 @@ Last {n} executions:
 
 ## Notes
 
-- This skill is **human-triggered only** - not automated
-- Use LiteLLM for LLM calls (routes to configured backend)
-- Ground truth gathering may fail if observability is unavailable
-- Confidence < 0.7 should be marked as "uncertain"
+- This skill is **human-triggered only** - automated validation is handled by LangGraph's `record_outcome` function
+- Ground truth gathering may fail if observability stack is unavailable (verdict = "uncertain", confidence = 0.3)
+- Confidence < 0.7 is marked as "uncertain" and not counted toward autonomy decisions
 - False positives are more dangerous than false negatives for autonomy
 
 ## Related
 
 - `record_runbook_execution()` - How executions are logged
-- `get_autonomy_config()` - Promotion thresholds
+- `get_autonomy_config()` - Promotion thresholds (70/85/95)
 - `list_autonomy_candidates()` - Pending promotions
+- `POST /validate` - LangGraph validation endpoint
+- `POST /validate-candidates` - Batch validation endpoint
