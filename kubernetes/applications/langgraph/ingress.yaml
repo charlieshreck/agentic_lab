@@ -3,16 +3,10 @@ kind: Ingress
 metadata:
   name: langgraph
   namespace: ai-platform
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
-  tls:
-    - hosts:
-        - langgraph.kernow.io
-      secretName: kernow-io-tls
   rules:
-    - host: langgraph.kernow.io
+    - host: langgraph.agentic.kernow.io
       http:
         paths:
           - path: /
