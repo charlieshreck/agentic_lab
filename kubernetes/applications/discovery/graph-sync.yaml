@@ -169,6 +169,20 @@ spec:
                       logger.warning(f"MCP call {server}/{tool_name} JSON parse failed: {e}")
                       return {}
 
+              def extract_list(response, *keys):
+                  """Extract a list from MCP tool response, handling various formats."""
+                  if isinstance(response, list):
+                      return response
+                  if isinstance(response, dict):
+                      # Try 'result' key first (common MCP tool wrapper)
+                      if "result" in response and isinstance(response["result"], list):
+                          return response["result"]
+                      # Try specified keys
+                      for key in keys:
+                          if key in response and isinstance(response[key], list):
+                              return response[key]
+                  return []
+
               def call_rest_api(base_url: str, endpoint: str) -> dict:
                   """Call REST API endpoint directly."""
                   url = f"{base_url}{endpoint}"
@@ -188,8 +202,8 @@ spec:
                   logger.info("Syncing Proxmox VMs...")
 
                   # Get VMs list via consolidated infrastructure-mcp
-                  vms_response = call_mcp_tool("infrastructure", "proxmox_list_vms")
-                  vms = vms_response if isinstance(vms_response, list) else (vms_response.get("vms", []) if isinstance(vms_response, dict) else [])
+                  vms_response = call_mcp_tool("infrastructure", "proxmox_list_vms", {"params": {"response_format": "json"}})
+                  vms = extract_list(vms_response, "vms")
 
                   if not vms:
                       logger.warning("No VMs returned from Proxmox MCP")
@@ -238,7 +252,7 @@ spec:
 
                   # Get devices (APs, switches) via consolidated home-mcp
                   devices_response = call_mcp_tool("home", "unifi_list_devices")
-                  devices = devices_response if isinstance(devices_response, list) else (devices_response.get("devices", []) if isinstance(devices_response, dict) else [])
+                  devices = extract_list(devices_response, "devices", "result")
 
                   count = 0
                   for device in devices:
@@ -278,7 +292,7 @@ spec:
 
                   # Get clients and their AP connections via consolidated home-mcp
                   clients_response = call_mcp_tool("home", "unifi_list_clients")
-                  clients = clients_response if isinstance(clients_response, list) else (clients_response.get("clients", []) if isinstance(clients_response, dict) else [])
+                  clients = extract_list(clients_response, "clients", "result")
 
                   for client in clients:
                       mac = client.get("mac", "").lower()
@@ -311,8 +325,8 @@ spec:
                   logger.info("Syncing TrueNAS storage...")
 
                   # Get pools via consolidated infrastructure-mcp
-                  pools_response = call_mcp_tool("infrastructure", "truenas_list_pools")
-                  pools = pools_response if isinstance(pools_response, list) else (pools_response.get("pools", []) if isinstance(pools_response, dict) else [])
+                  pools_response = call_mcp_tool("infrastructure", "truenas_list_pools", {"params": {"instance": "hdd", "response_format": "json"}})
+                  pools = extract_list(pools_response, "pools", "result")
 
                   count = 0
                   for pool in pools:
@@ -341,8 +355,8 @@ spec:
                           count += 1
 
                   # Get datasets via consolidated infrastructure-mcp
-                  datasets_response = call_mcp_tool("infrastructure", "truenas_list_datasets")
-                  datasets = datasets_response if isinstance(datasets_response, list) else (datasets_response.get("datasets", []) if isinstance(datasets_response, dict) else [])
+                  datasets_response = call_mcp_tool("infrastructure", "truenas_list_datasets", {"params": {"instance": "hdd", "response_format": "json"}})
+                  datasets = extract_list(datasets_response, "datasets", "result")
 
                   for dataset in datasets:
                       name = dataset.get("name", "")
@@ -370,14 +384,17 @@ spec:
                       })
 
                   # Get shares via consolidated infrastructure-mcp
-                  shares_response = call_mcp_tool("infrastructure", "truenas_list_shares")
-                  # Shares may return {nfs: [], smb: []} dict or flat list
+                  shares_response = call_mcp_tool("infrastructure", "truenas_list_shares", {"params": {"instance": "hdd", "response_format": "json"}})
+                  # Shares may return {nfs: [], smb: []} dict, {result: []} wrapper, or flat list
                   if isinstance(shares_response, list):
                       shares = shares_response
                   elif isinstance(shares_response, dict):
-                      nfs_shares = shares_response.get("nfs", [])
-                      smb_shares = shares_response.get("smb", [])
-                      shares = nfs_shares + smb_shares
+                      if "result" in shares_response and isinstance(shares_response["result"], list):
+                          shares = shares_response["result"]
+                      else:
+                          nfs_shares = shares_response.get("nfs", [])
+                          smb_shares = shares_response.get("smb", [])
+                          shares = nfs_shares + smb_shares
                   else:
                       shares = []
 
@@ -406,97 +423,89 @@ spec:
                   return count
 
               def sync_kubernetes_services():
-                  """Sync Kubernetes services to Neo4j from multiple clusters."""
+                  """Sync Kubernetes services to Neo4j.
+
+                  Note: infrastructure-mcp only has access to the agentic cluster.
+                  Prod cluster services are covered by Coroot's service discovery.
+                  """
                   logger.info("Syncing Kubernetes services...")
+                  cluster = "agentic"
 
-                  # Clusters to sync (agentic default, prod via mounted kubeconfig)
-                  CLUSTERS = ["agentic", "prod"]
-                  total_services = 0
-                  total_pods = 0
+                  # Get services via consolidated infrastructure-mcp
+                  services_response = call_mcp_tool("infrastructure", "kubectl_get_services", {"all_namespaces": True})
+                  services = extract_list(services_response, "services", "result")
 
-                  for cluster in CLUSTERS:
-                      logger.info(f"Syncing from {cluster} cluster...")
+                  count = 0
+                  for svc in services:
+                      name = svc.get("name")
+                      namespace = svc.get("namespace")
 
-                      # Get services via consolidated infrastructure-mcp
-                      services_response = call_mcp_tool("infrastructure", "kubectl_get_services", {"namespace": "all", "cluster": cluster})
-                      services = services_response if isinstance(services_response, list) else (services_response.get("services", []) if isinstance(services_response, dict) else [])
+                      if not name or not namespace:
+                          continue
 
-                      count = 0
-                      for svc in services:
-                          name = svc.get("name")
-                          namespace = svc.get("namespace")
+                      svc_type = svc.get("type", "ClusterIP")
+                      cluster_ip = svc.get("cluster_ip", "")
 
-                          if not name or not namespace:
-                              continue
+                      cypher = """
+                      MERGE (s:Service {name: $name, namespace: $namespace, cluster: $cluster})
+                      SET s.type = $type,
+                          s.cluster_ip = $cluster_ip,
+                          s.last_seen = datetime(),
+                          s.source = 'kubernetes'
+                      RETURN s.name
+                      """
 
-                          svc_type = svc.get("type", "ClusterIP")
-                          cluster_ip = svc.get("cluster_ip", "")
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "namespace": namespace,
+                          "cluster": cluster,
+                          "type": svc_type,
+                          "cluster_ip": cluster_ip
+                      })
 
-                          cypher = """
-                          MERGE (s:Service {name: $name, namespace: $namespace, cluster: $cluster})
-                          SET s.type = $type,
-                              s.cluster_ip = $cluster_ip,
-                              s.last_seen = datetime(),
-                              s.source = 'kubernetes'
-                          RETURN s.name
-                          """
+                      if not result.get("errors"):
+                          count += 1
 
-                          result = neo4j_query(cypher, {
-                              "name": name,
-                              "namespace": namespace,
-                              "cluster": cluster,
-                              "type": svc_type,
-                              "cluster_ip": cluster_ip
-                          })
+                  # Get pods via consolidated infrastructure-mcp
+                  pods_response = call_mcp_tool("infrastructure", "kubectl_get_pods", {"all_namespaces": True})
+                  pods = extract_list(pods_response, "pods", "result")
 
-                          if not result.get("errors"):
-                              count += 1
+                  pod_count = 0
+                  for pod in pods:
+                      name = pod.get("name")
+                      namespace = pod.get("namespace")
 
-                      total_services += count
+                      if not name or not namespace:
+                          continue
 
-                      # Get pods via consolidated infrastructure-mcp
-                      pods_response = call_mcp_tool("infrastructure", "kubectl_get_pods", {"namespace": "all", "cluster": cluster})
-                      pods = pods_response if isinstance(pods_response, list) else (pods_response.get("pods", []) if isinstance(pods_response, dict) else [])
+                      node_name = pod.get("node", "unknown")
+                      phase = pod.get("status", "unknown")
 
-                      pod_count = 0
-                      for pod in pods:
-                          name = pod.get("name")
-                          namespace = pod.get("namespace")
+                      cypher = """
+                      MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
+                      SET p.node = $node,
+                          p.phase = $phase,
+                          p.last_seen = datetime(),
+                          p.source = 'kubernetes'
+                      WITH p
+                      MERGE (h:Host {hostname: $node})
+                      MERGE (p)-[:SCHEDULED_ON]->(h)
+                      RETURN p.name
+                      """
 
-                          if not name or not namespace:
-                              continue
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "namespace": namespace,
+                          "cluster": cluster,
+                          "node": node_name,
+                          "phase": phase
+                      })
 
-                          node_name = pod.get("node", "unknown")
-                          phase = pod.get("status", "unknown")
+                      if not result.get("errors"):
+                          pod_count += 1
 
-                          cypher = """
-                          MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
-                          SET p.node = $node,
-                              p.phase = $phase,
-                              p.last_seen = datetime(),
-                              p.source = 'kubernetes'
-                          WITH p
-                          MERGE (h:Host {hostname: $node})
-                          MERGE (p)-[:SCHEDULED_ON]->(h)
-                          RETURN p.name
-                          """
-
-                          result = neo4j_query(cypher, {
-                              "name": name,
-                              "namespace": namespace,
-                              "cluster": cluster,
-                              "node": node_name,
-                              "phase": phase
-                          })
-
-                          if not result.get("errors"):
-                              pod_count += 1
-
-                      total_pods += pod_count
-                      logger.info(f"  {cluster}: {count} services, {pod_count} pods")
-
-                  logger.info(f"Synced total: {total_services} services, {total_pods} pods from {len(CLUSTERS)} clusters")
-                  return total_services
+                  logger.info(f"Synced {count} services, {pod_count} pods from agentic cluster")
+                  return count
 
               def sync_runbooks():
                   """Link runbooks to alerts in Neo4j."""
@@ -602,7 +611,7 @@ spec:
 
                   # Get alerts from consolidated observability-mcp
                   alerts_response = call_mcp_tool("observability", "coroot_get_alerts")
-                  alerts = alerts_response if isinstance(alerts_response, list) else (alerts_response.get("alerts", []) if isinstance(alerts_response, dict) else [])
+                  alerts = extract_list(alerts_response, "alerts", "result")
 
                   for alert in alerts:
                       alert_name = alert.get("name", alert.get("alertname", "unknown"))
@@ -721,7 +730,7 @@ spec:
                       logger.warning(f"Home-MCP unavailable, skipping area sync: {e}")
                       return 0
 
-                  entities = entities_response if isinstance(entities_response, list) else (entities_response.get("entities", []) if isinstance(entities_response, dict) else [])
+                  entities = extract_list(entities_response, "entities", "result")
                   if not entities:
                       logger.info("No entities returned from HA, skipping area sync")
                       return 0
