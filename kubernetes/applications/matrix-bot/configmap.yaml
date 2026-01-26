@@ -158,9 +158,9 @@ data:
         @staticmethod
         def card(title: str, severity: str, body: str, footer: str = "") -> str:
             emoji = MessageFormatter.SEVERITY_EMOJI.get(severity.lower(), "\U0001f4cb")
-            html = f"<h3>{emoji} {title}</h3>\n{body}"
+            html = f"<h3>{emoji} {title}</h3><br/>{body}"
             if footer:
-                html += f"\n<hr/>\n{footer}"
+                html += f"<br/><hr/><br/>{footer}"
             return html
 
 
@@ -1495,11 +1495,11 @@ data:
         if alert.suggested_fix:
             details["Suggested Fix"] = alert.suggested_fix
 
-        body = f"<p>{alert.description}</p>\n"
+        body = f"<p>{alert.description}</p><br/>"
         body += MessageFormatter.kv_table(details)
 
         if alert.context:
-            body += "\n"
+            body += "<br/>"
             body += MessageFormatter.collapsible(
                 "Raw Context", f"<pre>{alert.context[:500]}</pre>"
             )
@@ -1656,13 +1656,13 @@ data:
         body = MessageFormatter.kv_table(details)
 
         if description:
-            body += f"\n<h4>Description</h4>\n<p>{description}</p>"
+            body += f"<br/><h4>Description</h4><p>{description}</p>"
         if assessment:
-            body += f"\n<h4>AI Assessment</h4>\n<p>{assessment}</p>"
+            body += f"<br/><h4>AI Assessment</h4><p>{assessment}</p>"
         if suggested_action:
-            body += f"\n<h4>Suggested Action</h4>\n<p>{suggested_action}</p>"
+            body += f"<br/><h4>Suggested Action</h4><p>{suggested_action}</p>"
         if runbook:
-            body += f"\n<p><strong>Runbook:</strong> {runbook}</p>"
+            body += f"<br/><p><strong>Runbook:</strong> {runbook}</p>"
 
         footer = (
             "<em>React: \u2705 approve \u00b7 \u274c reject "
@@ -1752,17 +1752,17 @@ data:
             "Severity": MessageFormatter.status_badge(request.severity),
         }
         body = MessageFormatter.kv_table(details)
-        body += f"\n<h4>Why Escalated</h4>\n<p>{request.reason}</p>"
+        body += f"<br/><h4>Why Escalated</h4><p>{request.reason}</p>"
 
         if request.context_summary:
-            body += "\n"
+            body += "<br/>"
             body += MessageFormatter.collapsible(
                 "Context Gathered",
                 f"<p>{request.context_summary[:500]}</p>",
             )
 
         if request.suggestions:
-            body += "\n<h4>Ollama's Suggestions</h4>\n<ol>"
+            body += "<br/><h4>Ollama's Suggestions</h4><ol>"
             for s in request.suggestions[:3]:
                 name = s.get("name", "Option")
                 desc = s.get("description", "")[:200]
@@ -1770,7 +1770,7 @@ data:
             body += "</ol>"
 
         body += (
-            f'\n<p><strong>Review in Outline:</strong> '
+            f'<br/><p><strong>Review in Outline:</strong> '
             f'<a href="{request.outline_url}">'
             f"{request.outline_url}</a></p>"
         )
@@ -1862,11 +1862,11 @@ data:
             "Execution": f"{exec_emoji} {status_text}",
         }
         body = MessageFormatter.kv_table(details)
-        body += f"\n<h4>Tweaks Made</h4>\n<p>{tweaks_made[:500]}</p>"
+        body += f"<br/><h4>Tweaks Made</h4><p>{tweaks_made[:500]}</p>"
 
         if outline_url:
             body += (
-                f'\n<p><strong>Review Proposal:</strong> '
+                f'<br/><p><strong>Review Proposal:</strong> '
                 f'<a href="{outline_url}">{outline_url}</a></p>'
             )
 
