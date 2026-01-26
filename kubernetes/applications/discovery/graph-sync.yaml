@@ -216,6 +216,19 @@ spec:
                       status = vm.get("status", "unknown")
                       node = vm.get("node", "unknown")
 
+                      # Extract resource metrics from Proxmox response
+                      cpu_percent = round(vm.get("cpu", 0) * 100, 1)
+                      cpus = vm.get("maxcpu", vm.get("cpus", 0))
+                      mem_used = vm.get("mem", 0)
+                      mem_total = vm.get("maxmem", 0)
+                      memory_used_gb = round(mem_used / (1024**3), 2) if mem_used else 0
+                      memory_total_gb = round(mem_total / (1024**3), 2) if mem_total else 0
+                      memory_percent = round((mem_used / mem_total) * 100, 1) if mem_total else 0
+                      uptime_days = round(vm.get("uptime", 0) / 86400, 2)
+                      netin_gb = round(vm.get("netin", 0) / (1024**3), 2)
+                      netout_gb = round(vm.get("netout", 0) / (1024**3), 2)
+                      disk_max_gb = round(vm.get("maxdisk", 0) / (1024**3), 2)
+
                       # Create VM node
                       cypher = """
                       MERGE (v:VM {vmid: $vmid})
@@ -223,6 +236,15 @@ spec:
                           v.status = $status,
                           v.node = $node,
                           v.type = $type,
+                          v.cpu_percent = $cpu_percent,
+                          v.cpus = $cpus,
+                          v.memory_used_gb = $memory_used_gb,
+                          v.memory_total_gb = $memory_total_gb,
+                          v.memory_percent = $memory_percent,
+                          v.uptime_days = $uptime_days,
+                          v.netin_gb = $netin_gb,
+                          v.netout_gb = $netout_gb,
+                          v.disk_max_gb = $disk_max_gb,
                           v.last_seen = datetime(),
                           v.source = 'proxmox'
                       WITH v
@@ -237,7 +259,16 @@ spec:
                           "name": name,
                           "status": status,
                           "node": node,
-                          "type": vm.get("type", "qemu")
+                          "type": vm.get("type", "qemu"),
+                          "cpu_percent": cpu_percent,
+                          "cpus": cpus,
+                          "memory_used_gb": memory_used_gb,
+                          "memory_total_gb": memory_total_gb,
+                          "memory_percent": memory_percent,
+                          "uptime_days": uptime_days,
+                          "netin_gb": netin_gb,
+                          "netout_gb": netout_gb,
+                          "disk_max_gb": disk_max_gb
                       })
 
                       if not result.get("errors"):
@@ -422,7 +453,86 @@ spec:
                   logger.info(f"Synced {count} storage pools, {len(datasets)} datasets, {len(shares)} shares")
                   return count
 
-              def sync_kubernetes_services():
+              def sync_kubernetes_deployments():
+                  """Sync Kubernetes deployments to Neo4j. Returns deploy_status lookup dict."""
+                  logger.info("Syncing Kubernetes deployments...")
+                  cluster = "agentic"
+
+                  deploys_response = call_mcp_tool("infrastructure", "kubectl_get_deployments", {"all_namespaces": True})
+                  deploys = extract_list(deploys_response, "deployments", "result")
+
+                  deploy_status = {}
+                  count = 0
+                  for d in deploys:
+                      name = d.get("name")
+                      namespace = d.get("namespace")
+                      if not name or not namespace:
+                          continue
+
+                      replicas = d.get("replicas", 0)
+                      ready = d.get("ready", 0)
+                      available = d.get("available", 0)
+
+                      # Derive status
+                      if replicas == 0:
+                          status = "scaled-down"
+                      elif ready >= replicas:
+                          status = "healthy"
+                      elif ready > 0:
+                          status = "degraded"
+                      else:
+                          status = "unhealthy"
+
+                      # Store for Service enrichment
+                      deploy_status[(name, namespace)] = {
+                          "status": status,
+                          "replicas": replicas,
+                          "ready": ready,
+                          "available": available
+                      }
+
+                      # Extract selector for transparency
+                      selector = d.get("selector", "")
+
+                      cypher = """
+                      MERGE (dep:Deployment {name: $name, namespace: $namespace, cluster: $cluster})
+                      SET dep.replicas = $replicas,
+                          dep.ready_replicas = $ready,
+                          dep.available_replicas = $available,
+                          dep.status = $status,
+                          dep.selector = $selector,
+                          dep.last_seen = datetime(),
+                          dep.source = 'kubernetes'
+                      RETURN dep.name
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "namespace": namespace,
+                          "cluster": cluster,
+                          "replicas": replicas,
+                          "ready": ready,
+                          "available": available,
+                          "status": status,
+                          "selector": selector
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                      # Create BACKED_BY relationship (Service→Deployment) by name+namespace heuristic
+                      rel_cypher = """
+                      MATCH (s:Service {name: $name, namespace: $namespace, cluster: $cluster})
+                      MATCH (dep:Deployment {name: $name, namespace: $namespace, cluster: $cluster})
+                      MERGE (s)-[:BACKED_BY]->(dep)
+                      RETURN s.name
+                      """
+                      neo4j_query(rel_cypher, {"name": name, "namespace": namespace, "cluster": cluster})
+
+                  logger.info(f"Synced {count} deployments from agentic cluster")
+                  return deploy_status
+
+              def sync_kubernetes_services(deploy_status=None):
                   """Sync Kubernetes services to Neo4j.
 
                   Note: infrastructure-mcp only has access to the agentic cluster.
@@ -446,10 +556,30 @@ spec:
                       svc_type = svc.get("type", "ClusterIP")
                       cluster_ip = svc.get("cluster_ip", "")
 
+                      # Format ports as "port:targetPort" strings
+                      ports_list = svc.get("ports", [])
+                      ports_str = ", ".join(
+                          f"{p.get('port', '')}:{p.get('target', '')}" +
+                          (f" (NP:{p['nodePort']})" if p.get('nodePort') else "")
+                          for p in ports_list
+                      ) if ports_list else ""
+
+                      # Derive status from matching deployment
+                      deploy_info = (deploy_status or {}).get((name, namespace))
+                      if deploy_info:
+                          svc_status = deploy_info["status"]
+                          replicas_str = f"{deploy_info['ready']}/{deploy_info['replicas']}"
+                      else:
+                          svc_status = "unknown"
+                          replicas_str = ""
+
                       cypher = """
                       MERGE (s:Service {name: $name, namespace: $namespace, cluster: $cluster})
-                      SET s.type = $type,
+                      SET s.service_type = $service_type,
                           s.cluster_ip = $cluster_ip,
+                          s.ports = $ports,
+                          s.status = $status,
+                          s.replicas = $replicas,
                           s.last_seen = datetime(),
                           s.source = 'kubernetes'
                       RETURN s.name
@@ -459,8 +589,11 @@ spec:
                           "name": name,
                           "namespace": namespace,
                           "cluster": cluster,
-                          "type": svc_type,
-                          "cluster_ip": cluster_ip
+                          "service_type": svc_type,
+                          "cluster_ip": cluster_ip,
+                          "ports": ports_str,
+                          "status": svc_status,
+                          "replicas": replicas_str
                       })
 
                       if not result.get("errors"):
@@ -480,11 +613,28 @@ spec:
 
                       node_name = pod.get("node", "unknown")
                       phase = pod.get("status", "unknown")
+                      ready = pod.get("ready", False)
+                      restart_count = pod.get("restarts", 0)
+
+                      # Derive pod status from phase + ready
+                      if phase == "Running" and ready:
+                          pod_status = "healthy"
+                      elif phase == "Running" and not ready:
+                          pod_status = "degraded"
+                      elif phase == "Succeeded":
+                          pod_status = "completed"
+                      elif phase in ("Failed", "Unknown"):
+                          pod_status = "unhealthy"
+                      else:
+                          pod_status = phase.lower() if phase else "unknown"
 
                       cypher = """
                       MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
                       SET p.node = $node,
                           p.phase = $phase,
+                          p.status = $status,
+                          p.ready = $ready,
+                          p.restart_count = $restart_count,
                           p.last_seen = datetime(),
                           p.source = 'kubernetes'
                       WITH p
@@ -498,13 +648,143 @@ spec:
                           "namespace": namespace,
                           "cluster": cluster,
                           "node": node_name,
-                          "phase": phase
+                          "phase": phase,
+                          "status": pod_status,
+                          "ready": ready,
+                          "restart_count": restart_count
                       })
 
                       if not result.get("errors"):
                           pod_count += 1
 
                   logger.info(f"Synced {count} services, {pod_count} pods from agentic cluster")
+                  return count
+
+              def sync_kubernetes_ingresses():
+                  """Sync Kubernetes ingresses to Neo4j."""
+                  logger.info("Syncing Kubernetes ingresses...")
+                  cluster = "agentic"
+
+                  ingresses_response = call_mcp_tool("infrastructure", "kubectl_get_ingresses", {"all_namespaces": True})
+                  ingresses = extract_list(ingresses_response, "ingresses", "result")
+
+                  count = 0
+                  for ing in ingresses:
+                      name = ing.get("name")
+                      namespace = ing.get("namespace")
+                      if not name or not namespace:
+                          continue
+
+                      ingress_class = ing.get("class", "")
+                      has_tls = ing.get("tls", False)
+                      hosts_data = ing.get("hosts", [])
+
+                      # Build hosts and paths strings
+                      all_hosts = []
+                      all_paths = []
+                      backend_services = []
+                      for h in hosts_data:
+                          host = h.get("host", "*")
+                          all_hosts.append(host)
+                          for p in h.get("paths", []):
+                              path = p.get("path", "/") if isinstance(p, dict) else p
+                              svc_name = p.get("service", "") if isinstance(p, dict) else ""
+                              port = p.get("port", "") if isinstance(p, dict) else ""
+                              all_paths.append(f"{host}{path} -> {svc_name}:{port}" if svc_name else f"{host}{path}")
+                              if svc_name:
+                                  backend_services.append((svc_name, namespace))
+
+                      cypher = """
+                      MERGE (i:Ingress {name: $name, namespace: $namespace, cluster: $cluster})
+                      SET i.ingress_class = $ingress_class,
+                          i.hosts = $hosts,
+                          i.paths = $paths,
+                          i.tls = $tls,
+                          i.last_seen = datetime(),
+                          i.source = 'kubernetes'
+                      RETURN i.name
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "name": name,
+                          "namespace": namespace,
+                          "cluster": cluster,
+                          "ingress_class": ingress_class,
+                          "hosts": ", ".join(all_hosts),
+                          "paths": "; ".join(all_paths),
+                          "tls": has_tls
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                      # Create ROUTES_TO relationships to backend services
+                      for svc_name, svc_ns in backend_services:
+                          rel_cypher = """
+                          MATCH (i:Ingress {name: $ing_name, namespace: $namespace, cluster: $cluster})
+                          MATCH (s:Service {name: $svc_name, namespace: $namespace, cluster: $cluster})
+                          MERGE (i)-[:ROUTES_TO]->(s)
+                          RETURN s.name
+                          """
+                          neo4j_query(rel_cypher, {
+                              "ing_name": name,
+                              "svc_name": svc_name,
+                              "namespace": svc_ns,
+                              "cluster": cluster
+                          })
+
+                  logger.info(f"Synced {count} ingresses from agentic cluster")
+                  return count
+
+              def sync_kubernetes_nodes():
+                  """Sync Kubernetes node info to existing Host nodes."""
+                  logger.info("Syncing Kubernetes nodes...")
+
+                  nodes_response = call_mcp_tool("infrastructure", "kubectl_get_nodes")
+                  nodes = extract_list(nodes_response, "nodes", "result")
+
+                  count = 0
+                  for node in nodes:
+                      hostname = node.get("name", "")
+                      if not hostname:
+                          continue
+
+                      k8s_ready = node.get("ready", False)
+                      k8s_version = node.get("version", "unknown")
+                      k8s_os = node.get("os", "unknown")
+                      conditions = node.get("conditions", {})
+                      conditions_str = ", ".join(f"{k}={v}" for k, v in conditions.items()) if isinstance(conditions, dict) else ""
+
+                      # Derive role from hostname pattern
+                      if "control" in hostname.lower() or "master" in hostname.lower() or "cp" in hostname.lower():
+                          k8s_role = "control-plane"
+                      else:
+                          k8s_role = "worker"
+
+                      cypher = """
+                      MERGE (h:Host {hostname: $hostname})
+                      SET h.k8s_version = $k8s_version,
+                          h.k8s_os = $k8s_os,
+                          h.k8s_ready = $k8s_ready,
+                          h.k8s_conditions = $k8s_conditions,
+                          h.k8s_role = $k8s_role,
+                          h.last_seen = datetime()
+                      RETURN h.hostname
+                      """
+
+                      result = neo4j_query(cypher, {
+                          "hostname": hostname,
+                          "k8s_version": k8s_version,
+                          "k8s_os": k8s_os,
+                          "k8s_ready": k8s_ready,
+                          "k8s_conditions": conditions_str,
+                          "k8s_role": k8s_role
+                      })
+
+                      if not result.get("errors"):
+                          count += 1
+
+                  logger.info(f"Synced {count} Kubernetes nodes")
                   return count
 
               def sync_runbooks():
@@ -525,6 +805,25 @@ spec:
                       if not title:
                           continue
 
+                      # Derive domain from path if not set
+                      path = runbook_entry.get("path", "")
+                      domain = runbook_entry.get("domain", "")
+                      if not domain and path:
+                          # Extract directory after "runbooks/" e.g. "runbooks/infrastructure/foo.md" -> "infrastructure"
+                          path_parts = path.replace("\\", "/").split("/")
+                          try:
+                              rb_idx = path_parts.index("runbooks")
+                              if rb_idx + 1 < len(path_parts) - 1:
+                                  domain = path_parts[rb_idx + 1]
+                          except ValueError:
+                              # No "runbooks" in path, use first directory
+                              domain = path_parts[0] if len(path_parts) > 1 else ""
+
+                      # Extract solution preview and content flag
+                      solution = runbook_entry.get("solution", "")
+                      solution_preview = solution[:200] if solution else ""
+                      has_content = bool(solution)
+
                       # Create runbook node
                       cypher = """
                       MERGE (r:RunbookDocument {qdrant_id: $qdrant_id})
@@ -533,6 +832,8 @@ spec:
                           r.domain = $domain,
                           r.automation_level = $automation_level,
                           r.trigger_pattern = $trigger_pattern,
+                          r.solution_preview = $solution_preview,
+                          r.has_content = $has_content,
                           r.last_seen = datetime(),
                           r.source = 'knowledge'
                       RETURN r.title
@@ -541,10 +842,12 @@ spec:
                       result = neo4j_query(cypher, {
                           "qdrant_id": qdrant_id,
                           "title": title,
-                          "path": runbook_entry.get("path", ""),
-                          "domain": runbook_entry.get("domain", ""),
+                          "path": path,
+                          "domain": domain,
                           "automation_level": runbook_entry.get("automation_level", "manual"),
-                          "trigger_pattern": trigger_pattern
+                          "trigger_pattern": trigger_pattern,
+                          "solution_preview": solution_preview,
+                          "has_content": has_content
                       })
 
                       if not result.get("errors"):
@@ -580,19 +883,45 @@ spec:
                       return 0
 
                   count = 0
+                  anomalous_services = []
                   services = overview.get("services", {})
-                  for service_name, service_data in services.items():
-                      # Parse namespace/service from name
-                      parts = service_name.split("/")
-                      namespace = parts[0] if len(parts) > 1 else "unknown"
-                      name = parts[1] if len(parts) > 1 else parts[0]
+                  for service_key, service_data in services.items():
+                      # Parse namespace/service from Coroot id (format: "namespace:service")
+                      # Also try "/" separator as fallback
+                      coroot_id = service_data.get("id", service_key)
+                      if ":" in coroot_id:
+                          parts = coroot_id.split(":", 1)
+                          namespace = parts[0]
+                          name = parts[1]
+                      elif "/" in service_key:
+                          parts = service_key.split("/", 1)
+                          namespace = parts[0]
+                          name = parts[1]
+                      else:
+                          namespace = "unknown"
+                          name = service_key
 
                       health = service_data.get("health", "unknown")
                       anomaly_count = service_data.get("anomalies", 0)
 
+                      # Map health to status
+                      health_to_status = {
+                          "ok": "healthy",
+                          "warning": "warning",
+                          "critical": "critical",
+                          "error": "critical"
+                      }
+                      status = health_to_status.get(health, "unknown")
+
+                      # Track anomalous services for dependency sync
+                      if anomaly_count > 0:
+                          anomalous_services.append(coroot_id)
+
                       cypher = """
                       MERGE (s:Service {name: $name, namespace: $namespace})
                       SET s.health = $health,
+                          s.status = $status,
+                          s.coroot_id = $coroot_id,
                           s.anomaly_count = $anomaly_count,
                           s.last_health_check = datetime(),
                           s.source = 'coroot'
@@ -603,6 +932,8 @@ spec:
                           "name": name,
                           "namespace": namespace,
                           "health": health,
+                          "status": status,
+                          "coroot_id": coroot_id,
                           "anomaly_count": anomaly_count
                       })
 
@@ -637,7 +968,90 @@ spec:
                       })
 
                   logger.info(f"Synced {count} services from Coroot, {len(alerts)} alerts")
-                  return count
+                  return count, anomalous_services
+
+              def sync_coroot_dependencies(anomalous_services):
+                  """Sync service dependencies from Coroot for anomalous services."""
+                  if not anomalous_services:
+                      logger.info("No anomalous services, skipping dependency sync")
+                      return 0
+
+                  logger.info(f"Syncing Coroot dependencies for {len(anomalous_services)} anomalous services...")
+
+                  dep_count = 0
+                  for service_id in anomalous_services[:20]:  # Cap at 20 to limit API calls
+                      try:
+                          deps_response = call_mcp_tool("observability", "coroot_get_service_dependencies", {"app_id": service_id})
+                          if not deps_response or isinstance(deps_response, dict) and "error" in deps_response:
+                              continue
+
+                          # Parse the service name from the id
+                          if ":" in service_id:
+                              parts = service_id.split(":", 1)
+                              src_namespace = parts[0]
+                              src_name = parts[1]
+                          else:
+                              src_namespace = "unknown"
+                              src_name = service_id
+
+                          # Extract dependencies (upstream and downstream)
+                          deps = deps_response if isinstance(deps_response, list) else deps_response.get("dependencies", [])
+                          if isinstance(deps_response, dict) and "map" in deps_response:
+                              deps = deps_response["map"]
+
+                          if isinstance(deps, list):
+                              for dep in deps:
+                                  dep_id = dep.get("id", dep.get("name", ""))
+                                  if not dep_id:
+                                      continue
+
+                                  if ":" in dep_id:
+                                      dep_parts = dep_id.split(":", 1)
+                                      dep_namespace = dep_parts[0]
+                                      dep_name = dep_parts[1]
+                                  else:
+                                      dep_namespace = "unknown"
+                                      dep_name = dep_id
+
+                                  protocol = dep.get("protocol", "")
+                                  direction = dep.get("direction", "")
+
+                                  # Create DEPENDS_ON relationship
+                                  if direction == "upstream" or not direction:
+                                      cypher = """
+                                      MERGE (s1:Service {name: $src_name, namespace: $src_namespace})
+                                      MERGE (s2:Service {name: $dep_name, namespace: $dep_namespace})
+                                      MERGE (s1)-[r:DEPENDS_ON]->(s2)
+                                      SET r.protocol = $protocol,
+                                          r.last_seen = datetime()
+                                      RETURN s2.name
+                                      """
+                                  else:
+                                      cypher = """
+                                      MERGE (s1:Service {name: $dep_name, namespace: $dep_namespace})
+                                      MERGE (s2:Service {name: $src_name, namespace: $src_namespace})
+                                      MERGE (s1)-[r:DEPENDS_ON]->(s2)
+                                      SET r.protocol = $protocol,
+                                          r.last_seen = datetime()
+                                      RETURN s2.name
+                                      """
+
+                                  result = neo4j_query(cypher, {
+                                      "src_name": src_name,
+                                      "src_namespace": src_namespace,
+                                      "dep_name": dep_name,
+                                      "dep_namespace": dep_namespace,
+                                      "protocol": protocol
+                                  })
+
+                                  if not result.get("errors"):
+                                      dep_count += 1
+                      except Exception as e:
+                          logger.warning(f"Failed to get dependencies for {service_id}: {e}")
+                          continue
+
+                  logger.info(f"Synced {dep_count} service dependencies from Coroot")
+                  return dep_count
 
               def sync_gatus_health():
                   """Sync endpoint health from Gatus to Neo4j."""
@@ -794,6 +1208,8 @@ spec:
                       "Share": {"stale": "P1D", "delete_after": "P14D"},
                       "AccessPoint": {"stale": "PT8H", "offline": "P2D", "archive": "P14D"},
                       "Switch": {"stale": "PT8H", "offline": "P2D", "archive": "P14D"},
+                      "Deployment": {"stale": "PT12H", "offline": "P3D", "delete_after": "P7D"},
+                      "Ingress": {"stale": "PT12H", "offline": "P3D", "delete_after": "P7D"},
                   }
 
                   total_stale = 0
@@ -807,7 +1223,7 @@ spec:
                           result = neo4j_query(f"""
                               MATCH (n:{label})
                               WHERE n.last_seen < datetime() - duration('{thresholds["stale"]}')
-                                AND (n.status IS NULL OR n.status = 'online')
+                                AND (n.status IS NULL OR n.status IN ['online', 'healthy', 'degraded', 'warning', 'unknown', 'running', 'completed', 'pending', 'scaled-down'])
                               SET n.status = 'stale'
                               RETURN count(n) as cnt
                           """)
@@ -881,6 +1297,8 @@ spec:
 
                   # Sync from each source
                   results = {}
+                  deploy_status = {}
+                  anomalous_services = []
 
                   try:
                       results["proxmox_vms"] = sync_proxmox_vms()
@@ -900,11 +1318,31 @@ spec:
                       logger.error(f"TrueNAS sync failed: {e}")
                       results["truenas_storage"] = 0
 
+                  # Deployments MUST run before services (provides deploy_status lookup)
                   try:
-                      results["kubernetes"] = sync_kubernetes_services()
+                      deploy_status = sync_kubernetes_deployments()
+                      results["deployments"] = len(deploy_status)
+                  except Exception as e:
+                      logger.error(f"Kubernetes deployments sync failed: {e}")
+                      results["deployments"] = 0
+
+                  try:
+                      results["kubernetes"] = sync_kubernetes_services(deploy_status)
                   except Exception as e:
                       logger.error(f"Kubernetes sync failed: {e}")
                       results["kubernetes"] = 0
+
+                  try:
+                      results["ingresses"] = sync_kubernetes_ingresses()
+                  except Exception as e:
+                      logger.error(f"Kubernetes ingresses sync failed: {e}")
+                      results["ingresses"] = 0
+
+                  try:
+                      results["k8s_nodes"] = sync_kubernetes_nodes()
+                  except Exception as e:
+                      logger.error(f"Kubernetes nodes sync failed: {e}")
+                      results["k8s_nodes"] = 0
 
                   try:
                       results["runbooks"] = sync_runbooks()
@@ -913,10 +1351,17 @@ spec:
                       results["runbooks"] = 0
 
                   try:
-                      results["coroot_services"] = sync_coroot_services()
+                      coroot_count, anomalous_services = sync_coroot_services()
+                      results["coroot_services"] = coroot_count
                   except Exception as e:
                       logger.error(f"Coroot sync failed: {e}")
                       results["coroot_services"] = 0
+
+                  try:
+                      results["coroot_deps"] = sync_coroot_dependencies(anomalous_services)
+                  except Exception as e:
+                      logger.error(f"Coroot dependencies sync failed: {e}")
+                      results["coroot_deps"] = 0
 
                   try:
                       results["gatus_health"] = sync_gatus_health()

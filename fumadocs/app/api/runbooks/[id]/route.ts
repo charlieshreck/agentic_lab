@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const KNOWLEDGE_API = process.env.KNOWLEDGE_API_URL || 'http://10.20.0.40:31084';
+const KNOWLEDGE_API = process.env.KNOWLEDGE_API_URL || 'http://knowledge-mcp.ai-platform.svc.cluster.local:8000';
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    // Use query param format for knowledge MCP
+    // Fetch runbook by ID from knowledge MCP
     const response = await fetch(
-      `${KNOWLEDGE_API}/api/runbook?id=${encodeURIComponent(params.id)}`,
+      `${KNOWLEDGE_API}/api/runbooks/${encodeURIComponent(params.id)}`,
       { next: { revalidate: 60 } }
     );
 
@@ -22,8 +22,8 @@ export async function GET(
 
     const data = await response.json();
     // Handle knowledge MCP response format
-    if (data.status === 'ok' && data.data) {
-      return NextResponse.json(data.data);
+    if (data.status === 'ok' && data.runbook) {
+      return NextResponse.json(data.runbook);
     }
     if (data.status === 'error') {
       return NextResponse.json({ error: data.error }, { status: 404 });
