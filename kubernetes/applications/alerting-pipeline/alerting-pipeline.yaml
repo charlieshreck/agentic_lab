@@ -34,13 +34,11 @@ data:
     QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "local/qwen2.5:7b")
 
-    # MCP Server endpoints
+    # Consolidated domain MCP endpoints
     MCP_SERVERS = {
-        "unifi": os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000"),
-        "truenas": os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000"),
-        "proxmox": os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000"),
-        "opnsense": os.environ.get("OPNSENSE_MCP_URL", "http://opnsense-mcp:8000"),
-        "adguard": os.environ.get("ADGUARD_MCP_URL", "http://adguard-mcp:8000"),
+        "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
+        "home": os.environ.get("HOME_MCP_URL", "http://home-mcp:8000"),
+        "media": os.environ.get("MEDIA_MCP_URL", "http://media-mcp:8000"),
     }
 
     # Runbook cache (in-memory for quick lookups)
@@ -65,12 +63,12 @@ data:
         description_template: str
         fix_template: Optional[str] = None
 
-    # Define alert rules
+    # Define alert rules (updated for consolidated domain MCPs)
     ALERT_RULES = [
-        # UniFi alerts
+        # UniFi alerts (now via home-mcp)
         AlertRule(
             name="UniFi Device Offline",
-            source="unifi",
+            source="home",
             check_type="device_offline",
             severity="critical",
             description_template="UniFi device '{device_name}' is offline. Last seen: {last_seen}",
@@ -78,17 +76,17 @@ data:
         ),
         AlertRule(
             name="UniFi High Client Count",
-            source="unifi",
+            source="home",
             check_type="threshold",
             threshold=50,
             severity="warning",
             description_template="Access point '{ap_name}' has {client_count} clients connected (threshold: 50)",
             fix_template=None
         ),
-        # TrueNAS alerts
+        # TrueNAS alerts (now via infrastructure-mcp)
         AlertRule(
             name="TrueNAS Pool Degraded",
-            source="truenas",
+            source="infrastructure",
             check_type="pool_health",
             severity="critical",
             description_template="ZFS pool '{pool_name}' is in degraded state: {status}",
@@ -96,17 +94,17 @@ data:
         ),
         AlertRule(
             name="TrueNAS Low Disk Space",
-            source="truenas",
+            source="infrastructure",
             check_type="threshold",
             threshold=85,
             severity="warning",
             description_template="Pool '{pool_name}' is at {usage_percent}% capacity",
             fix_template="Review and clean up data or expand storage"
         ),
-        # Proxmox alerts
+        # Proxmox alerts (now via infrastructure-mcp)
         AlertRule(
             name="Proxmox VM Not Running",
-            source="proxmox",
+            source="infrastructure",
             check_type="vm_status",
             severity="warning",
             description_template="VM '{vm_name}' (ID: {vm_id}) is not running. Status: {status}",
@@ -114,31 +112,60 @@ data:
         ),
         AlertRule(
             name="Proxmox High CPU",
-            source="proxmox",
+            source="infrastructure",
             check_type="threshold",
             threshold=90,
             severity="warning",
             description_template="Node '{node_name}' CPU usage at {cpu_percent}%",
             fix_template=None
         ),
-        # OPNsense alerts
+        # OPNsense alerts (now via infrastructure-mcp)
         AlertRule(
             name="OPNsense Service Down",
-            source="opnsense",
+            source="infrastructure",
             check_type="service_status",
             severity="critical",
             description_template="Service '{service_name}' is not running on OPNsense",
             fix_template="SSH to OPNsense and run: service {service_name} restart"
         ),
-        # AdGuard alerts
+        # AdGuard alerts (now via home-mcp)
         AlertRule(
             name="AdGuard High Block Rate",
-            source="adguard",
+            source="home",
             check_type="threshold",
-            threshold=70,
+            threshold=85,
             severity="warning",
             description_template="AdGuard blocking {block_percent}% of queries - may indicate malware activity",
             fix_template="Review blocked domains in AdGuard admin panel"
+        ),
+        # Functional health alerts (Gemini Phase 1.5 — "Silent Killers")
+        AlertRule(
+            name="Media Import Stalled",
+            source="media",
+            check_type="queue_stall",
+            severity="warning",
+            description_template="{count} items stuck in *arr download queue"
+        ),
+        AlertRule(
+            name="Tailscale VPN Down",
+            source="infrastructure",
+            check_type="service_status",
+            severity="critical",
+            description_template="Tailscale on OPNsense is offline"
+        ),
+        AlertRule(
+            name="Cloudflare Tunnel Unhealthy",
+            source="infrastructure",
+            check_type="tunnel_health",
+            severity="critical",
+            description_template="Tunnel '{name}' status: {status}"
+        ),
+        AlertRule(
+            name="NFS Mount Stale",
+            source="infrastructure",
+            check_type="canary_check",
+            severity="critical",
+            description_template="NFS mount canary failed — storage disconnected"
         ),
     ]
 
@@ -459,15 +486,207 @@ data:
         result = await query_via_claude_agent(escalation_prompt, timeout=300)
         return result
 
+    async def call_mcp_tool(mcp_url: str, tool_name: str, params: dict = None) -> dict:
+        """Call a tool on a consolidated MCP server."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await client.post(
+                    f"{mcp_url}/call_tool",
+                    json={"tool_name": tool_name, "arguments": params or {}}
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+            except Exception as e:
+                logger.error(f"MCP tool call error ({tool_name}): {e}")
+        return {}
+
+    async def run_threshold_checks():
+        """Evaluate ALERT_RULES against live data from consolidated MCPs."""
+        logger.info("Running threshold checks...")
+        for rule in ALERT_RULES:
+            try:
+                mcp_url = MCP_SERVERS.get(rule.source)
+                if not mcp_url:
+                    continue
+
+                if rule.check_type == "device_offline" and rule.source == "home":
+                    result = await call_mcp_tool(mcp_url, "unifi_list_devices")
+                    if result:
+                        devices = result.get("devices", result.get("result", []))
+                        if isinstance(devices, list):
+                            for device in devices:
+                                if isinstance(device, dict) and device.get("state", "") not in ("connected", "1"):
+                                    await raise_alert(
+                                        name=rule.name,
+                                        severity=rule.severity,
+                                        description=f"UniFi device '{device.get('name', 'unknown')}' is offline.",
+                                        source=rule.source,
+                                        suggested_fix=rule.fix_template
+                                    )
+
+                elif rule.check_type == "pool_health" and rule.source == "infrastructure":
+                    result = await call_mcp_tool(mcp_url, "truenas_list_pools")
+                    if result:
+                        pools = result.get("pools", result.get("result", []))
+                        if isinstance(pools, list):
+                            for pool in pools:
+                                if isinstance(pool, dict) and pool.get("status", "").upper() not in ("ONLINE", "HEALTHY"):
+                                    await raise_alert(
+                                        name=rule.name,
+                                        severity=rule.severity,
+                                        description=f"ZFS pool '{pool.get('name', 'unknown')}' status: {pool.get('status', 'unknown')}",
+                                        source=rule.source,
+                                        suggested_fix=rule.fix_template
+                                    )
+
+                elif rule.check_type == "vm_status" and rule.source == "infrastructure":
+                    result = await call_mcp_tool(mcp_url, "proxmox_list_vms")
+                    if result:
+                        vms = result.get("vms", result.get("result", []))
+                        if isinstance(vms, list):
+                            for vm in vms:
+                                if isinstance(vm, dict) and vm.get("status", "") != "running":
+                                    await raise_alert(
+                                        name=rule.name,
+                                        severity=rule.severity,
+                                        description=f"VM '{vm.get('name', 'unknown')}' (ID: {vm.get('vmid', '?')}) status: {vm.get('status', 'unknown')}",
+                                        source=rule.source,
+                                        suggested_fix=rule.fix_template
+                                    )
+
+                elif rule.check_type == "service_status" and rule.source == "infrastructure":
+                    result = await call_mcp_tool(mcp_url, "get_services")
+                    if result:
+                        services = result.get("services", result.get("result", []))
+                        if isinstance(services, list):
+                            for svc in services:
+                                if isinstance(svc, dict) and not svc.get("running", True):
+                                    await raise_alert(
+                                        name=rule.name,
+                                        severity=rule.severity,
+                                        description=f"Service '{svc.get('name', 'unknown')}' is not running on OPNsense",
+                                        source=rule.source,
+                                        suggested_fix=rule.fix_template
+                                    )
+
+            except Exception as e:
+                logger.error(f"Threshold check error for {rule.name}: {e}")
+
+    async def run_functional_checks():
+        """Gemini Phase 1.5: Detect 'Silent Killers' — services that are up but broken."""
+        logger.info("Running functional health checks...")
+
+        # 1. Media Import Stall — downloads finish but import stalls
+        try:
+            media_url = MCP_SERVERS.get("media")
+            if media_url:
+                sonarr_q = await call_mcp_tool(media_url, "sonarr_get_queue") or {}
+                radarr_q = await call_mcp_tool(media_url, "radarr_get_queue") or {}
+                sonarr_records = sonarr_q.get("records", sonarr_q.get("result", []))
+                radarr_records = radarr_q.get("records", radarr_q.get("result", []))
+                if not isinstance(sonarr_records, list):
+                    sonarr_records = []
+                if not isinstance(radarr_records, list):
+                    radarr_records = []
+                stalled = [i for i in (sonarr_records + radarr_records)
+                           if isinstance(i, dict) and i.get("status", "").lower() in ("warning", "stalled")]
+                if stalled:
+                    await raise_alert(
+                        name="MediaImportStalled",
+                        severity="warning",
+                        description=f"{len(stalled)} items stuck in download queue (stalled imports detected).",
+                        source="media-pipeline"
+                    )
+        except Exception as e:
+            logger.error(f"Media import check error: {e}")
+
+        # 2. Tailscale VPN — OPNsense Tailscale service
+        try:
+            infra_url = MCP_SERVERS.get("infrastructure")
+            if infra_url:
+                ts_status = await call_mcp_tool(infra_url, "get_tailscale_status") or {}
+                status_val = ts_status.get("status", ts_status.get("result", ""))
+                if isinstance(status_val, str) and status_val.lower() not in ("running", "healthy", ""):
+                    await raise_alert(
+                        name="TailscaleDown",
+                        severity="critical",
+                        description="Tailscale service on OPNsense is NOT running. External VPN access is offline.",
+                        source="network-inspector"
+                    )
+        except Exception as e:
+            logger.error(f"Tailscale check error: {e}")
+
+        # 3. Cloudflare Tunnel — tunnel status
+        try:
+            infra_url = MCP_SERVERS.get("infrastructure")
+            if infra_url:
+                cf_tunnels = await call_mcp_tool(infra_url, "cloudflare_list_tunnels") or {}
+                tunnels = cf_tunnels.get("tunnels", cf_tunnels.get("result", []))
+                if isinstance(tunnels, list):
+                    for tunnel in tunnels:
+                        if isinstance(tunnel, dict) and tunnel.get("status", "").lower() not in ("healthy", "active", ""):
+                            await raise_alert(
+                                name="CloudflareTunnelDown",
+                                severity="critical",
+                                description=f"Cloudflare tunnel '{tunnel.get('name', 'unknown')}' status: {tunnel.get('status')}. External access may be broken.",
+                                source="network-inspector"
+                            )
+        except Exception as e:
+            logger.error(f"Cloudflare tunnel check error: {e}")
+
+        # 4. NFS Ghost Mount — check canary job status
+        try:
+            infra_url = MCP_SERVERS.get("infrastructure")
+            if infra_url:
+                jobs = await call_mcp_tool(infra_url, "kubectl_get_jobs", {
+                    "namespace": "media",
+                    "cluster": "production"
+                }) or {}
+                job_list = jobs.get("jobs", jobs.get("result", []))
+                if isinstance(job_list, list):
+                    canary_jobs = [j for j in job_list if isinstance(j, dict) and "mount-canary" in j.get("name", "")]
+                    failed_canaries = [j for j in canary_jobs if j.get("failed", 0) > 0]
+                    if failed_canaries:
+                        await raise_alert(
+                            name="StaleStorageMount",
+                            severity="critical",
+                            description="NFS mount canary FAILED — storage mounts may be disconnected. *arr databases at risk.",
+                            source="storage-inspector",
+                            suggested_fix="Check NFS mounts on TrueNAS HDD (10.10.0.50) and Media (10.10.0.60)."
+                        )
+        except Exception as e:
+            logger.error(f"NFS canary check error: {e}")
+
+        # 5. Velero Backup — check recent backup job status
+        try:
+            infra_url = MCP_SERVERS.get("infrastructure")
+            if infra_url:
+                jobs = await call_mcp_tool(infra_url, "kubectl_get_jobs", {
+                    "namespace": "velero",
+                    "cluster": "production"
+                }) or {}
+                job_list = jobs.get("jobs", jobs.get("result", []))
+                if isinstance(job_list, list):
+                    failed_backups = [j for j in job_list if isinstance(j, dict) and j.get("failed", 0) > 0]
+                    if failed_backups:
+                        await raise_alert(
+                            name="VeleroBackupFailed",
+                            severity="warning",
+                            description=f"{len(failed_backups)} Velero backup job(s) failed.",
+                            source="backup-inspector"
+                        )
+        except Exception as e:
+            logger.error(f"Velero backup check error: {e}")
+
     async def run_deep_health_check():
         """Run health check and forward issues to LangGraph for orchestrated handling."""
         logger.info("Running health check (forwarding to LangGraph)...")
 
         # Use Claude Agent to gather status from MCP servers, then forward issues to LangGraph
         health_queries = [
-            ("UniFi", "network", "Check UniFi network - list any offline devices or issues"),
-            ("TrueNAS", "storage", "Check TrueNAS pools - report degraded or low space"),
-            ("Proxmox", "compute", "Check Proxmox nodes - report offline or high resource usage"),
+            ("Network", "network", "Check UniFi network - list any offline devices or issues"),
+            ("Storage", "storage", "Check TrueNAS pools - report degraded or low space"),
+            ("Compute", "compute", "Check Proxmox nodes - report offline or high resource usage"),
         ]
 
         for source, category, query in health_queries:
@@ -558,6 +777,12 @@ data:
             try:
                 # Always run basic connectivity checks
                 await run_health_checks()
+
+                # Run threshold checks using ALERT_RULES against consolidated MCPs
+                await run_threshold_checks()
+
+                # Run functional health checks (Gemini Phase 1.5 - "Silent Killers")
+                await run_functional_checks()
 
                 # Run deep health check less frequently (uses Claude Agent - expensive)
                 current_time = time.time()
@@ -733,16 +958,12 @@ spec:
               value: "http://matrix-bot:8000"
             - name: LANGGRAPH_URL
               value: "http://langgraph:8000"
-            - name: UNIFI_MCP_URL
-              value: "http://unifi-mcp:8000"
-            - name: TRUENAS_MCP_URL
-              value: "http://truenas-mcp:8000"
-            - name: PROXMOX_MCP_URL
-              value: "http://proxmox-mcp:8000"
-            - name: OPNSENSE_MCP_URL
-              value: "http://opnsense-mcp:8000"
-            - name: ADGUARD_MCP_URL
-              value: "http://adguard-mcp:8000"
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp:8000"
+            - name: HOME_MCP_URL
+              value: "http://home-mcp:8000"
+            - name: MEDIA_MCP_URL
+              value: "http://media-mcp:8000"
             - name: CLAUDE_AGENT_URL
               value: "http://claude-agent:8000"
             - name: LITELLM_URL

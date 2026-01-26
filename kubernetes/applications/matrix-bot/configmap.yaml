@@ -62,13 +62,42 @@ data:
 
     # Alert → Grafana dashboard mapping
     ALERT_DASHBOARD_MAP = {
+        # Pod alerts → K8s Compute Resources / Pod
         "KubePodCrashLooping": {"uid": "6581e46e4e5c7ba40a07646395ef7b23", "panel": 1},
+        "HomelabPodCrashLooping": {"uid": "6581e46e4e5c7ba40a07646395ef7b23", "panel": 1},
+        "HomelabPodOOMKilled": {"uid": "6581e46e4e5c7ba40a07646395ef7b23", "panel": 1},
+        # Namespace alerts → K8s Compute Resources / Namespace
         "KubePodNotReady": {"uid": "85a562078cdf77779eaa1add43ccec1e", "panel": 1},
+        "KubeDeploymentReplicasMismatch": {"uid": "85a562078cdf77779eaa1add43ccec1e", "panel": 1},
+        # Node alerts → Node Exporter Full
         "NodeHighCPU": {"uid": "rYdddlPWk", "panel": 77},
+        "HomelabNodeHighCPU": {"uid": "rYdddlPWk", "panel": 77},
+        "HomelabNodeCriticalCPU": {"uid": "rYdddlPWk", "panel": 77},
+        "HomelabNodeHighMemory": {"uid": "rYdddlPWk", "panel": 78},
+        "HomelabNodeCriticalMemory": {"uid": "rYdddlPWk", "panel": 78},
         "NodeFilesystemSpaceFillingUp": {"uid": "rYdddlPWk", "panel": 44},
+        "HomelabNodeDiskPressure": {"uid": "rYdddlPWk", "panel": 44},
+        "HomelabNodeDiskCritical": {"uid": "rYdddlPWk", "panel": 44},
+        # Node view for node-level alerts
+        "HomelabNodeDown": {"uid": "k8s_views_nodes", "panel": 1},
+        "TargetDown": {"uid": "k8s_views_nodes", "panel": 1},
+        # PVC alerts → K8s Persistent Volumes
         "PersistentVolumeFillingUp": {"uid": "919b92a8e8041bd567af9edab12c840c", "panel": 1},
+        "HomelabPVCNearFull": {"uid": "919b92a8e8041bd567af9edab12c840c", "panel": 1},
+        "HomelabPVCCriticallyFull": {"uid": "919b92a8e8041bd567af9edab12c840c", "panel": 1},
+        # Cluster overcommit → K8s Compute Resources / Cluster
         "KubeMemoryOvercommit": {"uid": "efa86fd1d0c121a26444b636a3f509a8", "panel": 4},
         "KubeCPUOvercommit": {"uid": "efa86fd1d0c121a26444b636a3f509a8", "panel": 2},
+        # Global view for deployment/MCP alerts
+        "MCPServerUnhealthy": {"uid": "k8s_views_ns", "panel": 1},
+        # Functional health alerts
+        "MediaImportStalled": {"uid": "k8s_views_ns", "panel": 1},
+        "TailscaleDown": {"uid": "k8s_views_global", "panel": 1},
+        "CloudflareTunnelDown": {"uid": "k8s_views_global", "panel": 1},
+        # Backup alerts
+        "VeleroBackupFailed": {"uid": "k8s_views_ns", "panel": 1},
+        "VeleroBackupMissing": {"uid": "k8s_views_ns", "panel": 1},
+        "StaleStorageMount": {"uid": "k8s_views_ns", "panel": 1},
     }
 
 
@@ -400,7 +429,8 @@ data:
             """Fire-and-forget: attach Grafana panel snapshot to alert thread."""
             mapping = ALERT_DASHBOARD_MAP.get(alert_name)
             if not mapping:
-                return
+                # Catch-all: route unmatched alerts (e.g. Coroot) to K8s Global view
+                mapping = {"uid": "k8s_views_global", "panel": 1}
             image_bytes = await self.capture_grafana_panel(
                 mapping["uid"], mapping["panel"]
             )
