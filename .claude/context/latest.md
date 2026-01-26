@@ -1,107 +1,107 @@
-# Agentic Platform Context - Initial Setup
+# Agentic Platform Context
 
-**Last Updated**: Initial deployment
-**Status**: Platform initializing
-
----
-
-## Session Checkpoint
-
-Last reviewed: Not yet reviewed
-Checkpoint ID: initial-setup
-Changes since last session: Initial deployment
+**Last Updated**: 2026-01-26
+**Status**: Operational - Core platform running
 
 ---
 
 ## Architecture Overview
 
-This is a split-role AI architecture:
-
 | Role | Model | Responsibility |
 |------|-------|----------------|
-| **Workhorse** | Gemini 2.0 Pro (via LiteLLM) | Alert response, runbook execution, maintenance |
-| **Validator** | Claude (via claude-validator) | Reviews outputs, auto-corrects, flags issues |
-| **Architect** | Claude Code (you) | Architecture decisions, planning, context review |
+| **Agent** | Ollama (qwen2.5:7b) via LiteLLM | Alert response, runbook execution, local inference |
+| **Orchestrator** | LangGraph (StateGraph) | Incident flow, confidence routing, escalation |
+| **Validator** | Human-triggered skill (`/validate`) | Ground truth verification, autonomy audits |
+| **Architect** | Claude Code (with Charlie) | Architecture, planning, context-aware review |
+| **Reviewer** | Gemini (peer review) | Quality gating, audit, devil's advocate |
+
+**Key change from original design**: Claude Validator (cloud API) removed. Replaced by `/validate` skill using LiteLLM routing to any configured backend. Validation is human-triggered, not automated.
 
 ---
 
-## Attention Required
-
-- [ ] Configure Matrix rooms after Conduit deployment
-- [ ] Add GEMINI_API_KEY to Infisical at `/agentic-platform/Gemini/`
-- [ ] Verify ArgoCD sync for new applications
-- [ ] Test end-to-end alert flow
-
----
-
-## Recent Activity Summary
-
-**Platform Status**: Initializing (not yet deployed)
-
-- Alerts processed: 0
-- Gemini decisions: 0
-- Pending validations: 0
-- New runbooks: 0
-
----
-
-## Key Services
+## Service Status
 
 | Service | Status | Notes |
 |---------|--------|-------|
-| LiteLLM | Pending | Gemini-only config |
-| Qdrant | Pending | 9 collections configured |
-| LangGraph | Pending | Orchestrator with comprehensive context |
-| Matrix/Conduit | Pending | Replaces Telegram |
-| Matrix Bot | Pending | Conversational interface |
-| Claude Validator | Pending | Daily validation + webhooks |
-| Coroot MCP | Pending | Observability metrics |
+| Ollama | ✅ Running | qwen2.5:7b + nomic-embed-text, AMD ROCm |
+| LiteLLM | ✅ Running | Routes all model aliases to local Ollama |
+| Qdrant | ✅ Running | 9+ collections, dual-indexed with Neo4j |
+| Neo4j | ✅ Running | Knowledge graph, relationships, dependencies |
+| LangGraph | ✅ Running | 5-node incident flow, Keep webhook handler |
+| Matrix/Conduit | ✅ Running | Self-hosted, reaction-based approvals |
+| Matrix Bot | ✅ Running | Alert, approval, brain-trust, runbook-proposal |
+| Knowledge MCP | ✅ Running | 38 tools across 6 modules |
+| Pattern Detector | ⚠️ Partial | Runs daily but notifications silenced (missing env vars) |
+| Outline | ✅ Running | Wiki, project docs, brain trust escalation |
+| PostgreSQL | ✅ Running | LangGraph state checkpointing |
+| Redis | ✅ Running | Semantic caching, job queues |
 
 ---
 
-## Quick Links (Qdrant Queries)
+## Knowledge System Projects (Outline Collection)
 
-Query recent decisions:
+| # | Project | Status |
+|---|---------|--------|
+| 01 | Neo4j Schema Design | ✅ Complete |
+| 02 | Dual-Indexing & Retrieval | ✅ Complete |
+| 03 | Evaluator System | 🟡 Redesigned (validator-as-skill) |
+| 04 | LangGraph Incident Flow | 🟡 Largely implemented (Phase 7 pending) |
+| 05 | Skills & Orchestration | 🔴 Not Started |
+| 06 | Development Flow & CLI | 🔴 Not Started |
+| 07 | Runbook System | 🟡 Partial (pattern detector) |
+| 08 | Bootstrap & Migration | 🔴 Not Started |
+
+**Outline Collection**: "Agentic Knowledge System" - all project docs and reviews
+
+---
+
+## Active Work: Autonomy Progression
+
+Remaining (2 days):
+1. Add MATRIX_WEBHOOK_URL to pattern-detector CronJob
+2. Fix thresholds (70/85/95 for prompted/standard/autonomous)
+3. Add Matrix bot `!approve-autonomy` and `!list-autonomy-candidates` commands
+4. Test end-to-end: detection -> notification -> approval -> promotion
+
+---
+
+## MCP Servers (6 domains)
+
+All running in agentic cluster (ai-platform namespace):
+
+| Domain | Endpoint |
+|--------|----------|
+| observability | observability-mcp.agentic.kernow.io |
+| infrastructure | infrastructure-mcp.agentic.kernow.io |
+| knowledge | knowledge-mcp.agentic.kernow.io |
+| home | home-mcp.agentic.kernow.io |
+| media | media-mcp.agentic.kernow.io |
+| external | external-mcp.agentic.kernow.io |
+
+---
+
+## Key Decisions
+
+- **Local-first inference**: All LLM calls route through LiteLLM to Ollama (no cloud API costs)
+- **Validator-as-skill**: `/validate` replaces automated claude-validator
+- **Autonomy progression**: manual -> prompted -> standard -> autonomous (earned through reliability)
+- **Matrix for approvals**: Reaction-based (no buttons in Matrix spec yet)
+- **Neo4j + Qdrant dual-indexing**: Graph for relationships, vectors for semantic search
+
+---
+
+## Quick Reference
+
 ```bash
-curl -s -X POST "http://qdrant:6333/collections/decisions/points/scroll" \
-  -H "Content-Type: application/json" \
-  -d '{"limit": 10, "with_payload": true}'
+# Check platform health
+kubectl get pods -n ai-platform
+
+# Trigger pattern detector manually
+kubectl create job --from=cronjob/pattern-detector pd-test -n ai-platform
+
+# Check LangGraph status
+curl http://langgraph.ai-platform.svc:8000/status
+
+# Search knowledge base
+# Use knowledge-mcp tools: search_runbooks(), search_entities(), retrieve()
 ```
-
-Query runbook inventory:
-```bash
-curl -s -X POST "http://qdrant:6333/collections/runbooks/points/scroll" \
-  -H "Content-Type: application/json" \
-  -d '{"limit": 20, "with_payload": true}'
-```
-
-Query pending validations:
-```bash
-curl -s -X POST "http://qdrant:6333/collections/validations/points/scroll" \
-  -H "Content-Type: application/json" \
-  -d '{"limit": 10, "with_payload": true, "filter": {"must": [{"key": "status", "match": {"value": "pending"}}]}}'
-```
-
----
-
-## Architectural Notes
-
-- **Context Strategy**: Gemini uses 1M token context window for comprehensive context injection
-- **Learning Loop**: All decisions stored in Qdrant, outcomes tracked, patterns identified
-- **Progressive Autonomy**: Runbooks graduate from manual -> prompted -> standard based on success rate
-- **Self-Evolution**: MCPs and skills auto-generated when gaps detected (requires approval)
-
----
-
-## Next Steps
-
-1. Deploy platform via ArgoCD
-2. Verify secret synchronization from Infisical
-3. Test Matrix integration
-4. Send test alert to verify end-to-end flow
-5. Review first Gemini decisions
-
----
-
-*This file is auto-updated by Claude Validator after each validation run.*
-*For deep dives, use the slash commands: /agentic-status, /review-pending, /gemini-activity*
