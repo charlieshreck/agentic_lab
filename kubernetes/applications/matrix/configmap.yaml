@@ -29,7 +29,11 @@ data:
 
     # Registration settings
     # Users: chaz
-    allow_registration = false
+    # TEMPORARY: Enable registration for bot user creation (will disable after)
+    allow_registration = true
+
+    # TEMPORARY: Emergency password for admin access (remove after password reset)
+    emergency_password = "TempAdmin2026!"
     allow_guest_registration = false
     allow_encryption = true
     allow_federation = false  # Internal only, no federation
