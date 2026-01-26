@@ -34,21 +34,15 @@ spec:
                 secretKeyRef:
                   name: neo4j-credentials
                   key: NEO4J_PASSWORD
-            # MCP endpoints (cluster-internal)
-            - name: PROXMOX_MCP_URL
-              value: "http://proxmox-mcp:8000"
-            - name: UNIFI_MCP_URL
-              value: "http://unifi-mcp:8000"
-            - name: TRUENAS_MCP_URL
-              value: "http://truenas-mcp:8000"
+            # Consolidated MCP endpoints (cluster-internal)
             - name: INFRASTRUCTURE_MCP_URL
               value: "http://infrastructure-mcp:8000"
             - name: KNOWLEDGE_MCP_URL
               value: "http://knowledge-mcp:8000"
-            - name: COROOT_MCP_URL
-              value: "http://coroot-mcp:8000"
-            - name: HOME_ASSISTANT_MCP_URL
-              value: "http://home-assistant-mcp:8000"
+            - name: OBSERVABILITY_MCP_URL
+              value: "http://observability-mcp:8000"
+            - name: HOME_MCP_URL
+              value: "http://home-mcp:8000"
             - name: GATUS_URL
               value: "http://10.30.0.20:32080"  # Monit cluster NodePort
             resources:
@@ -79,15 +73,12 @@ spec:
               NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
               NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")  # Don't strip - Neo4j was initialized with newline
 
-              # MCP endpoints
+              # Consolidated MCP endpoints
               MCP_SERVERS = {
-                  "proxmox": os.environ.get("PROXMOX_MCP_URL", "http://proxmox-mcp:8000"),
-                  "unifi": os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000"),
-                  "truenas": os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000"),
                   "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
                   "knowledge": os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000"),
-                  "coroot": os.environ.get("COROOT_MCP_URL", "http://coroot-mcp:8000"),
-                  "home_assistant": os.environ.get("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000"),
+                  "observability": os.environ.get("OBSERVABILITY_MCP_URL", "http://observability-mcp:8000"),
+                  "home": os.environ.get("HOME_MCP_URL", "http://home-mcp:8000"),
               }
 
               # Direct API access (cross-cluster)
@@ -196,8 +187,8 @@ spec:
                   """Sync VMs from Proxmox to Neo4j."""
                   logger.info("Syncing Proxmox VMs...")
 
-                  # Get VMs list via REST API (bypasses MCP session protocol)
-                  vms_response = call_rest_api(MCP_SERVERS["proxmox"], "/api/vms")
+                  # Get VMs list via consolidated infrastructure-mcp
+                  vms_response = call_mcp_tool("infrastructure", "proxmox_list_vms")
                   vms = vms_response.get("vms", [])
 
                   if not vms:
@@ -245,8 +236,8 @@ spec:
                   """Sync UniFi network devices to Neo4j."""
                   logger.info("Syncing UniFi devices...")
 
-                  # Get devices (APs, switches)
-                  devices_response = call_mcp_tool("unifi", "list_devices")
+                  # Get devices (APs, switches) via consolidated home-mcp
+                  devices_response = call_mcp_tool("home", "unifi_list_devices")
                   devices = devices_response.get("devices", [])
 
                   count = 0
@@ -285,8 +276,8 @@ spec:
                       if not result.get("errors"):
                           count += 1
 
-                  # Get clients and their AP connections
-                  clients_response = call_mcp_tool("unifi", "list_clients")
+                  # Get clients and their AP connections via consolidated home-mcp
+                  clients_response = call_mcp_tool("home", "unifi_list_clients")
                   clients = clients_response.get("clients", [])
 
                   for client in clients:
@@ -319,8 +310,8 @@ spec:
                   """Sync TrueNAS storage to Neo4j."""
                   logger.info("Syncing TrueNAS storage...")
 
-                  # Get pools via REST API (bypasses MCP session protocol)
-                  pools_response = call_rest_api(MCP_SERVERS["truenas"], "/api/pools")
+                  # Get pools via consolidated infrastructure-mcp
+                  pools_response = call_mcp_tool("infrastructure", "truenas_list_pools")
                   pools = pools_response.get("pools", [])
 
                   count = 0
@@ -349,8 +340,8 @@ spec:
                       if not result.get("errors"):
                           count += 1
 
-                  # Get datasets via REST API
-                  datasets_response = call_rest_api(MCP_SERVERS["truenas"], "/api/datasets")
+                  # Get datasets via consolidated infrastructure-mcp
+                  datasets_response = call_mcp_tool("infrastructure", "truenas_list_datasets")
                   datasets = datasets_response.get("datasets", [])
 
                   for dataset in datasets:
@@ -378,8 +369,8 @@ spec:
                           "available": dataset.get("available", 0)
                       })
 
-                  # Get shares via REST API
-                  shares_response = call_rest_api(MCP_SERVERS["truenas"], "/api/shares")
+                  # Get shares via consolidated infrastructure-mcp
+                  shares_response = call_mcp_tool("infrastructure", "truenas_list_shares")
                   # Shares returns {nfs: [], smb: []} format
                   nfs_shares = shares_response.get("nfs", [])
                   smb_shares = shares_response.get("smb", [])
@@ -565,9 +556,9 @@ spec:
                   """Sync service health from Coroot to Neo4j."""
                   logger.info("Syncing Coroot service health...")
 
-                  # Get overview from coroot-mcp REST API
-                  overview_response = call_rest_api(MCP_SERVERS["coroot"], "/api/overview")
-                  overview = overview_response.get("data", {})
+                  # Get overview from consolidated observability-mcp
+                  overview_response = call_mcp_tool("observability", "coroot_get_infrastructure_overview")
+                  overview = overview_response
 
                   if not overview or "error" in overview:
                       logger.warning(f"Coroot overview unavailable: {overview.get('error', 'no data')}")
@@ -603,9 +594,9 @@ spec:
                       if not result.get("errors"):
                           count += 1
 
-                  # Get alerts
-                  alerts_response = call_rest_api(MCP_SERVERS["coroot"], "/api/alerts")
-                  alerts = alerts_response.get("data", [])
+                  # Get alerts from consolidated observability-mcp
+                  alerts_response = call_mcp_tool("observability", "coroot_get_alerts")
+                  alerts = alerts_response.get("alerts", [])
 
                   for alert in alerts:
                       alert_name = alert.get("name", alert.get("alertname", "unknown"))
@@ -714,14 +705,14 @@ spec:
                   """
                   logger.info("Syncing Home Assistant areas...")
 
-                  # Get entities from HA via REST API
+                  # Get entities from HA via consolidated home-mcp
                   try:
-                      entities_response = call_rest_api(MCP_SERVERS["home_assistant"], "/api/entities")
+                      entities_response = call_mcp_tool("home", "list_entities")
                       if not entities_response:
-                          logger.warning("HA-MCP unavailable or returned empty response, skipping area sync")
+                          logger.warning("Home-MCP unavailable or returned empty response, skipping area sync")
                           return 0
                   except Exception as e:
-                      logger.warning(f"HA-MCP unavailable, skipping area sync: {e}")
+                      logger.warning(f"Home-MCP unavailable, skipping area sync: {e}")
                       return 0
 
                   entities = entities_response.get("entities", [])
@@ -763,55 +754,103 @@ spec:
                   logger.info(f"HA area sync complete: {synced_count} entities updated")
                   return synced_count
 
+              def _extract_count(result):
+                  """Extract count from Neo4j query result."""
+                  try:
+                      return result["results"][0]["data"][0]["row"][0]
+                  except (KeyError, IndexError, TypeError):
+                      return 0
+
               def run_lifecycle_management():
-                  """Update entity lifecycle status."""
+                  """Update entity lifecycle status for ALL node types."""
                   logger.info("Running lifecycle management...")
 
-                  # Mark entities not seen in 8 hours as stale (2x discovery interval)
-                  stale_result = neo4j_query("""
-                      MATCH (h:Host)
-                      WHERE h.last_seen < datetime() - duration('PT8H')
-                        AND h.status = 'online'
-                      SET h.status = 'stale'
-                      RETURN count(h) as stale_count
-                  """)
+                  # Node types and their stale/archive/delete thresholds
+                  lifecycle_config = {
+                      "Host": {"stale": "PT8H", "offline": "P2D", "archive": "P14D"},
+                      "VM": {"stale": "PT8H", "offline": "P2D", "archive": "P14D"},
+                      "Pod": {"delete_after": "P1D"},
+                      "Service": {"stale": "PT12H", "offline": "P3D", "delete_after": "P7D"},
+                      "Alert": {"delete_after": "P7D"},
+                      "UptimeMonitor": {"stale": "PT12H", "delete_after": "P7D"},
+                      "RunbookDocument": {"stale": "P1D", "delete_after": "P7D"},
+                      "SmartDevice": {"stale": "P1D", "offline": "P7D", "delete_after": "P30D"},
+                      "NAS": {"stale": "PT8H", "offline": "P2D"},
+                      "Share": {"stale": "P1D", "delete_after": "P14D"},
+                      "AccessPoint": {"stale": "PT8H", "offline": "P2D", "archive": "P14D"},
+                      "Switch": {"stale": "PT8H", "offline": "P2D", "archive": "P14D"},
+                  }
 
-                  stale_count = 0
-                  if stale_result.get("results"):
-                      data = stale_result["results"][0].get("data", [])
-                      if data:
-                          stale_count = data[0].get("row", [0])[0]
+                  total_stale = 0
+                  total_offline = 0
+                  total_deleted = 0
+                  total_archived = 0
 
-                  # Mark entities stale for 48h as offline
-                  offline_result = neo4j_query("""
-                      MATCH (h:Host {status: 'stale'})
-                      WHERE h.last_seen < datetime() - duration('P2D')
-                      SET h.status = 'offline'
-                      RETURN count(h) as offline_count
-                  """)
+                  for label, thresholds in lifecycle_config.items():
+                      # Mark stale
+                      if "stale" in thresholds:
+                          result = neo4j_query(f"""
+                              MATCH (n:{label})
+                              WHERE n.last_seen < datetime() - duration('{thresholds["stale"]}')
+                                AND (n.status IS NULL OR n.status = 'online')
+                              SET n.status = 'stale'
+                              RETURN count(n) as cnt
+                          """)
+                          cnt = _extract_count(result)
+                          total_stale += cnt
 
-                  offline_count = 0
-                  if offline_result.get("results"):
-                      data = offline_result["results"][0].get("data", [])
-                      if data:
-                          offline_count = data[0].get("row", [0])[0]
+                      # Mark offline
+                      if "offline" in thresholds:
+                          result = neo4j_query(f"""
+                              MATCH (n:{label} {{status: 'stale'}})
+                              WHERE n.last_seen < datetime() - duration('{thresholds["offline"]}')
+                              SET n.status = 'offline'
+                              RETURN count(n) as cnt
+                          """)
+                          cnt = _extract_count(result)
+                          total_offline += cnt
 
-                  # Archive entities offline for 14 days
-                  archive_result = neo4j_query("""
-                      MATCH (h:Host {status: 'offline'})
-                      WHERE h.last_seen < datetime() - duration('P14D')
-                      SET h:ArchivedHost
-                      REMOVE h:Host
-                      RETURN count(h) as archived_count
-                  """)
+                      # Delete old nodes
+                      if "delete_after" in thresholds:
+                          result = neo4j_query(f"""
+                              MATCH (n:{label})
+                              WHERE n.last_seen < datetime() - duration('{thresholds["delete_after"]}')
+                              DETACH DELETE n
+                              RETURN count(n) as cnt
+                          """)
+                          cnt = _extract_count(result)
+                          total_deleted += cnt
+                          if cnt > 0:
+                              logger.info(f"  Deleted {cnt} stale {label} nodes")
 
-                  archived_count = 0
-                  if archive_result.get("results"):
-                      data = archive_result["results"][0].get("data", [])
-                      if data:
-                          archived_count = data[0].get("row", [0])[0]
+                      # Archive (relabel) long-offline
+                      if "archive" in thresholds:
+                          result = neo4j_query(f"""
+                              MATCH (n:{label} {{status: 'offline'}})
+                              WHERE n.last_seen < datetime() - duration('{thresholds["archive"]}')
+                              SET n:Archived{label}
+                              REMOVE n:{label}
+                              RETURN count(n) as cnt
+                          """)
+                          cnt = _extract_count(result)
+                          total_archived += cnt
+                          if cnt > 0:
+                              logger.info(f"  Archived {cnt} {label} nodes")
 
-                  logger.info(f"Lifecycle: {stale_count} marked stale, {offline_count} marked offline, {archived_count} archived")
+                  # Clean up orphan nodes with no relationships
+                  for label in ["Location", "Network"]:
+                      result = neo4j_query(f"""
+                          MATCH (n:{label})
+                          WHERE NOT (n)--()
+                          DELETE n
+                          RETURN count(n) as cnt
+                      """)
+                      cnt = _extract_count(result)
+                      if cnt > 0:
+                          logger.info(f"  Deleted {cnt} orphan {label} nodes")
+                          total_deleted += cnt
+
+                  logger.info(f"Lifecycle: {total_stale} stale, {total_offline} offline, {total_deleted} deleted, {total_archived} archived")
 
               def main():
                   logger.info("Starting graph-sync job")

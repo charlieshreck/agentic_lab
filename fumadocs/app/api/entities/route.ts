@@ -18,7 +18,10 @@ export async function GET(request: NextRequest) {
       // Return all entity types with counts
       const result = await queryGraph(`
         MATCH (n)
+        WHERE NOT any(l IN labels(n) WHERE l STARTS WITH 'Archived')
+          AND (n.status IS NULL OR n.status IN ['online', 'stale'])
         WITH labels(n)[0] as type, count(n) as count
+        WHERE type IS NOT NULL
         RETURN type, count
         ORDER BY count DESC
       `);

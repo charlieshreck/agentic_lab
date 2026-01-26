@@ -1,4 +1,4 @@
-const NEO4J_MCP_URL = process.env.NEO4J_URL || 'http://neo4j-mcp.ai-platform.svc.cluster.local:8000';
+const NEO4J_MCP_URL = process.env.NEO4J_URL || 'http://knowledge-mcp.ai-platform.svc.cluster.local:8000';
 
 export interface Entity {
   id: string;

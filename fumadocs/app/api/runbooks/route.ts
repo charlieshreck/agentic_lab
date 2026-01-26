@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-const KNOWLEDGE_API = process.env.KNOWLEDGE_API_URL || 'http://10.20.0.40:31084';
+const KNOWLEDGE_API = process.env.KNOWLEDGE_API_URL || 'http://knowledge-mcp.ai-platform.svc.cluster.local:8000';
 
 export async function GET() {
   try {
