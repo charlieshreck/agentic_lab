@@ -189,7 +189,7 @@ spec:
 
                   # Get VMs list via consolidated infrastructure-mcp
                   vms_response = call_mcp_tool("infrastructure", "proxmox_list_vms")
-                  vms = vms_response.get("vms", [])
+                  vms = vms_response if isinstance(vms_response, list) else (vms_response.get("vms", []) if isinstance(vms_response, dict) else [])
 
                   if not vms:
                       logger.warning("No VMs returned from Proxmox MCP")
@@ -238,7 +238,7 @@ spec:
 
                   # Get devices (APs, switches) via consolidated home-mcp
                   devices_response = call_mcp_tool("home", "unifi_list_devices")
-                  devices = devices_response.get("devices", [])
+                  devices = devices_response if isinstance(devices_response, list) else (devices_response.get("devices", []) if isinstance(devices_response, dict) else [])
 
                   count = 0
                   for device in devices:
@@ -278,7 +278,7 @@ spec:
 
                   # Get clients and their AP connections via consolidated home-mcp
                   clients_response = call_mcp_tool("home", "unifi_list_clients")
-                  clients = clients_response.get("clients", [])
+                  clients = clients_response if isinstance(clients_response, list) else (clients_response.get("clients", []) if isinstance(clients_response, dict) else [])
 
                   for client in clients:
                       mac = client.get("mac", "").lower()
@@ -312,7 +312,7 @@ spec:
 
                   # Get pools via consolidated infrastructure-mcp
                   pools_response = call_mcp_tool("infrastructure", "truenas_list_pools")
-                  pools = pools_response.get("pools", [])
+                  pools = pools_response if isinstance(pools_response, list) else (pools_response.get("pools", []) if isinstance(pools_response, dict) else [])
 
                   count = 0
                   for pool in pools:
@@ -342,7 +342,7 @@ spec:
 
                   # Get datasets via consolidated infrastructure-mcp
                   datasets_response = call_mcp_tool("infrastructure", "truenas_list_datasets")
-                  datasets = datasets_response.get("datasets", [])
+                  datasets = datasets_response if isinstance(datasets_response, list) else (datasets_response.get("datasets", []) if isinstance(datasets_response, dict) else [])
 
                   for dataset in datasets:
                       name = dataset.get("name", "")
@@ -371,10 +371,15 @@ spec:
 
                   # Get shares via consolidated infrastructure-mcp
                   shares_response = call_mcp_tool("infrastructure", "truenas_list_shares")
-                  # Shares returns {nfs: [], smb: []} format
-                  nfs_shares = shares_response.get("nfs", [])
-                  smb_shares = shares_response.get("smb", [])
-                  shares = nfs_shares + smb_shares
+                  # Shares may return {nfs: [], smb: []} dict or flat list
+                  if isinstance(shares_response, list):
+                      shares = shares_response
+                  elif isinstance(shares_response, dict):
+                      nfs_shares = shares_response.get("nfs", [])
+                      smb_shares = shares_response.get("smb", [])
+                      shares = nfs_shares + smb_shares
+                  else:
+                      shares = []
 
                   for share in shares:
                       path = share.get("path", "")
@@ -412,9 +417,9 @@ spec:
                   for cluster in CLUSTERS:
                       logger.info(f"Syncing from {cluster} cluster...")
 
-                      # Get services via REST API with cluster parameter
-                      services_response = call_rest_api(MCP_SERVERS["infrastructure"], f"/api/services?cluster={cluster}")
-                      services = services_response.get("services", [])
+                      # Get services via consolidated infrastructure-mcp
+                      services_response = call_mcp_tool("infrastructure", "kubectl_get_services", {"namespace": "all", "cluster": cluster})
+                      services = services_response if isinstance(services_response, list) else (services_response.get("services", []) if isinstance(services_response, dict) else [])
 
                       count = 0
                       for svc in services:
@@ -449,9 +454,9 @@ spec:
 
                       total_services += count
 
-                      # Get pods via REST API with cluster parameter
-                      pods_response = call_rest_api(MCP_SERVERS["infrastructure"], f"/api/pods?cluster={cluster}")
-                      pods = pods_response.get("pods", [])
+                      # Get pods via consolidated infrastructure-mcp
+                      pods_response = call_mcp_tool("infrastructure", "kubectl_get_pods", {"namespace": "all", "cluster": cluster})
+                      pods = pods_response if isinstance(pods_response, list) else (pods_response.get("pods", []) if isinstance(pods_response, dict) else [])
 
                       pod_count = 0
                       for pod in pods:
@@ -497,18 +502,16 @@ spec:
                   """Link runbooks to alerts in Neo4j."""
                   logger.info("Syncing runbook relationships...")
 
-                  # Get runbooks from knowledge MCP via REST API (MCP protocol requires session)
-                  runbooks_response = call_rest_api(MCP_SERVERS["knowledge"], "/api/search?collection=runbooks&q=*&limit=100")
-                  runbooks = runbooks_response.get("data", [])
+                  # Get runbooks from knowledge MCP REST API
+                  runbooks_response = call_rest_api(MCP_SERVERS["knowledge"], "/api/runbooks?limit=100")
+                  runbooks = runbooks_response.get("runbooks", [])
 
                   count = 0
                   for runbook_entry in runbooks:
-                      # REST API returns {id, payload: {...}} format
+                      # /api/runbooks returns flattened: {id, title, trigger_pattern, solution, automation_level, path, domain}
                       qdrant_id = runbook_entry.get("id", "")
-                      payload = runbook_entry.get("payload", runbook_entry)  # Fallback to entry itself
-                      title = payload.get("name", payload.get("title", ""))
-                      triggers = payload.get("triggers", {})
-                      resolves_alerts = triggers.get("alert_patterns", [])
+                      title = runbook_entry.get("title", "")
+                      trigger_pattern = runbook_entry.get("trigger_pattern", "")
 
                       if not title:
                           continue
@@ -518,25 +521,28 @@ spec:
                       MERGE (r:RunbookDocument {qdrant_id: $qdrant_id})
                       SET r.title = $title,
                           r.path = $path,
+                          r.domain = $domain,
                           r.automation_level = $automation_level,
+                          r.trigger_pattern = $trigger_pattern,
                           r.last_seen = datetime(),
                           r.source = 'knowledge'
                       RETURN r.title
                       """
 
-                      metadata = payload.get("metadata", {})
                       result = neo4j_query(cypher, {
                           "qdrant_id": qdrant_id,
                           "title": title,
-                          "path": payload.get("path", metadata.get("path", "")),
-                          "automation_level": "auto" if metadata.get("auto_approve_eligible") else "manual"
+                          "path": runbook_entry.get("path", ""),
+                          "domain": runbook_entry.get("domain", ""),
+                          "automation_level": runbook_entry.get("automation_level", "manual"),
+                          "trigger_pattern": trigger_pattern
                       })
 
                       if not result.get("errors"):
                           count += 1
 
-                      # Create RESOLVES relationships
-                      for alert_name in resolves_alerts:
+                      # If trigger_pattern looks like an alert name, create RESOLVES relationship
+                      if trigger_pattern and not trigger_pattern.startswith("*"):
                           alert_cypher = """
                           MATCH (r:RunbookDocument {qdrant_id: $qdrant_id})
                           MERGE (a:Alert {name: $alert_name})
@@ -546,7 +552,7 @@ spec:
 
                           neo4j_query(alert_cypher, {
                               "qdrant_id": qdrant_id,
-                              "alert_name": alert_name
+                              "alert_name": trigger_pattern
                           })
 
                   logger.info(f"Synced {count} runbooks")
@@ -560,8 +566,8 @@ spec:
                   overview_response = call_mcp_tool("observability", "coroot_get_infrastructure_overview")
                   overview = overview_response
 
-                  if not overview or "error" in overview:
-                      logger.warning(f"Coroot overview unavailable: {overview.get('error', 'no data')}")
+                  if not overview or not isinstance(overview, dict) or "error" in overview:
+                      logger.warning(f"Coroot overview unavailable: {overview.get('error', 'no data') if isinstance(overview, dict) else 'unexpected format'}")
                       return 0
 
                   count = 0
@@ -596,7 +602,7 @@ spec:
 
                   # Get alerts from consolidated observability-mcp
                   alerts_response = call_mcp_tool("observability", "coroot_get_alerts")
-                  alerts = alerts_response.get("alerts", [])
+                  alerts = alerts_response if isinstance(alerts_response, list) else (alerts_response.get("alerts", []) if isinstance(alerts_response, dict) else [])
 
                   for alert in alerts:
                       alert_name = alert.get("name", alert.get("alertname", "unknown"))
@@ -715,7 +721,7 @@ spec:
                       logger.warning(f"Home-MCP unavailable, skipping area sync: {e}")
                       return 0
 
-                  entities = entities_response.get("entities", [])
+                  entities = entities_response if isinstance(entities_response, list) else (entities_response.get("entities", []) if isinstance(entities_response, dict) else [])
                   if not entities:
                       logger.info("No entities returned from HA, skipping area sync")
                       return 0
