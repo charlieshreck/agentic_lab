@@ -28,12 +28,8 @@ data:
     max_request_size = 104857600
 
     # Registration settings
-    # Users: chaz
-    # TEMPORARY: Enable registration for bot user creation (will disable after)
-    allow_registration = true
-
-    # TEMPORARY: Emergency password for admin access (remove after password reset)
-    emergency_password = "TempAdmin2026!"
+    # Users: chaz, agentic-bot
+    allow_registration = false
     allow_guest_registration = false
     allow_encryption = true
     allow_federation = false  # Internal only, no federation
