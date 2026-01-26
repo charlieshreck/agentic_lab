@@ -62,9 +62,13 @@ data:
 
     # Alert → Grafana dashboard mapping
     ALERT_DASHBOARD_MAP = {
-        "KubePodCrashLooping": {"uid": "kubernetes-pods", "panel": 2},
-        "NodeHighCPU": {"uid": "node-exporter", "panel": 6},
-        "PersistentVolumeFillingUp": {"uid": "kubernetes-storage", "panel": 1},
+        "KubePodCrashLooping": {"uid": "6581e46e4e5c7ba40a07646395ef7b23", "panel": 1},
+        "KubePodNotReady": {"uid": "85a562078cdf77779eaa1add43ccec1e", "panel": 1},
+        "NodeHighCPU": {"uid": "rYdddlPWk", "panel": 77},
+        "NodeFilesystemSpaceFillingUp": {"uid": "rYdddlPWk", "panel": 44},
+        "PersistentVolumeFillingUp": {"uid": "919b92a8e8041bd567af9edab12c840c", "panel": 1},
+        "KubeMemoryOvercommit": {"uid": "efa86fd1d0c121a26444b636a3f509a8", "panel": 4},
+        "KubeCPUOvercommit": {"uid": "efa86fd1d0c121a26444b636a3f509a8", "panel": 2},
     }
 
 
