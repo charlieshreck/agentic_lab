@@ -1322,13 +1322,15 @@ spec:
                           count += 1
 
                       # Link UptimeMonitor→Service: try exact match, then fuzzy
+                      # Exclude MCP server services (infra, not monitored targets)
                       clean_name = name.lower().strip().replace(" ", "-")
-                      if len(clean_name) > 3:
+                      if len(clean_name) > 3 and not clean_name.endswith("-mcp"):
                           # Strategy 1: Exact name match
                           cypher_exact = """
                           MATCH (e:UptimeMonitor {key: $key})
                           MATCH (s:Service)
                           WHERE toLower(s.name) = $clean_name
+                            AND NOT toLower(s.name) ENDS WITH '-mcp'
                           MERGE (e)-[:MONITORS]->(s)
                           RETURN s.name as matched
                           """
