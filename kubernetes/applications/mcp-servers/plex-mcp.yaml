@@ -243,7 +243,7 @@ data:
         """Internal: Get GPU status from Plex VM via nvidia-smi."""
         try:
             result = subprocess.run(
-                ["ssh", "-i", "/root/.ssh/SSH_PRIVATE_KEY", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                ["ssh", "-i", "/tmp/ssh_key", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
                  f"root@{PLEX_HOST}", "nvidia-smi", "--query-gpu=name,driver_version,memory.used,memory.total,temperature.gpu,utilization.gpu,utilization.encoder,utilization.decoder", "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=10
             )
@@ -276,7 +276,7 @@ data:
         """Get GPU processes (what's using the GPU)."""
         try:
             result = subprocess.run(
-                ["ssh", "-i", "/root/.ssh/SSH_PRIVATE_KEY", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                ["ssh", "-i", "/tmp/ssh_key", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
                  f"root@{PLEX_HOST}", "nvidia-smi", "--query-compute-apps=pid,name,used_memory", "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=10
             )
@@ -446,7 +446,7 @@ spec:
       containers:
         - name: mcp-server
           image: python:3.11-slim
-          command: ['sh', '-c', 'apt-get update && apt-get install -y -qq openssh-client && cd /app && PYTHONPATH=/app/deps python /code/main.py']
+          command: ['sh', '-c', 'apt-get update && apt-get install -y -qq openssh-client && if [ -f /root/.ssh/SSH_PRIVATE_KEY ]; then cp /root/.ssh/SSH_PRIVATE_KEY /tmp/ssh_key && echo >> /tmp/ssh_key && chmod 600 /tmp/ssh_key; fi && cd /app && PYTHONPATH=/app/deps python /code/main.py']
           ports:
             - containerPort: 8000
               name: http
