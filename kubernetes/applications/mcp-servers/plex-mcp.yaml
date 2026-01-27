@@ -499,7 +499,28 @@ spec:
           secret:
             secretName: plex-mcp-ssh
             defaultMode: 0600
-            optional: true
+---
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: plex-mcp-ssh-infisical
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /media/plex-ssh
+  managedSecretReference:
+    secretName: plex-mcp-ssh
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
 ---
 apiVersion: v1
 kind: Service
