@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 
 from discovery_service.config import (
+    KUBECONFIGS,
     MCP_SERVERS,
     NEO4J_PASSWORD,
     NEO4J_URI,
@@ -18,15 +19,19 @@ from discovery_service.graph.lifecycle import (
     run_lifecycle_management,
     sweep_stale,
 )
+from discovery_service.kube.client import KubeClient
 from discovery_service.mcp.client import McpClient
 from discovery_service.sources.homelab import sync_argocd_apps, sync_ha_areas
 from discovery_service.sources.knowledge import sync_runbooks
 from discovery_service.sources.kubernetes import (
+    link_services_to_pods,
     sync_kubernetes_deployments,
     sync_kubernetes_ingresses,
     sync_kubernetes_nodes,
+    sync_kubernetes_pods,
     sync_kubernetes_pvcs,
     sync_kubernetes_services,
+    sync_kubernetes_statefulsets,
 )
 from discovery_service.sources.network import sync_dns_topology, sync_unifi_devices
 from discovery_service.sources.observability import (
@@ -59,6 +64,11 @@ def main() -> int:
         return 1
     logger.info("Neo4j connection verified")
 
+    # Initialise multi-cluster Kubernetes client (direct API)
+    logger.info("Initialising Kubernetes clients...")
+    kube = KubeClient(KUBECONFIGS)
+    logger.info(f"Kubernetes clients ready for clusters: {kube.clusters}")
+
     # Phase 1: Mark all syncable nodes as stale
     mark_all_stale(neo4j, SYNCABLE_LABELS)
 
@@ -84,31 +94,56 @@ def main() -> int:
         logger.error(f"TrueNAS sync failed: {e}")
         results["truenas_storage"] = 0
 
-    # Deployments MUST run before services (provides deploy_status lookup)
+    # --- Kubernetes sync (direct API via KubeClient) ---
+    # Nodes first (creates Host nodes for SCHEDULED_ON)
     try:
-        deploy_status = sync_kubernetes_deployments(neo4j, mcp)
+        results["k8s_nodes"] = sync_kubernetes_nodes(neo4j, kube)
+    except Exception as e:
+        logger.error(f"Kubernetes nodes sync failed: {e}")
+        results["k8s_nodes"] = 0
+
+    # Deployments (provides deploy_status lookup for services)
+    try:
+        deploy_status = sync_kubernetes_deployments(neo4j, kube)
         results["deployments"] = len(deploy_status)
     except Exception as e:
         logger.error(f"Kubernetes deployments sync failed: {e}")
         results["deployments"] = 0
 
+    # StatefulSets
     try:
-        results["kubernetes"] = sync_kubernetes_services(neo4j, mcp, deploy_status)
+        results["statefulsets"] = sync_kubernetes_statefulsets(neo4j, kube)
     except Exception as e:
-        logger.error(f"Kubernetes sync failed: {e}")
+        logger.error(f"Kubernetes StatefulSets sync failed: {e}")
+        results["statefulsets"] = 0
+
+    # Services (selector extracted for pod linking)
+    try:
+        results["kubernetes"] = sync_kubernetes_services(neo4j, kube, deploy_status)
+    except Exception as e:
+        logger.error(f"Kubernetes services sync failed: {e}")
         results["kubernetes"] = 0
 
+    # Pods (ownership + scheduling via ownerReferences + nodeName)
     try:
-        results["ingresses"] = sync_kubernetes_ingresses(neo4j, mcp)
+        results["pods"] = sync_kubernetes_pods(neo4j, kube)
+    except Exception as e:
+        logger.error(f"Kubernetes pods sync failed: {e}")
+        results["pods"] = 0
+
+    # Post-sync: Service->Pod linking via selectors
+    try:
+        results["svc_pod_links"] = link_services_to_pods(neo4j, kube)
+    except Exception as e:
+        logger.error(f"Service->Pod linking failed: {e}")
+        results["svc_pod_links"] = 0
+
+    # Ingresses
+    try:
+        results["ingresses"] = sync_kubernetes_ingresses(neo4j, kube)
     except Exception as e:
         logger.error(f"Kubernetes ingresses sync failed: {e}")
         results["ingresses"] = 0
-
-    try:
-        results["k8s_nodes"] = sync_kubernetes_nodes(neo4j, mcp)
-    except Exception as e:
-        logger.error(f"Kubernetes nodes sync failed: {e}")
-        results["k8s_nodes"] = 0
 
     try:
         results["runbooks"] = sync_runbooks(neo4j, mcp)
@@ -148,7 +183,7 @@ def main() -> int:
         results["argocd_apps"] = 0
 
     try:
-        results["pvcs"] = sync_kubernetes_pvcs(neo4j, mcp)
+        results["pvcs"] = sync_kubernetes_pvcs(neo4j, kube)
     except Exception as e:
         logger.error(f"Kubernetes PVCs sync failed: {e}")
         results["pvcs"] = 0
@@ -187,6 +222,7 @@ def main() -> int:
     except Exception as e:
         logger.error(f"Lifecycle management failed: {e}")
 
+    kube.close()
     neo4j.close()
 
     elapsed = (datetime.now() - start_time).total_seconds()

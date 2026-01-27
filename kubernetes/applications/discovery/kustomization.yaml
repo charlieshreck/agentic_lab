@@ -4,6 +4,7 @@ kind: Kustomization
 namespace: ai-platform
 
 resources:
+  - rbac.yaml
   - network-discovery.yaml
   - graph-sync.yaml
   - entity-enrichment.yaml

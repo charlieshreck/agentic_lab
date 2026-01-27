@@ -9,6 +9,7 @@ description = "Graph sync service for Kernow homelab — discovers infrastructur
 requires-python = ">=3.11"
 dependencies = [
     "neo4j>=5.0",
+    "kubernetes>=29.0",
 ]
 
 [project.optional-dependencies]

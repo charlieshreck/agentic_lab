@@ -19,12 +19,19 @@ MCP_SERVERS = {
 # Multi-cluster configuration
 K8S_CLUSTERS = ["agentic", "prod", "monit"]
 
+# Multi-cluster kubeconfig paths (matches infrastructure-mcp pattern)
+KUBECONFIGS: dict[str, str | None] = {
+    "agentic": None,  # In-cluster service account
+    "prod": os.environ.get("KUBECONFIG_PROD", "/kubeconfigs/prod/kubeconfig"),
+    "monit": os.environ.get("KUBECONFIG_MONIT", "/kubeconfigs/monit/kubeconfig"),
+}
+
 # Direct API access (cross-cluster)
 GATUS_URL = os.environ.get("GATUS_URL", "http://gatus.monit.kernow.io")
 
 # Node labels managed by lifecycle (Mark & Sweep)
 SYNCABLE_LABELS = [
-    "Pod", "Deployment", "Service", "Ingress", "PersistentVolumeClaim",
+    "Pod", "Deployment", "StatefulSet", "Service", "Ingress", "PersistentVolumeClaim",
     "ArgoApp", "VM", "Host", "UptimeMonitor", "Alert",
     "StoragePool", "Dataset", "Share", "DNSRecord",
     "AccessPoint", "Switch", "NetworkDevice", "Dashboard",
