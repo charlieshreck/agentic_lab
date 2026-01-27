@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discovery-service"
+version = "0.1.0"
+description = "Graph sync service for Kernow homelab — discovers infrastructure and syncs to Neo4j"
+requires-python = ">=3.11"
+dependencies = [
+    "neo4j>=5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
