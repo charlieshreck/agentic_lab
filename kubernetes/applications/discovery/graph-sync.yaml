@@ -21,6 +21,10 @@ spec:
             app: graph-sync
         spec:
           restartPolicy: Never
+          hostAliases:
+          - ip: "10.30.0.90"
+            hostnames:
+            - gatus.monit.kernow.io
           containers:
           - name: graph-sync
             image: python:3.11-slim
