@@ -34,7 +34,7 @@ PROXMOX_HOSTS = {
         "token_secret": os.environ.get("PROXMOX_RUAPEHU_TOKEN_SECRET", ""),
     },
     "carrick": {
-        "url": os.environ.get("PROXMOX_CARRICK_URL", "https://10.30.0.10:8006"),
+        "url": os.environ.get("PROXMOX_CARRICK_URL", "https://proxmox.monit.kernow.io"),
         "token_id": os.environ.get("PROXMOX_CARRICK_TOKEN_ID", ""),
         "token_secret": os.environ.get("PROXMOX_CARRICK_TOKEN_SECRET", ""),
     },
