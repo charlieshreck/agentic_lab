@@ -683,6 +683,10 @@ spec:
                               ready = pod.get("ready", False)
                               restart_count = pod.get("restarts", 0)
 
+                              # Skip completed job pods — they clutter the graph
+                              if phase == "Succeeded":
+                                  continue
+
                               # Derive pod status
                               if phase == "Running" and ready:
                                   pod_status = "healthy"
@@ -1023,14 +1027,9 @@ spec:
                               """, {"qdrant_id": qdrant_id, "hostname": hostname_lower})
                               rel_count += 1
 
-                      # D. COVERS_NAMESPACE→Service: domain-based namespace linking
-                      if domain:
-                          neo4j_query("""
-                          MATCH (r:RunbookDocument {qdrant_id: $qdrant_id})
-                          MATCH (s:Service {namespace: $domain})
-                          WHERE NOT (r)-[:TROUBLESHOOTS]->(s)
-                          MERGE (r)-[:COVERS_NAMESPACE]->(s)
-                          """, {"qdrant_id": qdrant_id, "domain": domain})
+                      # D. COVERS_NAMESPACE removed — too noisy, linked every service in namespace
+                      # Runbook→Service connections are handled by TROUBLESHOOTS (text match)
+                      # and RESOLVES (alert match) which are more precise
 
                   logger.info(f"Synced {count} runbooks, {rel_count} relationships created")
                   return count
@@ -1047,24 +1046,41 @@ spec:
                       logger.warning(f"Coroot overview unavailable: {overview.get('error', 'no data') if isinstance(overview, dict) else 'unexpected format'}")
                       return 0
 
+                  # Coroot cluster ID mapping
+                  COROOT_CLUSTER_IDS = {"jd756uxv", "qorspfs5", "loka6zue"}
+
                   count = 0
                   anomalous_services = []
                   services = overview.get("services", {})
                   for service_key, service_data in services.items():
-                      # Parse namespace/service from Coroot id (format: "namespace:service")
-                      # Also try "/" separator as fallback
+                      # Parse namespace/service from Coroot id
+                      # 4-part format: "cluster_id:namespace:Kind:name"
+                      # 2-part format: "namespace:service"
                       coroot_id = service_data.get("id", service_key)
-                      if ":" in coroot_id:
-                          parts = coroot_id.split(":", 1)
+                      parts = coroot_id.split(":")
+                      if len(parts) == 4:
+                          # 4-part Coroot ID — extract namespace and name only
+                          _, namespace, kind, name = parts
+                          # Skip Talos system services (not K8s workloads)
+                          if namespace == "_" or kind == "Unknown":
+                              continue
+                      elif len(parts) == 2:
                           namespace = parts[0]
                           name = parts[1]
                       elif "/" in service_key:
-                          parts = service_key.split("/", 1)
-                          namespace = parts[0]
-                          name = parts[1]
+                          sparts = service_key.split("/", 1)
+                          namespace = sparts[0]
+                          name = sparts[1]
                       else:
                           namespace = "unknown"
                           name = service_key
+
+                      # Skip port-number-only names and FQDN names
+                      if name.isdigit() or "." in name:
+                          continue
+                      # Skip if namespace is a Coroot cluster hash
+                      if namespace in COROOT_CLUSTER_IDS:
+                          continue
 
                       health = service_data.get("health", "unknown")
                       anomaly_count = service_data.get("anomalies", 0)
@@ -1082,14 +1098,13 @@ spec:
                       if anomaly_count > 0:
                           anomalous_services.append(coroot_id)
 
+                      # Update existing service (don't create new ones from Coroot data)
                       cypher = """
-                      MERGE (s:Service {name: $name, namespace: $namespace})
+                      MATCH (s:Service {name: $name, namespace: $namespace})
                       SET s.health = $health,
-                          s.status = $status,
                           s.coroot_id = $coroot_id,
                           s.anomaly_count = $anomaly_count,
-                          s.last_health_check = datetime(),
-                          s.source = 'coroot'
+                          s.last_health_check = datetime()
                       RETURN s.name
                       """
 
@@ -1097,7 +1112,6 @@ spec:
                           "name": name,
                           "namespace": namespace,
                           "health": health,
-                          "status": status,
                           "coroot_id": coroot_id,
                           "anomaly_count": anomaly_count
                       })
@@ -1321,13 +1335,18 @@ spec:
                           link_result = neo4j_query(cypher_exact, {"key": key, "clean_name": clean_name})
                           matched = link_result.get("results", [{}])[0].get("data", [])
 
-                          # Strategy 2: Substring match if no exact hit
+                          # Strategy 2: Tightened fuzzy match if no exact hit
+                          # Excludes MCP servers (infra, not monitored targets) and
+                          # requires similar length to prevent false substring matches
                           if not matched:
                               cypher_fuzzy = """
                               MATCH (e:UptimeMonitor {key: $key})
                               MATCH (s:Service)
                               WHERE (toLower(s.name) CONTAINS $clean_name OR $clean_name CONTAINS toLower(s.name))
                                 AND size(s.name) > 3
+                                AND NOT toLower(s.name) ENDS WITH '-mcp'
+                                AND toFloat(size(s.name)) / toFloat(size($clean_name)) > 0.5
+                                AND toFloat(size(s.name)) / toFloat(size($clean_name)) < 2.0
                               WITH e, s LIMIT 1
                               MERGE (e)-[:MONITORS]->(s)
                               RETURN s.name as matched
@@ -1566,7 +1585,8 @@ spec:
 
                           cypher = """
                           MERGE (d:DNSRecord {domain: $domain})
-                          SET d.answer = $answer,
+                          SET d.hostname = $domain,
+                              d.answer = $answer,
                               d.record_type = 'rewrite',
                               d.source = 'adguard',
                               d.status = 'active',
@@ -1613,7 +1633,8 @@ spec:
 
                           cypher = """
                           MERGE (d:DNSRecord {domain: $domain})
-                          SET d.answer = $target,
+                          SET d.hostname = $domain,
+                              d.answer = $target,
                               d.record_type = 'override',
                               d.source = 'unbound',
                               d.status = 'active',
