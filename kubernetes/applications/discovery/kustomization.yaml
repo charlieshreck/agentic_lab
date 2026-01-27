@@ -9,3 +9,7 @@ resources:
   - graph-sync.yaml
   - entity-enrichment.yaml
   - runbook-indexer.yaml
+  - infisical-proxmox-ruapehu.yaml
+  - infisical-proxmox-carrick.yaml
+  - infisical-truenas-hdd.yaml
+  - infisical-truenas-media.yaml

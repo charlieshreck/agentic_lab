@@ -26,6 +26,10 @@ spec:
           - ip: "10.30.0.90"
             hostnames:
             - gatus.monit.kernow.io
+          - ip: "10.10.0.1"
+            hostnames:
+            - truenas.hdd.kernow.io
+            - truenas.kernow.io
           volumes:
           - name: kubeconfig-prod
             secret:
@@ -62,6 +66,67 @@ spec:
               value: "http://gatus.monit.kernow.io"
             - name: MEDIA_MCP_URL
               value: "http://media-mcp:8000"
+            # Proxmox Ruapehu (direct API)
+            - name: PROXMOX_RUAPEHU_URL
+              valueFrom:
+                secretKeyRef:
+                  name: proxmox-ruapehu-credentials
+                  key: HOST
+            - name: PROXMOX_RUAPEHU_TOKEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: proxmox-ruapehu-credentials
+                  key: TOKEN_ID
+            - name: PROXMOX_RUAPEHU_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: proxmox-ruapehu-credentials
+                  key: TOKEN_SECRET
+            # Proxmox Carrick (direct API — credentials incomplete)
+            - name: PROXMOX_CARRICK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: proxmox-carrick-credentials
+                  key: HOST
+                  optional: true
+            - name: PROXMOX_CARRICK_TOKEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: proxmox-carrick-credentials
+                  key: TOKEN_ID
+                  optional: true
+            - name: PROXMOX_CARRICK_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: proxmox-carrick-credentials
+                  key: TOKEN_SECRET
+                  optional: true
+            # TrueNAS HDD (direct API)
+            - name: TRUENAS_HDD_URL
+              valueFrom:
+                secretKeyRef:
+                  name: truenas-hdd-credentials
+                  key: HOST
+                  optional: true
+            - name: TRUENAS_HDD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: truenas-hdd-credentials
+                  key: API_KEY
+                  optional: true
+            # TrueNAS Media (direct API)
+            - name: TRUENAS_MEDIA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: truenas-media-credentials
+                  key: HOST
+                  optional: true
+            - name: TRUENAS_MEDIA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: truenas-media-credentials
+                  key: API_KEY
+                  optional: true
             volumeMounts:
             - name: kubeconfig-prod
               mountPath: /kubeconfigs/prod

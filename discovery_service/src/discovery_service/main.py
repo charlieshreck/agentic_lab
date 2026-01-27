@@ -10,8 +10,12 @@ from discovery_service.config import (
     NEO4J_PASSWORD,
     NEO4J_URI,
     NEO4J_USER,
+    PROXMOX_HOSTS,
     SYNCABLE_LABELS,
+    TRUENAS_INSTANCES,
 )
+from discovery_service.api.proxmox import ProxmoxClient
+from discovery_service.api.truenas import TrueNASClient
 from discovery_service.graph.client import Neo4jClient
 from discovery_service.graph.lifecycle import (
     dedup_network_nodes,
@@ -25,6 +29,7 @@ from discovery_service.sources.homelab import sync_argocd_apps, sync_ha_areas
 from discovery_service.sources.knowledge import sync_runbooks
 from discovery_service.sources.kubernetes import (
     link_services_to_pods,
+    sync_kubernetes_daemonsets,
     sync_kubernetes_deployments,
     sync_kubernetes_ingresses,
     sync_kubernetes_nodes,
@@ -69,6 +74,15 @@ def main() -> int:
     kube = KubeClient(KUBECONFIGS)
     logger.info(f"Kubernetes clients ready for clusters: {kube.clusters}")
 
+    # Initialise direct API clients
+    logger.info("Initialising Proxmox clients...")
+    proxmox = ProxmoxClient(PROXMOX_HOSTS)
+    logger.info(f"Proxmox clients ready for hosts: {proxmox.hosts}")
+
+    logger.info("Initialising TrueNAS clients...")
+    truenas = TrueNASClient(TRUENAS_INSTANCES)
+    logger.info(f"TrueNAS clients ready for instances: {truenas.instances}")
+
     # Phase 1: Mark all syncable nodes as stale
     mark_all_stale(neo4j, SYNCABLE_LABELS)
 
@@ -77,7 +91,7 @@ def main() -> int:
     deploy_status: dict = {}
 
     try:
-        results["proxmox_vms"] = sync_proxmox_vms(neo4j, mcp)
+        results["proxmox_vms"] = sync_proxmox_vms(neo4j, proxmox)
     except Exception as e:
         logger.error(f"Proxmox sync failed: {e}")
         results["proxmox_vms"] = 0
@@ -89,7 +103,7 @@ def main() -> int:
         results["unifi_devices"] = 0
 
     try:
-        results["truenas_storage"] = sync_truenas_storage(neo4j, mcp)
+        results["truenas_storage"] = sync_truenas_storage(neo4j, truenas)
     except Exception as e:
         logger.error(f"TrueNAS sync failed: {e}")
         results["truenas_storage"] = 0
@@ -116,6 +130,13 @@ def main() -> int:
     except Exception as e:
         logger.error(f"Kubernetes StatefulSets sync failed: {e}")
         results["statefulsets"] = 0
+
+    # DaemonSets
+    try:
+        results["daemonsets"] = sync_kubernetes_daemonsets(neo4j, kube)
+    except Exception as e:
+        logger.error(f"Kubernetes DaemonSets sync failed: {e}")
+        results["daemonsets"] = 0
 
     # Services (selector extracted for pod linking)
     try:
@@ -222,6 +243,8 @@ def main() -> int:
     except Exception as e:
         logger.error(f"Lifecycle management failed: {e}")
 
+    proxmox.close()
+    truenas.close()
     kube.close()
     neo4j.close()
 

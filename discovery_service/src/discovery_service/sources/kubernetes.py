@@ -16,11 +16,31 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Ownership resolution
+# Ownership resolution (batch ReplicaSet lookup)
 # ---------------------------------------------------------------------------
 
-def _resolve_owner(kube: KubeClient, cluster: str, namespace: str, owner_refs) -> tuple[str, str] | None:
-    """Resolve ownerReferences chain: Pod -> ReplicaSet -> Deployment/StatefulSet.
+def _build_rs_owner_map(kube: KubeClient, cluster: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """Pre-fetch all ReplicaSets for a cluster and build an owner lookup dict.
+
+    Returns {(rs_name, namespace): (owner_kind, owner_name)} for RS → Deployment/StatefulSet.
+    """
+    rs_map: dict[tuple[str, str], tuple[str, str]] = {}
+    try:
+        rs_list = kube.apps_v1(cluster).list_replica_set_for_all_namespaces()
+        for rs in rs_list.items:
+            if not rs.metadata.owner_references:
+                continue
+            for ref in rs.metadata.owner_references:
+                if ref.kind in ("Deployment", "StatefulSet"):
+                    rs_map[(rs.metadata.name, rs.metadata.namespace)] = (ref.kind, ref.name)
+                    break
+    except Exception as e:
+        logger.warning(f"  {cluster}: failed to build RS owner map: {e}")
+    return rs_map
+
+
+def _resolve_owner(rs_map: dict[tuple[str, str], tuple[str, str]], namespace: str, owner_refs) -> tuple[str, str] | None:
+    """Resolve ownerReferences chain using pre-built RS lookup dict.
 
     Returns (kind, name) of the ultimate owner or None.
     """
@@ -28,14 +48,9 @@ def _resolve_owner(kube: KubeClient, cluster: str, namespace: str, owner_refs) -
         return None
     for ref in owner_refs:
         if ref.kind == "ReplicaSet":
-            try:
-                rs = kube.apps_v1(cluster).read_namespaced_replica_set(ref.name, namespace)
-                if rs.metadata.owner_references:
-                    for rs_ref in rs.metadata.owner_references:
-                        if rs_ref.kind in ("Deployment", "StatefulSet"):
-                            return (rs_ref.kind, rs_ref.name)
-            except Exception:
-                pass
+            result = rs_map.get((ref.name, namespace))
+            if result:
+                return result
         elif ref.kind in ("StatefulSet", "DaemonSet", "Job"):
             return (ref.kind, ref.name)
     return None
@@ -309,6 +324,81 @@ def sync_kubernetes_statefulsets(neo4j: Neo4jClient, kube: KubeClient) -> int:
 
 
 # ---------------------------------------------------------------------------
+# DaemonSets
+# ---------------------------------------------------------------------------
+
+def sync_kubernetes_daemonsets(neo4j: Neo4jClient, kube: KubeClient) -> int:
+    """Sync Kubernetes DaemonSets from all clusters."""
+    logger.info("Syncing Kubernetes DaemonSets (multi-cluster)...")
+
+    total_count = 0
+
+    for cluster in kube.clusters:
+        try:
+            ds_list = kube.apps_v1(cluster).list_daemon_set_for_all_namespaces()
+
+            rows = []
+            for ds in ds_list.items:
+                name = ds.metadata.name
+                namespace = ds.metadata.namespace
+                if not name or not namespace:
+                    continue
+
+                desired = ds.status.desired_number_scheduled or 0
+                ready = ds.status.number_ready or 0
+                available = ds.status.number_available or 0
+
+                if desired == 0:
+                    status = "scaled-down"
+                elif ready >= desired:
+                    status = "healthy"
+                elif ready > 0:
+                    status = "degraded"
+                else:
+                    status = "unhealthy"
+
+                selector_labels = {}
+                if ds.spec.selector and ds.spec.selector.match_labels:
+                    selector_labels = dict(ds.spec.selector.match_labels)
+
+                rows.append({
+                    "name": name,
+                    "namespace": namespace,
+                    "cluster": cluster,
+                    "desired": desired,
+                    "ready": ready,
+                    "available": available,
+                    "status": status,
+                    "selector": str(selector_labels) if selector_labels else "",
+                })
+
+            if rows:
+                neo4j.batch_merge("""
+                    MERGE (ds:DaemonSet {name: row.name, namespace: row.namespace, cluster: row.cluster})
+                    SET ds.desired = row.desired,
+                        ds.ready = row.ready,
+                        ds.available = row.available,
+                        ds.status = row.status,
+                        ds.selector = row.selector,
+                        ds.last_seen = datetime(),
+                        ds.source = 'kubernetes',
+                        ds._sync_status = 'active'
+                """, rows)
+
+                mark_active(neo4j, "DaemonSet",
+                            [f"{r['name']}|{r['namespace']}|{r['cluster']}" for r in rows],
+                            id_field="name")
+
+            total_count += len(rows)
+            logger.info(f"  {cluster}: {len(rows)} DaemonSets")
+        except Exception as e:
+            logger.error(f"  {cluster}: DaemonSet sync failed: {e}")
+
+    logger.info(f"Synced {total_count} DaemonSets across {len(kube.clusters)} clusters")
+    return total_count
+
+
+# ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------
 
@@ -411,6 +501,10 @@ def sync_kubernetes_pods(neo4j: Neo4jClient, kube: KubeClient) -> int:
 
     for cluster in kube.clusters:
         try:
+            # Pre-fetch all ReplicaSets for batch ownership resolution
+            rs_map = _build_rs_owner_map(kube, cluster)
+            logger.info(f"  {cluster}: built RS owner map ({len(rs_map)} entries)")
+
             pods = kube.core_v1(cluster).list_pod_for_all_namespaces()
 
             pod_rows = []
@@ -459,8 +553,8 @@ def sync_kubernetes_pods(neo4j: Neo4jClient, kube: KubeClient) -> int:
                     "labels": str(labels) if labels else "",
                 })
 
-                # Resolve ownership via ownerReferences
-                owner = _resolve_owner(kube, cluster, namespace, pod.metadata.owner_references)
+                # Resolve ownership via ownerReferences (batch RS lookup)
+                owner = _resolve_owner(rs_map, namespace, pod.metadata.owner_references)
                 if owner:
                     ownership_rows.append({
                         "pod_name": name,
@@ -511,6 +605,15 @@ def sync_kubernetes_pods(neo4j: Neo4jClient, kube: KubeClient) -> int:
                     MERGE (p)-[:BELONGS_TO]->(sts)
                 """, sts_owners)
 
+            # BELONGS_TO: Pod -> DaemonSet (via ownerReferences)
+            ds_owners = [r for r in ownership_rows if r["owner_kind"] == "DaemonSet"]
+            if ds_owners:
+                neo4j.batch_merge("""
+                    MATCH (p:Pod {name: row.pod_name, namespace: row.pod_ns, cluster: row.cluster})
+                    MATCH (ds:DaemonSet {name: row.owner_name, namespace: row.pod_ns, cluster: row.cluster})
+                    MERGE (p)-[:BELONGS_TO]->(ds)
+                """, ds_owners)
+
             # SCHEDULED_ON: Pod -> Host (via spec.nodeName)
             if schedule_rows:
                 neo4j.batch_merge("""
@@ -520,7 +623,7 @@ def sync_kubernetes_pods(neo4j: Neo4jClient, kube: KubeClient) -> int:
                 """, schedule_rows)
 
             total_pods += len(pod_rows)
-            logger.info(f"  {cluster}: {len(pod_rows)} pods ({len(deploy_owners)} deploy-owned, {len(sts_owners)} sts-owned, {len(schedule_rows)} scheduled)")
+            logger.info(f"  {cluster}: {len(pod_rows)} pods ({len(deploy_owners)} deploy, {len(sts_owners)} sts, {len(ds_owners)} ds, {len(schedule_rows)} scheduled)")
         except Exception as e:
             logger.error(f"  {cluster}: pod sync failed: {e}")
 

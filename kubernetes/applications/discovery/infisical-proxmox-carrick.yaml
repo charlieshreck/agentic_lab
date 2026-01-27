@@ -1,0 +1,30 @@
+# Proxmox Carrick credentials managed by Infisical
+# Secret stored at /infrastructure/proxmox-carrick in Infisical:
+#   - HOST: https://10.30.0.10:8006
+#   - TOKEN_ID: <api-token-id>
+#   - TOKEN_SECRET: <api-token-secret>
+# NOTE: Credentials incomplete — HOST and TOKEN_ID need to be added
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: infisical-proxmox-carrick
+  namespace: ai-platform
+  labels:
+    app: graph-sync
+    component: discovery
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /infrastructure/proxmox-carrick
+  managedSecretReference:
+    secretName: proxmox-carrick-credentials
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner

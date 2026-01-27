@@ -1,0 +1,29 @@
+# TrueNAS HDD credentials managed by Infisical
+# Secret stored at /infrastructure/truenas-hdd in Infisical:
+#   - HOST: https://10.10.0.50
+#   - API_KEY: <api-key>
+# NOTE: API_KEY needs to be generated via TrueNAS UI and stored
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: infisical-truenas-hdd
+  namespace: ai-platform
+  labels:
+    app: graph-sync
+    component: discovery
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /infrastructure/truenas-hdd
+  managedSecretReference:
+    secretName: truenas-hdd-credentials
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
