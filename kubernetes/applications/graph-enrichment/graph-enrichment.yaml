@@ -317,7 +317,7 @@ data:
                 logger.warning(f"Could not get {domain} entities from Home MCP")
                 continue
 
-            entities = entities_resp.get("data", [])
+            entities = entities_resp if isinstance(entities_resp, list) else entities_resp.get("data", [])
             logger.info(f"  Processing {len(entities)} {domain} entities")
 
             for entity in entities:
