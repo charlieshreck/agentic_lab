@@ -63,6 +63,7 @@ spec:
             - -c
             - |
               import os
+              import re
               import json
               import asyncio
               import logging
@@ -267,6 +268,9 @@ spec:
                       MERGE (h:Host {hostname: $node})
                       SET h.type = 'hypervisor'
                       MERGE (h)-[:HOSTS]->(v)
+                      WITH v
+                      MERGE (p:ProxmoxNode {name: $node})
+                      MERGE (v)-[:RUNS_ON]->(p)
                       RETURN v.vmid
                       """
 
@@ -323,6 +327,9 @@ spec:
                           d.status = $status,
                           d.last_seen = datetime(),
                           d.source = 'unifi'
+                      WITH d
+                      MERGE (n:Network {{name: 'prod'}})
+                      MERGE (d)-[:CONNECTED_TO]->(n)
                       RETURN d.mac
                       """
 
@@ -699,21 +706,35 @@ spec:
                               else:
                                   pod_status = phase.lower() if phase else "unknown"
 
-                              cypher = """
-                              MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
-                              SET p.node = $node,
-                                  p.phase = $phase,
-                                  p.status = $status,
-                                  p.ready = $ready,
-                                  p.restart_count = $restart_count,
-                                  p.last_seen = datetime(),
-                                  p.source = 'kubernetes'
-                              WITH p
-                              MERGE (h:Host {hostname: $node})
-                              SET h.cluster = $cluster
-                              MERGE (p)-[:SCHEDULED_ON]->(h)
-                              RETURN p.name
-                              """
+                              # Only create SCHEDULED_ON if node is known (avoid ghost "unknown" host)
+                              if node_name and node_name != "unknown":
+                                  cypher = """
+                                  MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
+                                  SET p.node = $node,
+                                      p.phase = $phase,
+                                      p.status = $status,
+                                      p.ready = $ready,
+                                      p.restart_count = $restart_count,
+                                      p.last_seen = datetime(),
+                                      p.source = 'kubernetes'
+                                  WITH p
+                                  MERGE (h:Host {hostname: $node})
+                                  SET h.cluster = $cluster
+                                  MERGE (p)-[:SCHEDULED_ON]->(h)
+                                  RETURN p.name
+                                  """
+                              else:
+                                  cypher = """
+                                  MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
+                                  SET p.node = $node,
+                                      p.phase = $phase,
+                                      p.status = $status,
+                                      p.ready = $ready,
+                                      p.restart_count = $restart_count,
+                                      p.last_seen = datetime(),
+                                      p.source = 'kubernetes'
+                                  RETURN p.name
+                                  """
 
                               result = neo4j_query(cypher, {
                                   "name": name,
@@ -860,6 +881,9 @@ spec:
                               # Derive status from readiness
                               host_status = "healthy" if k8s_ready else "unhealthy"
 
+                              # Map cluster names to network identifiers
+                              network_name = {"agentic": "agentic", "prod": "prod", "monit": "monitoring"}.get(cluster, cluster)
+
                               cypher = """
                               MERGE (h:Host {hostname: $hostname})
                               SET h.k8s_version = $k8s_version,
@@ -870,6 +894,9 @@ spec:
                                   h.cluster = $cluster,
                                   h.status = $status,
                                   h.last_seen = datetime()
+                              WITH h
+                              MERGE (n:Network {name: $network})
+                              MERGE (h)-[:CONNECTED_TO]->(n)
                               RETURN h.hostname
                               """
 
@@ -881,7 +908,8 @@ spec:
                                   "k8s_conditions": conditions_str,
                                   "k8s_role": k8s_role,
                                   "cluster": cluster,
-                                  "status": host_status
+                                  "status": host_status,
+                                  "network": network_name
                               })
 
                               if not result.get("errors"):
@@ -1321,11 +1349,11 @@ spec:
                       if not result.get("errors"):
                           count += 1
 
-                      # Link UptimeMonitor→Service: try exact match, then fuzzy
-                      # Exclude MCP server services (infra, not monitored targets)
-                      clean_name = name.lower().strip().replace(" ", "-")
+                      # Link UptimeMonitor to Services, Hosts, VMs, or NAS nodes
+                      # Strip parenthetical info: "Ollama (qwen2.5:7b)" → "ollama"
+                      clean_name = re.sub(r'\(.*?\)', '', name).lower().strip().replace(" ", "-").rstrip("-")
                       if len(clean_name) > 3 and not clean_name.endswith("-mcp"):
-                          # Strategy 1: Exact name match
+                          # Strategy 1: Exact service name match
                           cypher_exact = """
                           MATCH (e:UptimeMonitor {key: $key})
                           MATCH (s:Service)
@@ -1337,9 +1365,7 @@ spec:
                           link_result = neo4j_query(cypher_exact, {"key": key, "clean_name": clean_name})
                           matched = link_result.get("results", [{}])[0].get("data", [])
 
-                          # Strategy 2: Tightened fuzzy match if no exact hit
-                          # Excludes MCP servers (infra, not monitored targets) and
-                          # requires similar length to prevent false substring matches
+                          # Strategy 2: Tightened fuzzy service match
                           if not matched:
                               cypher_fuzzy = """
                               MATCH (e:UptimeMonitor {key: $key})
@@ -1356,10 +1382,26 @@ spec:
                               link_result = neo4j_query(cypher_fuzzy, {"key": key, "clean_name": clean_name})
                               matched = link_result.get("results", [{}])[0].get("data", [])
 
+                          # Strategy 3: Match to VM by name (e.g. "Proxmox Ruapehu" → VM node)
+                          if not matched:
+                              cypher_vm = """
+                              MATCH (e:UptimeMonitor {key: $key})
+                              MATCH (target)
+                              WHERE (target:VM OR target:NAS OR target:Host)
+                                AND (toLower(target.name) CONTAINS $clean_name
+                                  OR $clean_name CONTAINS toLower(target.name))
+                                AND size(target.name) > 2
+                              WITH e, target LIMIT 1
+                              MERGE (e)-[:MONITORS]->(target)
+                              RETURN target.name as matched
+                              """
+                              link_result = neo4j_query(cypher_vm, {"key": key, "clean_name": clean_name})
+                              matched = link_result.get("results", [{}])[0].get("data", [])
+
                           if matched:
                               linked += 1
 
-                  logger.info(f"Synced {count} endpoints from Gatus, {linked} linked to services")
+                  logger.info(f"Synced {count} endpoints from Gatus, {linked} linked to targets")
                   return count
 
               def sync_ha_areas():
@@ -1497,16 +1539,37 @@ spec:
                       MERGE (a)-[:DEPLOYS]->(s)
                       """, {"name": name, "target_cluster": target_cluster})
 
-                      # Also try path-derived name (e.g. "kubernetes/applications/qdrant" → "qdrant")
+                      # Strategy 2: path-derived name (e.g. "kubernetes/applications/qdrant" → "qdrant")
                       if path:
                           app_from_path = path.rstrip("/").split("/")[-1]
                           if app_from_path and app_from_path != name:
                               neo4j_query("""
                               MATCH (a:ArgoApp {name: $argo_name})
+                              WHERE NOT (a)-[:DEPLOYS]->()
                               MATCH (s:Service {name: $svc_name})
-                              WHERE NOT (a)-[:DEPLOYS]->(s)
+                              WITH a, s LIMIT 1
                               MERGE (a)-[:DEPLOYS]->(s)
                               """, {"argo_name": name, "svc_name": app_from_path})
+
+                      # Strategy 3: match via Deployment of same name (any cluster)
+                      neo4j_query("""
+                      MATCH (a:ArgoApp {name: $name})
+                      WHERE NOT (a)-[:DEPLOYS]->()
+                      MATCH (d:Deployment {name: $name})
+                      MATCH (s:Service {name: d.name, namespace: d.namespace, cluster: d.cluster})
+                      WITH a, s LIMIT 1
+                      MERGE (a)-[:DEPLOYS]->(s)
+                      """, {"name": name})
+
+                      # Strategy 4: ArgoApp name matches a namespace — link to first service in that namespace
+                      neo4j_query("""
+                      MATCH (a:ArgoApp {name: $name})
+                      WHERE NOT (a)-[:DEPLOYS]->()
+                      MATCH (s:Service {namespace: $name})
+                      WHERE s.name = $name OR s.name STARTS WITH $name
+                      WITH a, s LIMIT 1
+                      MERGE (a)-[:DEPLOYS]->(s)
+                      """, {"name": name})
 
                   logger.info(f"Synced {count} ArgoCD applications")
                   return count
@@ -1558,6 +1621,17 @@ spec:
 
                               if not result.get("errors"):
                                   count += 1
+
+                              # Link PVC→Service: match by namespace + name prefix
+                              # PVC names follow patterns like "neo4j-data-neo4j-0" → service "neo4j"
+                              pvc_link_cypher = """
+                              MATCH (pvc:PersistentVolumeClaim {name: $name, namespace: $namespace, cluster: $cluster})
+                              MATCH (s:Service {namespace: $namespace, cluster: $cluster})
+                              WHERE $name STARTS WITH s.name AND size(s.name) > 2
+                              WITH pvc, s ORDER BY size(s.name) DESC LIMIT 1
+                              MERGE (pvc)-[:CLAIMED_BY]->(s)
+                              """
+                              neo4j_query(pvc_link_cypher, {"name": name, "namespace": namespace, "cluster": cluster})
 
                           total_count += count
                           logger.info(f"  {cluster}: {count} PVCs")
@@ -1887,6 +1961,52 @@ spec:
 
                   logger.info(f"Lifecycle: {total_stale} stale, {total_offline} offline, {total_deleted} deleted, {total_archived} archived")
 
+              def dedup_network_nodes():
+                  """Merge duplicate Network nodes: bare (no cidr) → enriched (has cidr).
+
+                  network-discovery creates enriched Network nodes with cidr/purpose.
+                  graph-sync creates bare ones via MERGE {name: $name}.
+                  This dedup moves relationships to the enriched node and deletes the bare one.
+                  """
+                  logger.info("Deduplicating Network nodes...")
+
+                  # Step 1: Move incoming CONNECTED_TO from bare to enriched
+                  neo4j_query("""
+                  MATCH (bare:Network), (enriched:Network)
+                  WHERE bare.name = enriched.name
+                    AND enriched.cidr IS NOT NULL
+                    AND bare.cidr IS NULL
+                  WITH bare, enriched
+                  MATCH (source)-[r:CONNECTED_TO]->(bare)
+                  MERGE (source)-[:CONNECTED_TO]->(enriched)
+                  DELETE r
+                  """)
+
+                  # Step 2: Move outgoing CONNECTED_TO from bare to enriched
+                  neo4j_query("""
+                  MATCH (bare:Network), (enriched:Network)
+                  WHERE bare.name = enriched.name
+                    AND enriched.cidr IS NOT NULL
+                    AND bare.cidr IS NULL
+                  WITH bare, enriched
+                  MATCH (bare)-[r:CONNECTED_TO]->(target)
+                  MERGE (enriched)-[:CONNECTED_TO]->(target)
+                  DELETE r
+                  """)
+
+                  # Step 3: Delete now-orphaned bare Network nodes
+                  result = neo4j_query("""
+                  MATCH (bare:Network)
+                  WHERE bare.cidr IS NULL
+                    AND NOT (bare)-[]-()
+                  DETACH DELETE bare
+                  RETURN count(bare) as deleted
+                  """)
+
+                  deleted = result.get("results", [{}])[0].get("data", [{}])[0].get("row", [0])[0]
+                  logger.info(f"Deduplicated {deleted} bare Network nodes")
+                  return deleted
+
               def main():
                   logger.info("Starting graph-sync job")
                   start_time = datetime.now()
@@ -2008,6 +2128,12 @@ spec:
                   except Exception as e:
                       logger.error(f"Grafana dashboards sync failed: {e}")
                       results["grafana_dashboards"] = 0
+
+                  # Dedup Network nodes (bare → enriched)
+                  try:
+                      dedup_network_nodes()
+                  except Exception as e:
+                      logger.error(f"Network dedup failed: {e}")
 
                   # Run lifecycle management
                   try:
