@@ -11,8 +11,6 @@ spec:
     repoURL: https://github.com/charlieshreck/kernow-mcp-servers.git
     targetRevision: main
     path: kubernetes/domains
-    directory:
-      recurse: false
   destination:
     server: https://10.20.0.40:6443
     namespace: ai-platform
