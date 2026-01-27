@@ -706,41 +706,31 @@ spec:
                               else:
                                   pod_status = phase.lower() if phase else "unknown"
 
-                              # Only create SCHEDULED_ON if node is known (avoid ghost "unknown" host)
-                              if node_name and node_name != "unknown":
-                                  cypher = """
-                                  MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
-                                  SET p.node = $node,
-                                      p.phase = $phase,
-                                      p.status = $status,
-                                      p.ready = $ready,
-                                      p.restart_count = $restart_count,
-                                      p.last_seen = datetime(),
-                                      p.source = 'kubernetes'
-                                  WITH p
-                                  MERGE (h:Host {hostname: $node})
-                                  SET h.cluster = $cluster
-                                  MERGE (p)-[:SCHEDULED_ON]->(h)
-                                  RETURN p.name
-                                  """
-                              else:
-                                  cypher = """
-                                  MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
-                                  SET p.node = $node,
-                                      p.phase = $phase,
-                                      p.status = $status,
-                                      p.ready = $ready,
-                                      p.restart_count = $restart_count,
-                                      p.last_seen = datetime(),
-                                      p.source = 'kubernetes'
-                                  RETURN p.name
-                                  """
+                              # Create pod node and link to Deployment by name prefix
+                              # Pod names follow: <deployment>-<replicaset-hash>-<pod-hash>
+                              # or <statefulset>-<ordinal> for StatefulSets
+                              cypher = """
+                              MERGE (p:Pod {name: $name, namespace: $namespace, cluster: $cluster})
+                              SET p.phase = $phase,
+                                  p.status = $status,
+                                  p.ready = $ready,
+                                  p.restart_count = $restart_count,
+                                  p.last_seen = datetime(),
+                                  p.source = 'kubernetes'
+                              WITH p
+                              OPTIONAL MATCH (d:Deployment {namespace: $namespace, cluster: $cluster})
+                              WHERE $name STARTS WITH d.name + '-'
+                              WITH p, d ORDER BY size(d.name) DESC LIMIT 1
+                              FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END |
+                                  MERGE (p)-[:BELONGS_TO]->(d)
+                              )
+                              RETURN p.name
+                              """
 
                               result = neo4j_query(cypher, {
                                   "name": name,
                                   "namespace": namespace,
                                   "cluster": cluster,
-                                  "node": node_name,
                                   "phase": phase,
                                   "status": pod_status,
                                   "ready": ready,
