@@ -8,7 +8,7 @@ export const metadata: Metadata = {
   title: 'Kernow Knowledge',
   description: 'Knowledge graph and documentation for Kernow homelab infrastructure',
   icons: {
-    icon: '/favicon.svg',
+    icon: '/favicon.jpg',
   },
 };
 
