@@ -44,7 +44,7 @@ spec:
             - name: HOME_MCP_URL
               value: "http://home-mcp:8000"
             - name: GATUS_URL
-              value: "http://10.30.0.20:32080"  # Monit cluster NodePort
+              value: "http://gatus.monit.kernow.io"
             resources:
               requests:
                 memory: "128Mi"
@@ -82,7 +82,7 @@ spec:
               }
 
               # Direct API access (cross-cluster)
-              GATUS_URL = os.environ.get("GATUS_URL", "http://10.30.0.20:32080")
+              GATUS_URL = os.environ.get("GATUS_URL", "http://gatus.monit.kernow.io")
 
               def neo4j_query(cypher: str, params: dict = None) -> dict:
                   """Execute Cypher query via Neo4j HTTP API."""
