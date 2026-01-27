@@ -38,6 +38,7 @@ spec:
           containers:
           - name: graph-sync
             image: ghcr.io/charlieshreck/agentic_lab/discovery-service:latest
+            imagePullPolicy: Always
             env:
             - name: NEO4J_URI
               value: "bolt://neo4j:7687"
