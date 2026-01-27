@@ -29,7 +29,7 @@ GATUS_URL = os.environ.get("GATUS_URL", "http://gatus.monit.kernow.io")
 # Multi-host Proxmox configuration (standalone hosts, not clustered)
 PROXMOX_HOSTS = {
     "ruapehu": {
-        "url": os.environ.get("PROXMOX_RUAPEHU_URL", "https://10.10.0.10:8006"),
+        "url": os.environ.get("PROXMOX_RUAPEHU_URL", "https://proxmox.kernow.io"),
         "token_id": os.environ.get("PROXMOX_RUAPEHU_TOKEN_ID", ""),
         "token_secret": os.environ.get("PROXMOX_RUAPEHU_TOKEN_SECRET", ""),
     },

@@ -30,6 +30,7 @@ spec:
             hostnames:
             - truenas.hdd.kernow.io
             - truenas.kernow.io
+            - proxmox.kernow.io
             - proxmox.monit.kernow.io
           volumes:
           - name: kubeconfig-prod
