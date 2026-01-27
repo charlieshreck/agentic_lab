@@ -1157,14 +1157,34 @@ spec:
                       logger.warning(f"Coroot service map unavailable: {map_response}")
                       return 0
 
+                  # Parse response — MCP may return JSON string or dict
+                  if isinstance(map_response, str):
+                      try:
+                          map_response = json.loads(map_response)
+                      except (json.JSONDecodeError, TypeError):
+                          logger.warning(f"Coroot service map returned non-JSON: {str(map_response)[:200]}")
+                          return 0
+
+                  if not isinstance(map_response, dict):
+                      logger.warning(f"Coroot service map unexpected type: {type(map_response)}")
+                      return 0
+
                   # Navigate to map data (structure: {data: {nodes: [...]}})
-                  data = map_response.get("data", map_response) if isinstance(map_response, dict) else map_response
+                  data = map_response.get("data", map_response)
+                  if not isinstance(data, dict):
+                      data = map_response
                   nodes = data.get("nodes", data.get("map", []))
+                  if nodes is None:
+                      nodes = []
                   if isinstance(nodes, dict):
                       nodes = list(nodes.values())
 
+                  logger.info(f"  Coroot map: {len(nodes)} nodes, type={type(nodes).__name__}, sample keys={list(nodes[0].keys()) if nodes and isinstance(nodes[0], dict) else 'N/A'}")
+
                   dep_count = 0
                   for node in nodes:
+                      if not isinstance(node, dict):
+                          continue
                       app_id = node.get("id", node.get("app_id", ""))
                       if not app_id:
                           continue
@@ -1174,7 +1194,7 @@ spec:
                           continue
 
                       # Process upstreams (services this node depends on)
-                      for upstream in node.get("upstreams", []):
+                      for upstream in (node.get("upstreams") or []):
                           up_id = upstream if isinstance(upstream, str) else upstream.get("id", "")
                           up_cluster, up_ns, up_kind, up_name = parse_coroot_id(up_id)
                           if not up_name:
@@ -1195,7 +1215,7 @@ spec:
                               dep_count += 1
 
                       # Process downstreams (services that depend on this node)
-                      for downstream in node.get("downstreams", []):
+                      for downstream in (node.get("downstreams") or []):
                           down_id = downstream if isinstance(downstream, str) else downstream.get("id", "")
                           down_cluster, down_ns, down_kind, down_name = parse_coroot_id(down_id)
                           if not down_name:
