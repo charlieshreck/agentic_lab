@@ -390,7 +390,7 @@ def sync_cloudflare_dns(neo4j: Neo4jClient, mcp: McpClient) -> int:
 
     try:
         zones_response = mcp.call_tool("infrastructure", "cloudflare_list_zones",
-                                        {"response_format": "json"})
+                                        {"params": {"response_format": "json"}})
         zones = extract_list(zones_response, "zones", "result")
     except Exception as e:
         logger.warning(f"  Cloudflare zones unavailable (auth broken?): {e}")
@@ -411,7 +411,7 @@ def sync_cloudflare_dns(neo4j: Neo4jClient, mcp: McpClient) -> int:
 
         try:
             records_response = mcp.call_tool("infrastructure", "cloudflare_list_dns_records",
-                                              {"zone_id": zone_id, "response_format": "json"})
+                                              {"params": {"zone_id": zone_id, "response_format": "json"}})
             records = extract_list(records_response, "records", "result")
         except Exception as e:
             logger.warning(f"  Cloudflare DNS records for {zone_name} failed: {e}")
@@ -451,7 +451,7 @@ def sync_cloudflare_dns(neo4j: Neo4jClient, mcp: McpClient) -> int:
     tunnel_ids: list[str] = []
     try:
         tunnels_response = mcp.call_tool("infrastructure", "cloudflare_list_tunnels",
-                                          {"response_format": "json"})
+                                          {"params": {"response_format": "json"}})
         tunnels = extract_list(tunnels_response, "tunnels", "result")
 
         for tunnel in tunnels:
