@@ -525,14 +525,14 @@ def sync_cloudflare_dns(neo4j: Neo4jClient, mcp: McpClient) -> int:
 
     # Phase 0: DNS -> Ingress -> Service linking
     # Link A/CNAME records to Ingress resources by hostname match
+    # Note: i.hosts is stored as a string (not array) in our schema
     try:
         neo4j.write("""
         MATCH (dns:DNSRecord)
         WHERE dns._sync_status = 'active' AND dns.record_type IN ['A', 'CNAME']
         MATCH (i:Ingress)
         WHERE i._sync_status = 'active'
-          AND (dns.hostname IN i.hosts OR dns.hostname = i.host)
-        WHERE NOT (dns)-[:ROUTES_TO]->(i)
+          AND (dns.hostname = i.hosts OR dns.hostname = i.host)
         MERGE (dns)-[:ROUTES_TO]->(i)
         """)
 
