@@ -255,13 +255,26 @@ def sync_caddy_proxies(neo4j: Neo4jClient, mcp: McpClient) -> int:
         MERGE (dns)-[:ROUTES_THROUGH]->(rp)
         """)
 
-        # Link: ReverseProxy -[:PROXIES_TO]-> Host (upstream IP match)
+        # Link: ReverseProxy -[:PROXIES_TO]-> target (upstream IP match)
+        # Match any node type with matching IP — Host, VM, NAS, ProxmoxNode, Device
+        # Priority: Host > VM > NAS > ProxmoxNode > Device (pick best per proxy)
         neo4j.write("""
         MATCH (rp:ReverseProxy)
-        WHERE rp._sync_status = 'active' AND rp.upstream_ip IS NOT NULL
-        MATCH (h:Host)
-        WHERE h.ip = rp.upstream_ip OR h.internal_ip = rp.upstream_ip
-        MERGE (rp)-[:PROXIES_TO]->(h)
+        WHERE rp._sync_status = 'active' AND rp.upstream_ip <> ''
+        WITH rp
+        MATCH (target)
+        WHERE (target:Host OR target:VM OR target:NAS OR target:ProxmoxNode OR target:Device)
+          AND (target.ip = rp.upstream_ip OR target.internal_ip = rp.upstream_ip)
+        WITH rp, target
+        ORDER BY CASE
+          WHEN target:Host THEN 0
+          WHEN target:VM THEN 1
+          WHEN target:NAS THEN 2
+          WHEN target:ProxmoxNode THEN 3
+          ELSE 4
+        END
+        WITH rp, collect(target)[0] AS best
+        MERGE (rp)-[:PROXIES_TO]->(best)
         """)
 
     mark_active(neo4j, "ReverseProxy", proxy_domains, id_field="domain")
