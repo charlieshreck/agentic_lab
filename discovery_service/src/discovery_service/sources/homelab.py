@@ -276,7 +276,10 @@ def sync_tasmota_devices(neo4j: Neo4jClient, mcp: McpClient) -> int:
 
 
 def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
-    """Sync ArgoCD applications from prod cluster to Neo4j (GitOps chain)."""
+    """Sync ArgoCD applications from prod cluster to Neo4j (GitOps chain).
+
+    Phase 0.2: Improved connectivity with namespace derivation and umbrella detection.
+    """
     logger.info("Syncing ArgoCD applications...")
 
     apps_response = mcp.call_tool("infrastructure", "argocd_get_applications")
@@ -306,12 +309,20 @@ def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
         else:
             app_status = health.lower() if health else "unknown"
 
-        if "agentic" in (path or ""):
+        # Determine target cluster from path or repo
+        if "agentic" in (path or "") or "agentic_lab" in (repo or ""):
             target_cluster = "agentic"
-        elif "monit" in (path or ""):
+        elif "monit" in (path or "") or "monit_homelab" in (repo or ""):
             target_cluster = "monit"
         else:
             target_cluster = "prod"
+
+        # Phase 0.2: Derive destination namespace from path structure
+        # Pattern: kubernetes/applications/<namespace>/<app> or kubernetes/platform/<app>
+        derived_namespace = _derive_namespace_from_path(path, name, project, target_cluster)
+
+        # Phase 0.2: Detect umbrella apps (app-of-apps pattern)
+        is_umbrella = _is_umbrella_app(name, path)
 
         neo4j.write("""
         MERGE (a:ArgoApp {name: $name})
@@ -321,6 +332,8 @@ def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
             a.repo = $repo,
             a.path = $path,
             a.target_cluster = $target_cluster,
+            a.derived_namespace = $derived_namespace,
+            a.is_umbrella = $is_umbrella,
             a.status = $status,
             a.last_seen = datetime(),
             a.source = 'argocd',
@@ -333,51 +346,169 @@ def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
             "repo": repo,
             "path": path,
             "target_cluster": target_cluster,
+            "derived_namespace": derived_namespace,
+            "is_umbrella": is_umbrella,
             "status": app_status,
         })
         count += 1
         app_names.append(name)
 
-        # Strategy 1: Link ArgoApp->Service by name match in target cluster
-        neo4j.write("""
-        MATCH (a:ArgoApp {name: $name})
-        MATCH (s:Service {name: $name, cluster: $target_cluster})
-        MERGE (a)-[:DEPLOYS]->(s)
-        """, {"name": name, "target_cluster": target_cluster})
-
-        # Strategy 2: path-derived name
-        if path:
-            app_from_path = path.rstrip("/").split("/")[-1]
-            if app_from_path and app_from_path != name:
-                neo4j.write("""
-                MATCH (a:ArgoApp {name: $argo_name})
-                WHERE NOT (a)-[:DEPLOYS]->()
-                MATCH (s:Service {name: $svc_name})
-                WITH a, s LIMIT 1
-                MERGE (a)-[:DEPLOYS]->(s)
-                """, {"argo_name": name, "svc_name": app_from_path})
-
-        # Strategy 3: match via Deployment of same name
-        neo4j.write("""
-        MATCH (a:ArgoApp {name: $name})
-        WHERE NOT (a)-[:DEPLOYS]->()
-        MATCH (d:Deployment {name: $name})
-        MATCH (s:Service {name: d.name, namespace: d.namespace, cluster: d.cluster})
-        WITH a, s LIMIT 1
-        MERGE (a)-[:DEPLOYS]->(s)
-        """, {"name": name})
-
-        # Strategy 4: ArgoApp name matches a namespace
-        neo4j.write("""
-        MATCH (a:ArgoApp {name: $name})
-        WHERE NOT (a)-[:DEPLOYS]->()
-        MATCH (s:Service {namespace: $name})
-        WHERE s.name = $name OR s.name STARTS WITH $name
-        WITH a, s LIMIT 1
-        MERGE (a)-[:DEPLOYS]->(s)
-        """, {"name": name})
-
     mark_active(neo4j, "ArgoApp", app_names)
+
+    # Phase 0.2: Run connectivity pass after all apps are synced
+    _link_argocd_to_services(neo4j)
 
     logger.info(f"Synced {count} ArgoCD applications")
     return count
+
+
+def _derive_namespace_from_path(path: str, name: str, project: str, cluster: str) -> str:
+    """Derive the likely target namespace from ArgoCD app path.
+
+    Patterns observed:
+    - kubernetes/applications/media/sonarr -> 'media'
+    - kubernetes/applications/apps/homepage -> 'apps'
+    - kubernetes/platform/traefik -> 'traefik' or cluster default
+    - kubernetes/argocd-apps/* -> 'argocd' (meta apps)
+    """
+    if not path:
+        # Fallback: use project name for monitoring apps
+        if project == "monitoring":
+            return "monitoring"
+        # Fallback: agentic cluster usually uses ai-platform
+        if cluster == "agentic":
+            return "ai-platform"
+        return ""
+
+    parts = path.rstrip("/").split("/")
+
+    # Pattern: kubernetes/applications/<namespace>/<app>
+    if len(parts) >= 4 and parts[1] == "applications":
+        namespace_candidate = parts[2]
+        # Known namespace mappings
+        if namespace_candidate in ["media", "apps", "platform", "public"]:
+            return namespace_candidate
+        # App name as namespace (e.g., kubernetes/applications/keep)
+        if len(parts) == 3:
+            return "ai-platform" if cluster == "agentic" else namespace_candidate
+
+    # Pattern: kubernetes/platform/<app> -> often uses app name as namespace
+    if len(parts) >= 3 and parts[1] == "platform":
+        app_name = parts[-1]
+        # Common platform namespaces
+        if app_name in ["traefik", "cert-manager", "velero", "coroot"]:
+            return app_name
+        return ""
+
+    # Pattern: kubernetes/argocd-apps/* -> argocd namespace
+    if "argocd-apps" in path:
+        return "argocd"
+
+    return ""
+
+
+def _is_umbrella_app(name: str, path: str) -> bool:
+    """Detect umbrella apps (app-of-apps pattern).
+
+    These apps deploy other ArgoCD apps, not direct workloads.
+    """
+    umbrella_indicators = [
+        "-applications",  # e.g., agentic-applications
+        "-apps",          # e.g., cluster-apps
+        "argocd-apps",    # meta app directories
+        "platform",       # often contains multiple apps
+    ]
+
+    name_lower = name.lower()
+    path_lower = (path or "").lower()
+
+    # Check name patterns
+    if any(ind in name_lower for ind in ["-applications", "-apps"]):
+        return True
+
+    # Check path patterns
+    if path_lower.endswith("/argocd-apps") or "/argocd-apps/" in path_lower:
+        return True
+
+    # Specific known umbrella apps
+    known_umbrellas = [
+        "agentic-applications", "monitoring-platform", "domain-mcps",
+        "external-bridges", "agentic-external", "monitoring-external",
+    ]
+    if name_lower in known_umbrellas:
+        return True
+
+    return False
+
+
+def _link_argocd_to_services(neo4j: Neo4jClient):
+    """Multi-strategy ArgoApp -> Service linking with confidence scores.
+
+    Phase 0.2: Runs after all apps are synced for better cross-referencing.
+    """
+    # Strategy 1: Exact name match in target cluster (highest confidence)
+    neo4j.write("""
+    MATCH (a:ArgoApp)
+    WHERE a._sync_status = 'active' AND NOT a.is_umbrella
+    MATCH (s:Service {name: a.name, cluster: a.target_cluster})
+    WHERE s._sync_status = 'active'
+    MERGE (a)-[r:DEPLOYS]->(s)
+    SET r.strategy = 'exact_name', r.confidence = 1.0
+    """)
+
+    # Strategy 2: Derived namespace match (high confidence)
+    neo4j.write("""
+    MATCH (a:ArgoApp)
+    WHERE a._sync_status = 'active' AND NOT a.is_umbrella
+      AND a.derived_namespace <> '' AND NOT (a)-[:DEPLOYS]->()
+    MATCH (s:Service {namespace: a.derived_namespace, cluster: a.target_cluster})
+    WHERE s._sync_status = 'active'
+      AND (s.name = a.name OR s.name STARTS WITH a.name OR a.name STARTS WITH s.name)
+    WITH a, s
+    ORDER BY CASE WHEN s.name = a.name THEN 0 ELSE 1 END
+    WITH a, collect(s)[0] AS best_svc
+    WHERE best_svc IS NOT NULL
+    MERGE (a)-[r:DEPLOYS]->(best_svc)
+    SET r.strategy = 'derived_namespace', r.confidence = 0.9
+    """)
+
+    # Strategy 3: Path-derived service name
+    neo4j.write("""
+    MATCH (a:ArgoApp)
+    WHERE a._sync_status = 'active' AND NOT a.is_umbrella
+      AND a.path IS NOT NULL AND NOT (a)-[:DEPLOYS]->()
+    WITH a, split(a.path, '/')[-1] AS path_name
+    WHERE path_name <> a.name
+    MATCH (s:Service {name: path_name, cluster: a.target_cluster})
+    WHERE s._sync_status = 'active'
+    MERGE (a)-[r:DEPLOYS]->(s)
+    SET r.strategy = 'path_derived', r.confidence = 0.85
+    """)
+
+    # Strategy 4: Deployment label match (medium confidence)
+    neo4j.write("""
+    MATCH (a:ArgoApp)
+    WHERE a._sync_status = 'active' AND NOT a.is_umbrella AND NOT (a)-[:DEPLOYS]->()
+    MATCH (d:Deployment {cluster: a.target_cluster})
+    WHERE d._sync_status = 'active'
+      AND (d.name = a.name OR d.labels CONTAINS a.name)
+    MATCH (s:Service {name: d.name, namespace: d.namespace, cluster: d.cluster})
+    WHERE s._sync_status = 'active'
+    WITH a, s LIMIT 1
+    MERGE (a)-[r:DEPLOYS]->(s)
+    SET r.strategy = 'deployment_match', r.confidence = 0.8
+    """)
+
+    # Strategy 5: Namespace-only match for known namespace patterns
+    neo4j.write("""
+    MATCH (a:ArgoApp)
+    WHERE a._sync_status = 'active' AND NOT a.is_umbrella AND NOT (a)-[:DEPLOYS]->()
+      AND a.derived_namespace IN ['media', 'apps', 'monitoring', 'ai-platform']
+    MATCH (s:Service {namespace: a.derived_namespace, cluster: a.target_cluster})
+    WHERE s._sync_status = 'active'
+    WITH a, collect(s) AS services
+    WHERE size(services) > 0 AND size(services) < 5
+    UNWIND services AS svc
+    MERGE (a)-[r:DEPLOYS]->(svc)
+    SET r.strategy = 'namespace_broad', r.confidence = 0.6
+    """)
