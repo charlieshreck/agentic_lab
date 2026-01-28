@@ -7,7 +7,7 @@ metadata:
     app: neo4j
     component: graph-database
 spec:
-  type: ClusterIP
+  type: NodePort
   ports:
     - port: 7474
       targetPort: 7474
@@ -15,6 +15,7 @@ spec:
       name: http
     - port: 7687
       targetPort: 7687
+      nodePort: 31687
       protocol: TCP
       name: bolt
   selector:
