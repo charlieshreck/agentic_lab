@@ -3,14 +3,8 @@ kind: Ingress
 metadata:
   name: neodash
   namespace: ai-platform
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
   ingressClassName: traefik
-  tls:
-    - hosts:
-        - neodash.kernow.io
-      secretName: kernow-io-tls
   rules:
     - host: neodash.kernow.io
       http:
