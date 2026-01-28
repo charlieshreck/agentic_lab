@@ -1,7 +1,8 @@
-"""Sync Home Assistant areas and ArgoCD applications to Neo4j."""
+"""Sync Home Assistant areas/entities, Tasmota devices, and ArgoCD applications to Neo4j."""
 
 import logging
 
+from discovery_service.config import HA_SYNC_DOMAINS, SENSOR_DEVICE_CLASSES
 from discovery_service.graph.client import Neo4jClient
 from discovery_service.graph.lifecycle import mark_active
 from discovery_service.mcp.client import McpClient, extract_list
@@ -57,6 +58,219 @@ def sync_ha_areas(neo4j: Neo4jClient, mcp: McpClient) -> int:
 
     logger.info(f"HA area sync complete: {synced_count} entities updated")
     return synced_count
+
+
+def sync_ha_entities(neo4j: Neo4jClient, mcp: McpClient) -> int:
+    """Sync Home Assistant entities to Neo4j as HAEntity nodes.
+
+    Filters by HA_SYNC_DOMAINS.  For 'sensor' domain, further filters by
+    SENSOR_DEVICE_CLASSES (Gemini ruling: battery, power, temperature, energy only).
+    Links HAEntity -[:CONTROLLED_BY]-> Service (home-assistant).
+    """
+    logger.info("Syncing Home Assistant entities...")
+
+    try:
+        response = mcp.call_tool("home", "list_entities")
+        if not response:
+            logger.warning("Home-MCP unavailable, skipping HA entity sync")
+            return 0
+    except Exception as e:
+        logger.warning(f"Home-MCP unavailable, skipping HA entity sync: {e}")
+        return 0
+
+    entities = extract_list(response, "entities", "result")
+    if not entities:
+        logger.info("No entities returned from HA")
+        return 0
+
+    rows = []
+    for entity in entities:
+        entity_id = entity.get("entity_id", "")
+        if not entity_id:
+            continue
+
+        domain = entity_id.split(".")[0] if "." in entity_id else ""
+        if domain not in HA_SYNC_DOMAINS:
+            continue
+
+        # Gemini ruling: filter sensors aggressively by device_class
+        attributes = entity.get("attributes", {})
+        if domain == "sensor":
+            device_class = attributes.get("device_class", "")
+            if device_class not in SENSOR_DEVICE_CLASSES:
+                continue
+
+        state = entity.get("state", "unknown")
+        friendly_name = attributes.get("friendly_name", entity_id)
+
+        rows.append({
+            "entity_id": entity_id,
+            "domain": domain,
+            "friendly_name": friendly_name,
+            "state": state,
+            "device_class": attributes.get("device_class", ""),
+            "unit": attributes.get("unit_of_measurement", ""),
+        })
+
+    if not rows:
+        logger.info("No matching HA entities after filtering")
+        return 0
+
+    # Batch create HAEntity nodes
+    neo4j.batch_merge("""
+    MERGE (e:HAEntity {entity_id: row.entity_id})
+    SET e.domain = row.domain,
+        e.friendly_name = row.friendly_name,
+        e.state = row.state,
+        e.device_class = row.device_class,
+        e.unit = row.unit,
+        e.source = 'home_assistant',
+        e.last_seen = datetime(),
+        e._sync_status = 'active'
+    """, rows)
+
+    # Link all HAEntities to the Home Assistant service
+    neo4j.write("""
+    MATCH (e:HAEntity)
+    WHERE e._sync_status = 'active'
+    WITH e
+    MATCH (s:Service)
+    WHERE s.name = 'home-assistant' OR s.name = 'homeassistant'
+    WITH e, s LIMIT 1
+    MERGE (e)-[:CONTROLLED_BY]->(s)
+    """)
+
+    entity_ids = [r["entity_id"] for r in rows]
+    mark_active(neo4j, "HAEntity", entity_ids, id_field="entity_id")
+
+    logger.info(f"Synced {len(rows)} HA entities")
+    return len(rows)
+
+
+def sync_tasmota_devices(neo4j: Neo4jClient, mcp: McpClient) -> int:
+    """Sync Tasmota smart devices to Neo4j as TasmotaDevice nodes.
+
+    Uses tasmota_status_all to get all 26 devices in a single call.
+    Links TasmotaDevice -[:ON_NETWORK]-> Network(prod).
+    Links TasmotaDevice -[:EXPOSES]-> HAEntity (MAC-first, name fallback with confidence:low).
+    """
+    logger.info("Syncing Tasmota devices...")
+
+    try:
+        response = mcp.call_tool("home", "tasmota_status_all")
+        if not response:
+            logger.warning("Home-MCP unavailable, skipping Tasmota sync")
+            return 0
+    except Exception as e:
+        logger.warning(f"Home-MCP unavailable, skipping Tasmota sync: {e}")
+        return 0
+
+    devices = extract_list(response, "devices", "result")
+    if not devices:
+        logger.info("No Tasmota devices returned")
+        return 0
+
+    rows = []
+    for device in devices:
+        ip = device.get("ip", "")
+        if not ip:
+            continue
+
+        # Navigate nested Tasmota status structure
+        status = device.get("Status", device.get("status", {}))
+        status_prm = device.get("StatusPRM", device.get("status_prm", {}))
+        status_fwr = device.get("StatusFWR", device.get("status_fwr", {}))
+        status_net = device.get("StatusNET", device.get("status_net", {}))
+
+        # Some responses flatten the structure
+        name = (
+            device.get("name", "")
+            or device.get("DeviceName", "")
+            or status.get("DeviceName", "")
+            or status.get("FriendlyName", [""])[0]
+            if isinstance(status.get("FriendlyName"), list)
+            else status.get("FriendlyName", "")
+        )
+        if not name:
+            name = f"tasmota-{ip}"
+
+        mac = (
+            status_net.get("Mac", "")
+            or device.get("mac", "")
+            or ""
+        ).lower()
+
+        firmware = status_fwr.get("Version", device.get("firmware", ""))
+        hardware = status_fwr.get("Hardware", device.get("hardware", ""))
+        uptime = status_prm.get("Uptime", device.get("uptime", ""))
+        power = device.get("power", status.get("Power", ""))
+
+        rows.append({
+            "ip": ip,
+            "name": name,
+            "mac": mac,
+            "firmware": firmware,
+            "hardware": hardware,
+            "uptime": uptime,
+            "power": str(power),
+        })
+
+    if not rows:
+        logger.info("No valid Tasmota devices after parsing")
+        return 0
+
+    # Batch create TasmotaDevice nodes
+    neo4j.batch_merge("""
+    MERGE (t:TasmotaDevice {ip: row.ip})
+    SET t.name = row.name,
+        t.mac = row.mac,
+        t.firmware = row.firmware,
+        t.hardware = row.hardware,
+        t.uptime = row.uptime,
+        t.power = row.power,
+        t.source = 'tasmota',
+        t.last_seen = datetime(),
+        t._sync_status = 'active'
+    """, rows)
+
+    # Link all TasmotaDevices to the prod network (all on 10.10.0.x)
+    neo4j.write("""
+    MATCH (t:TasmotaDevice)
+    WHERE t._sync_status = 'active'
+    MATCH (n:Network {name: 'prod'})
+    MERGE (t)-[:ON_NETWORK]->(n)
+    """)
+
+    # Gemini ruling: MAC-first matching for EXPOSES relationship
+    neo4j.write("""
+    MATCH (t:TasmotaDevice)
+    WHERE t._sync_status = 'active' AND t.mac <> ''
+    MATCH (e:HAEntity)
+    WHERE e.entity_id CONTAINS replace(t.mac, ':', '')
+       OR e.entity_id CONTAINS replace(t.mac, ':', '_')
+    MERGE (t)-[:EXPOSES]->(e)
+    """)
+
+    # Gemini ruling: fuzzy name fallback with confidence:"low"
+    neo4j.write("""
+    MATCH (t:TasmotaDevice)
+    WHERE t._sync_status = 'active'
+      AND NOT (t)-[:EXPOSES]->()
+      AND t.name <> ''
+    WITH t, toLower(replace(replace(t.name, ' ', '_'), '-', '_')) AS norm_name
+    MATCH (e:HAEntity)
+    WHERE toLower(e.entity_id) CONTAINS norm_name
+       OR toLower(e.friendly_name) CONTAINS toLower(t.name)
+    WITH t, e LIMIT 3
+    MERGE (t)-[r:EXPOSES]->(e)
+    SET r.confidence = 'low', r.match_type = 'name_fuzzy'
+    """)
+
+    device_ips = [r["ip"] for r in rows]
+    mark_active(neo4j, "TasmotaDevice", device_ips, id_field="ip")
+
+    logger.info(f"Synced {len(rows)} Tasmota devices")
+    return len(rows)
 
 
 def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:

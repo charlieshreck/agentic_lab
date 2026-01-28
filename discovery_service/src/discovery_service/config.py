@@ -59,4 +59,41 @@ SYNCABLE_LABELS = [
     "ArgoApp", "VM", "Host", "UptimeMonitor", "Alert",
     "StoragePool", "Dataset", "Share", "StorageAlert", "App", "DNSRecord",
     "AccessPoint", "Switch", "NetworkDevice", "Dashboard",
+    # Phase 3
+    "ReverseProxy", "Device", "HAEntity", "TasmotaDevice", "CloudflareTunnel",
 ]
+
+# DHCP network name mapping (OPNsense interface descriptions -> graph network names)
+DHCP_NETWORK_MAP: dict[str, str] = {
+    "Production": "prod",
+    "ArtificialIntelligence": "agentic",
+    "Monit": "monit",
+}
+
+# DHCP manufacturer -> device type classification
+MANUFACTURER_DEVICE_TYPE: dict[str, str] = {
+    "espressif": "iot",
+    "google": "smart_home",
+    "nest": "smart_home",
+    "apple": "personal",
+    "ubiquiti": "network",
+    "sonos": "media",
+    "samsung": "smart_home",
+    "amazon": "smart_home",
+    "hp": "printer",
+    "brother": "printer",
+    "intel": "compute",
+    "dell": "compute",
+    "lenovo": "compute",
+    "proxmox": "hypervisor",
+}
+
+# HA entity domains to sync (Gemini ruling: filter sensors aggressively)
+HA_SYNC_DOMAINS = [
+    "light", "switch", "automation", "binary_sensor",
+    "climate", "cover", "fan", "lock", "media_player",
+    "sensor",  # filtered further by SENSOR_DEVICE_CLASSES
+]
+
+# Sensor device_classes to sync (Gemini ruling: battery, power, temperature only)
+SENSOR_DEVICE_CLASSES = ["battery", "power", "temperature", "energy"]

@@ -25,7 +25,12 @@ from discovery_service.graph.lifecycle import (
 )
 from discovery_service.kube.client import KubeClient
 from discovery_service.mcp.client import McpClient
-from discovery_service.sources.homelab import sync_argocd_apps, sync_ha_areas
+from discovery_service.sources.homelab import (
+    sync_argocd_apps,
+    sync_ha_areas,
+    sync_ha_entities,
+    sync_tasmota_devices,
+)
 from discovery_service.sources.knowledge import sync_runbooks
 from discovery_service.sources.kubernetes import (
     link_services_to_pods,
@@ -38,7 +43,14 @@ from discovery_service.sources.kubernetes import (
     sync_kubernetes_services,
     sync_kubernetes_statefulsets,
 )
-from discovery_service.sources.network import sync_dns_topology, sync_unifi_devices
+from discovery_service.sources.media import sync_media_state
+from discovery_service.sources.network import (
+    sync_caddy_proxies,
+    sync_cloudflare_dns,
+    sync_dhcp_devices,
+    sync_dns_topology,
+    sync_unifi_devices,
+)
 from discovery_service.sources.observability import (
     sync_coroot_service_map,
     sync_coroot_services,
@@ -166,6 +178,20 @@ def main() -> int:
         logger.error(f"Kubernetes ingresses sync failed: {e}")
         results["ingresses"] = 0
 
+    # DHCP devices — after K8s, enriches Host nodes with MAC/manufacturer
+    try:
+        results["dhcp_devices"] = sync_dhcp_devices(neo4j, mcp)
+    except Exception as e:
+        logger.error(f"DHCP devices sync failed: {e}")
+        results["dhcp_devices"] = 0
+
+    # Media state — after K8s services, enriches Service nodes
+    try:
+        results["media_state"] = sync_media_state(neo4j, mcp)
+    except Exception as e:
+        logger.error(f"Media state sync failed: {e}")
+        results["media_state"] = 0
+
     try:
         results["runbooks"] = sync_runbooks(neo4j, mcp)
     except Exception as e:
@@ -197,6 +223,20 @@ def main() -> int:
         logger.error(f"HA area sync failed: {e}")
         results["ha_areas"] = 0
 
+    # HA entities — after ha_areas
+    try:
+        results["ha_entities"] = sync_ha_entities(neo4j, mcp)
+    except Exception as e:
+        logger.error(f"HA entity sync failed: {e}")
+        results["ha_entities"] = 0
+
+    # Tasmota devices — after ha_entities, links to HAEntity
+    try:
+        results["tasmota_devices"] = sync_tasmota_devices(neo4j, mcp)
+    except Exception as e:
+        logger.error(f"Tasmota sync failed: {e}")
+        results["tasmota_devices"] = 0
+
     try:
         results["argocd_apps"] = sync_argocd_apps(neo4j, mcp)
     except Exception as e:
@@ -214,6 +254,20 @@ def main() -> int:
     except Exception as e:
         logger.error(f"DNS topology sync failed: {e}")
         results["dns_topology"] = 0
+
+    # Caddy proxies — after dns_topology, links to DNSRecord
+    try:
+        results["caddy_proxies"] = sync_caddy_proxies(neo4j, mcp)
+    except Exception as e:
+        logger.error(f"Caddy proxies sync failed: {e}")
+        results["caddy_proxies"] = 0
+
+    # Cloudflare DNS — after caddy, creates DNSRecord + CloudflareTunnel
+    try:
+        results["cloudflare_dns"] = sync_cloudflare_dns(neo4j, mcp)
+    except Exception as e:
+        logger.error(f"Cloudflare DNS sync failed: {e}")
+        results["cloudflare_dns"] = 0
 
     try:
         results["keep_alerts"] = sync_keep_alerts(neo4j, mcp)
