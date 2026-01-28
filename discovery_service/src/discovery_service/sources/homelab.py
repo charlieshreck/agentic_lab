@@ -131,12 +131,11 @@ def sync_ha_entities(neo4j: Neo4jClient, mcp: McpClient) -> int:
 
     # Link all HAEntities to the Home Assistant service
     neo4j.write("""
-    MATCH (e:HAEntity)
-    WHERE e._sync_status = 'active'
-    WITH e
     MATCH (s:Service)
     WHERE s.name = 'home-assistant' OR s.name = 'homeassistant'
-    WITH e, s LIMIT 1
+    WITH s LIMIT 1
+    MATCH (e:HAEntity)
+    WHERE e._sync_status = 'active'
     MERGE (e)-[:CONTROLLED_BY]->(s)
     """)
 
@@ -177,20 +176,23 @@ def sync_tasmota_devices(neo4j: Neo4jClient, mcp: McpClient) -> int:
             continue
 
         # Navigate nested Tasmota status structure
-        status = device.get("Status", device.get("status", {}))
-        status_prm = device.get("StatusPRM", device.get("status_prm", {}))
-        status_fwr = device.get("StatusFWR", device.get("status_fwr", {}))
-        status_net = device.get("StatusNET", device.get("status_net", {}))
+        # Response format: {ip, name, status: {Status: {...}, StatusPRM: {...}, ...}}
+        raw_status = device.get("status", {})
+        status = raw_status.get("Status", device.get("Status", {}))
+        status_prm = raw_status.get("StatusPRM", device.get("StatusPRM", {}))
+        status_fwr = raw_status.get("StatusFWR", device.get("StatusFWR", {}))
+        status_net = raw_status.get("StatusNET", device.get("StatusNET", {}))
 
-        # Some responses flatten the structure
-        name = (
-            device.get("name", "")
-            or device.get("DeviceName", "")
-            or status.get("DeviceName", "")
-            or status.get("FriendlyName", [""])[0]
-            if isinstance(status.get("FriendlyName"), list)
-            else status.get("FriendlyName", "")
-        )
+        # Extract device name from nested structure
+        name = device.get("name") or ""
+        if not name:
+            name = status.get("DeviceName", "")
+        if not name:
+            friendly = status.get("FriendlyName", [])
+            if isinstance(friendly, list) and friendly:
+                name = friendly[0]
+            elif isinstance(friendly, str):
+                name = friendly
         if not name:
             name = f"tasmota-{ip}"
 
