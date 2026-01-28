@@ -1,6 +1,45 @@
 import Link from 'next/link';
+import { queryGraph } from '@/lib/neo4j';
 
-export default function HomePage() {
+export const dynamic = 'force-dynamic';
+
+async function getStats(): Promise<Record<string, number>> {
+  try {
+    const result = await queryGraph(`
+      MATCH (n)
+      WHERE NOT any(l IN labels(n) WHERE l STARTS WITH '_')
+      WITH labels(n)[0] AS type, count(n) AS count
+      WHERE type IS NOT NULL
+      RETURN type, count
+      ORDER BY count DESC
+    `);
+
+    const stats: Record<string, number> = {};
+    if (result.data) {
+      for (const row of result.data) {
+        stats[row[0]] = row[1];
+      }
+    }
+    return stats;
+  } catch {
+    return {};
+  }
+}
+
+const STAT_CARDS = [
+  { key: 'Host', label: 'Hosts' },
+  { key: 'Service', label: 'Services' },
+  { key: 'Network', label: 'Networks' },
+  { key: 'Pod', label: 'Pods' },
+  { key: 'HAEntity', label: 'HA Entities' },
+  { key: 'TasmotaDevice', label: 'Tasmota' },
+  { key: 'DNSRecord', label: 'DNS Records' },
+  { key: 'ArgoApp', label: 'ArgoCD Apps' },
+];
+
+export default async function HomePage() {
+  const stats = await getStats();
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 text-white">
       <div className="container mx-auto px-4 py-16">
@@ -59,19 +98,18 @@ export default function HomePage() {
 
         <div className="mt-16 text-center">
           <h3 className="text-2xl font-semibold mb-6">Quick Stats</h3>
-          <div className="flex justify-center gap-8">
-            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700">
-              <div className="text-3xl font-bold text-blue-400">84</div>
-              <div className="text-gray-400">Hosts</div>
-            </div>
-            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700">
-              <div className="text-3xl font-bold text-blue-400">3</div>
-              <div className="text-gray-400">Networks</div>
-            </div>
-            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700">
-              <div className="text-3xl font-bold text-blue-400">-</div>
-              <div className="text-gray-400">Services</div>
-            </div>
+          <div className="flex flex-wrap justify-center gap-4">
+            {STAT_CARDS.map(({ key, label }) => (
+              <div
+                key={key}
+                className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700 min-w-[120px]"
+              >
+                <div className="text-3xl font-bold text-blue-400">
+                  {stats[key] ?? '-'}
+                </div>
+                <div className="text-gray-400 text-sm">{label}</div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
