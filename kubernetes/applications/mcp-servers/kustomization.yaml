@@ -27,8 +27,7 @@ resources:
   - vikunja-mcp.yaml
   # Media management
   - plex-mcp.yaml
-  # Knowledge graph
-  - neo4j-mcp.yaml
+  # Knowledge graph - consolidated into knowledge-mcp
   # IoT / Smart home
   - tasmota-mcp.yaml
   # Documentation

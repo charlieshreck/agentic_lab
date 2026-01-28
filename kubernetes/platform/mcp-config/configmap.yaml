@@ -26,7 +26,6 @@ data:
   CLOUDFLARE_MCP_URL: "http://cloudflare-mcp:8000"
   TRUENAS_MCP_URL: "http://truenas-mcp:8000"
   VIKUNJA_MCP_URL: "http://vikunja-mcp:8000"
-  NEO4J_MCP_URL: "http://neo4j-mcp:8000"
   OUTLINE_MCP_URL: "http://outline-mcp:8000"
   OBSERVABILITY_MCP_URL: "http://observability-mcp.agentic.kernow.io"
   EXTERNAL_MCP_URL: "http://external-mcp.agentic.kernow.io"
@@ -34,4 +33,4 @@ data:
   HOME_MCP_URL: "http://home-mcp.agentic.kernow.io"
   # Full MCP config as JSON (for dynamic parsing)
   MCP_SERVERS_JSON: |
-    {"servers":[{"name":"infisical","url":"http://null-mcp:8000"},{"name":"proxmox","url":"http://null-mcp:8000"},{"name":"infrastructure","url":"http://null-mcp:8000"},{"name":"knowledge","url":"http://null-mcp:8000"},{"name":"opnsense","url":"http://null-mcp:8000"},{"name":"cloudflare","url":"http://null-mcp:8000"},{"name":"truenas","url":"http://null-mcp:8000"},{"name":"vikunja","url":"http://null-mcp:8000"},{"name":"neo4j","url":"http://null-mcp:8000"},{"name":"outline","url":"http://null-mcp:8000"},{"name":"observability","url":"http://observability-mcp.agentic.kernow.io"},{"name":"external","url":"http://external-mcp.agentic.kernow.io"},{"name":"media","url":"http://media-mcp.agentic.kernow.io"},{"name":"home","url":"http://home-mcp.agentic.kernow.io"}]}
+    {"servers":[{"name":"infisical","url":"http://null-mcp:8000"},{"name":"proxmox","url":"http://null-mcp:8000"},{"name":"infrastructure","url":"http://null-mcp:8000"},{"name":"knowledge","url":"http://null-mcp:8000"},{"name":"opnsense","url":"http://null-mcp:8000"},{"name":"cloudflare","url":"http://null-mcp:8000"},{"name":"truenas","url":"http://null-mcp:8000"},{"name":"vikunja","url":"http://null-mcp:8000"},{"name":"outline","url":"http://null-mcp:8000"},{"name":"observability","url":"http://observability-mcp.agentic.kernow.io"},{"name":"external","url":"http://external-mcp.agentic.kernow.io"},{"name":"media","url":"http://media-mcp.agentic.kernow.io"},{"name":"home","url":"http://home-mcp.agentic.kernow.io"}]}

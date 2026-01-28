@@ -25,7 +25,6 @@ data:
   BROWSER_AUTOMATION_MCP_URL: "http://browser-automation-mcp:8000"
   PLEX_MCP_URL: "http://plex-mcp:8000"
   VIKUNJA_MCP_URL: "http://vikunja-mcp:8000"
-  NEO4J_MCP_URL: "http://neo4j-mcp:8000"
   TASMOTA_MCP_URL: "http://tasmota-mcp:8000"
   MONITORING_MCP_URL: "http://monitoring-mcp:8000"
   KEEP_MCP_URL: "http://keep-mcp:8000"
