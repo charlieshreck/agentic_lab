@@ -297,6 +297,9 @@ def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
         health = app.get("health", "unknown")
         repo = app.get("repo", "")
         path = app.get("path", "")
+        # Phase 0.2 fix: Use actual destination namespace from ArgoCD spec
+        destination_namespace = app.get("destination_namespace", "")
+        destination_server = app.get("destination_server", "")
 
         if health == "Healthy" and sync_status == "Synced":
             app_status = "healthy"
@@ -309,17 +312,27 @@ def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
         else:
             app_status = health.lower() if health else "unknown"
 
-        # Determine target cluster from path or repo
-        if "agentic" in (path or "") or "agentic_lab" in (repo or ""):
+        # Determine target cluster from destination_server or path/repo fallback
+        if destination_server:
+            if "10.20.0" in destination_server or "agentic" in destination_server:
+                target_cluster = "agentic"
+            elif "10.30.0" in destination_server or "monit" in destination_server:
+                target_cluster = "monit"
+            else:
+                target_cluster = "prod"
+        elif "agentic" in (path or "") or "agentic_lab" in (repo or ""):
             target_cluster = "agentic"
         elif "monit" in (path or "") or "monit_homelab" in (repo or ""):
             target_cluster = "monit"
         else:
             target_cluster = "prod"
 
-        # Phase 0.2: Derive destination namespace from path structure
-        # Pattern: kubernetes/applications/<namespace>/<app> or kubernetes/platform/<app>
-        derived_namespace = _derive_namespace_from_path(path, name, project, target_cluster)
+        # Phase 0.2 fix: Use actual destination namespace, fall back to path derivation
+        if destination_namespace:
+            derived_namespace = destination_namespace
+        else:
+            # Fallback: derive from path structure
+            derived_namespace = _derive_namespace_from_path(path, name, project, target_cluster)
 
         # Phase 0.2: Detect umbrella apps (app-of-apps pattern)
         is_umbrella = _is_umbrella_app(name, path)
@@ -332,6 +345,8 @@ def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
             a.repo = $repo,
             a.path = $path,
             a.target_cluster = $target_cluster,
+            a.destination_namespace = $destination_namespace,
+            a.destination_server = $destination_server,
             a.derived_namespace = $derived_namespace,
             a.is_umbrella = $is_umbrella,
             a.status = $status,
@@ -346,6 +361,8 @@ def sync_argocd_apps(neo4j: Neo4jClient, mcp: McpClient) -> int:
             "repo": repo,
             "path": path,
             "target_cluster": target_cluster,
+            "destination_namespace": destination_namespace,
+            "destination_server": destination_server,
             "derived_namespace": derived_namespace,
             "is_umbrella": is_umbrella,
             "status": app_status,
