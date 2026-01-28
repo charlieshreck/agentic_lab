@@ -97,3 +97,22 @@ HA_SYNC_DOMAINS = [
 
 # Sensor device_classes to sync (Gemini ruling: battery, power, temperature only)
 SENSOR_DEVICE_CLASSES = ["battery", "power", "temperature", "energy"]
+
+# DNS noise patterns to filter during sync (Phase 0: Graph Connectivity)
+# These patterns bloat the graph without providing operational value
+DNS_NOISE_PATTERNS = [
+    "wpad",                    # Web Proxy Auto-Discovery
+    "isatap",                  # Intra-Site Automatic Tunnel
+    "teredo",                  # IPv6 tunneling
+    "_acme-challenge",         # Let's Encrypt validation
+    "_dmarc",                  # Email authentication
+    "_spf",                    # Email authentication
+    "_mta-sts",                # Email security
+    "autoconfig",              # Mail client auto-config
+    "autodiscover",            # Exchange auto-discovery
+    "_domainkey",              # DKIM records
+    "_kerberos",               # Kerberos service records
+    "gc._msdcs",               # Active Directory
+    "domaindnszones",          # Active Directory
+    "forestdnszones",          # Active Directory
+]

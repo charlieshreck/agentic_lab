@@ -2,7 +2,7 @@
 
 import logging
 
-from discovery_service.config import DHCP_NETWORK_MAP, MANUFACTURER_DEVICE_TYPE
+from discovery_service.config import DHCP_NETWORK_MAP, DNS_NOISE_PATTERNS, MANUFACTURER_DEVICE_TYPE
 from discovery_service.graph.client import Neo4jClient
 from discovery_service.graph.lifecycle import mark_active
 from discovery_service.mcp.client import McpClient, extract_list
@@ -435,6 +435,12 @@ def sync_cloudflare_dns(neo4j: Neo4jClient, mcp: McpClient) -> int:
             if not name:
                 continue
 
+            # Phase 0: Filter DNS noise patterns
+            name_lower = name.lower()
+            if any(pattern in name_lower for pattern in DNS_NOISE_PATTERNS):
+                logger.debug(f"  Filtering DNS noise: {name}")
+                continue
+
             record_type = record.get("type", "")
             content = record.get("content", "")
             proxied = record.get("proxied", False)
@@ -502,6 +508,45 @@ def sync_cloudflare_dns(neo4j: Neo4jClient, mcp: McpClient) -> int:
         mark_active(neo4j, "DNSRecord", dns_domains, id_field="domain")
     if tunnel_ids:
         mark_active(neo4j, "CloudflareTunnel", tunnel_ids, id_field="tunnel_id")
+
+    # Phase 0: CNAME chain resolution
+    # Link CNAMEs to their target DNS records (enables tracing resolution chains)
+    try:
+        neo4j.write("""
+        MATCH (dns:DNSRecord {source: 'cloudflare'})
+        WHERE dns.record_type = 'CNAME' AND dns._sync_status = 'active'
+        MATCH (target:DNSRecord {domain: dns.answer})
+        WHERE NOT (dns)-[:RESOLVES_TO]->(target)
+        MERGE (dns)-[:RESOLVES_TO]->(target)
+        """)
+        logger.debug("  CNAME chain resolution complete")
+    except Exception as e:
+        logger.warning(f"  CNAME chain resolution failed: {e}")
+
+    # Phase 0: DNS -> Ingress -> Service linking
+    # Link A/CNAME records to Ingress resources by hostname match
+    try:
+        neo4j.write("""
+        MATCH (dns:DNSRecord)
+        WHERE dns._sync_status = 'active' AND dns.record_type IN ['A', 'CNAME']
+        MATCH (i:Ingress)
+        WHERE i._sync_status = 'active'
+          AND (dns.hostname IN i.hosts OR dns.hostname = i.host)
+        WHERE NOT (dns)-[:ROUTES_TO]->(i)
+        MERGE (dns)-[:ROUTES_TO]->(i)
+        """)
+
+        # Ensure Ingress -> Service links exist (belt and suspenders)
+        neo4j.write("""
+        MATCH (i:Ingress)
+        WHERE i._sync_status = 'active' AND NOT (i)-[:BACKENDS_TO]->()
+        MATCH (s:Service {name: i.service_name, namespace: i.namespace, cluster: i.cluster})
+        WHERE s._sync_status = 'active'
+        MERGE (i)-[:BACKENDS_TO]->(s)
+        """)
+        logger.debug("  DNS -> Ingress -> Service linking complete")
+    except Exception as e:
+        logger.warning(f"  DNS -> Ingress linking failed: {e}")
 
     logger.info(f"Synced {count} Cloudflare DNS records, {tunnel_count} tunnels")
     return count + tunnel_count
