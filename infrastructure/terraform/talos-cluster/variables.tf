@@ -30,7 +30,7 @@ variable "network_interface" {
 variable "dns_servers" {
   description = "DNS servers (local DNS stack for internal resolution, public fallback)"
   type        = list(string)
-  default     = ["10.10.0.1", "1.1.1.1"]
+  default     = ["10.10.0.1", "9.9.9.9"]
 }
 
 # Cluster Configuration
