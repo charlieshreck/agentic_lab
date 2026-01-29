@@ -645,12 +645,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mcp-opnsense
-                  key: key
+                  key: API_KEY
             - name: OPNSENSE_SECRET
               valueFrom:
                 secretKeyRef:
                   name: mcp-opnsense
-                  key: secret
+                  key: API_SECRET
             # AdGuard Home credentials
             - name: ADGUARD_HOST
               value: "http://10.10.0.1:3000"
@@ -658,12 +658,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mcp-adguard
-                  key: username
+                  key: USERNAME
             - name: ADGUARD_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: mcp-adguard
-                  key: password
+                  key: PASSWORD
           volumeMounts:
             - name: code
               mountPath: /app

@@ -646,7 +646,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mcp-proxmox
-                  key: API_TOKEN
+                  key: TOKEN_SECRET
           volumeMounts:
             - name: code
               mountPath: /app

@@ -850,23 +850,16 @@ spec:
           env:
             - name: UNIFI_HOST
               value: "https://10.10.0.51:11443"
-            - name: UNIFI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mcp-unifi
-                  key: UNIFI_API_KEY
             - name: UNIFI_USER
               valueFrom:
                 secretKeyRef:
                   name: mcp-unifi
-                  key: UNIFI_USER
-                  optional: true
+                  key: USERNAME
             - name: UNIFI_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: mcp-unifi
-                  key: UNIFI_PASSWORD
-                  optional: true
+                  key: PASSWORD
           volumeMounts:
             - name: code
               mountPath: /app

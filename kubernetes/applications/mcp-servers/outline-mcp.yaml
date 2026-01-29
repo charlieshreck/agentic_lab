@@ -26,7 +26,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mcp-outline
-                  key: OUTLINE_API_KEY
+                  key: API_KEY
             - name: OUTLINE_API_URL
               value: "http://outline/api"
             - name: MCP_TRANSPORT

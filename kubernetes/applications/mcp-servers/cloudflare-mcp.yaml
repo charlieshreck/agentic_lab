@@ -478,12 +478,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mcp-cloudflare
-                  key: CLOUDFLARE_API_TOKEN
+                  key: API_TOKEN
             - name: CLOUDFLARE_ACCOUNT_ID
               valueFrom:
                 secretKeyRef:
                   name: mcp-cloudflare
-                  key: CLOUDFLARE_ACCOUNT_ID
+                  key: ACCOUNT_ID
           volumeMounts:
             - name: code
               mountPath: /app
