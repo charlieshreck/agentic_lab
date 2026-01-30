@@ -1,0 +1,169 @@
+# Infrastructure Skill Manifest
+# Version: 1.1.0
+# Purpose: Handles Kubernetes, Proxmox, TrueNAS, networking, and infrastructure remediation
+# Project: 05 - Skills & Orchestration
+
+id: infrastructure-skill
+name: Infrastructure & Remediation
+domain: infrastructure
+version: "1.1.0"
+
+description: |
+  Handles all infrastructure operations including Kubernetes cluster management,
+  VM/container lifecycle, storage operations, networking, and automated remediation.
+  Primary skill for /troubleshoot, /deploy, and /remediate commands.
+
+# Skill Discovery Configuration
+discovery:
+  keywords:
+    - kubernetes
+    - k8s
+    - pod
+    - node
+    - deployment
+    - service
+    - cluster
+    - crash
+    - restart
+    - scale
+    - firewall
+    - network
+    - storage
+    - proxmox
+    - vm
+    - container
+    - truenas
+    - zfs
+  commands:
+    - /troubleshoot
+    - /deploy
+    - /remediate
+    - /cluster
+
+# MCP Configuration (respects 8-MCP limit)
+mcps:
+  primary:
+    - infrastructure-mcp  # Always loaded - K8s, Proxmox, TrueNAS, Cloudflare
+    - knowledge-mcp       # Always loaded - Runbook search, entity lookup
+  secondary:
+    - observability-mcp   # Loaded if performance analysis needed
+    - home-mcp            # Loaded if network/DNS issue on home network
+
+# System Prompt Configuration
+prompts:
+  base_ref: prompts/skills/infrastructure.md
+  dynamic_injections:
+    - cluster_status      # Current cluster health summary
+    - recent_alerts       # Recent infrastructure alerts
+
+# Runbook Filtering Configuration
+runbook_patterns:
+  - "runbooks/infrastructure/*.md"
+  - "runbooks/alerts/pod-*.md"
+  - "runbooks/alerts/node-*.md"
+  - "runbooks/alerts/storage-*.md"
+  - "runbooks/troubleshooting/k8s-*.md"
+  - "runbooks/troubleshooting/network-*.md"
+priority_keywords:
+  - crash
+  - restart
+  - scale
+  - deploy
+  - oom
+  - evicted
+  - crashloopbackoff
+  - imagepullbackoff
+  - pending
+  - failed
+
+# Recovery Context (backup verification before destructive ops)
+recovery_context:
+  backup_locations:
+    - type: velero
+      namespace: velero
+      schedule: daily-backup
+      max_age_hours: 24
+    - type: garage_s3
+      bucket: homelab-backups
+      prefix: k8s/
+      max_age_hours: 48
+  recovery_runbooks:
+    - runbooks/infrastructure/velero-restore.md
+    - runbooks/infrastructure/garage-recovery.md
+    - runbooks/infrastructure/etcd-backup-restore.md
+  pre_action_checks:
+    - verify_recent_backup      # Ensure backup < 24h before destructive ops
+    - verify_cluster_healthy    # No critical alerts before changes
+
+# Execution Policy
+execution_policy:
+  approval_required: true
+  auto_approve_threshold: 0.95
+  max_runtime_seconds: 300
+  retry_on_failure: true
+  max_retries: 2
+
+# Fix Commands with Rollback Support
+fix_commands:
+  scale_deployment:
+    description: "Scale a Kubernetes deployment"
+    execute: "kubectl scale deployment {name} -n {namespace} --replicas={replicas}"
+    rollback: "kubectl scale deployment {name} -n {namespace} --replicas={original_replicas}"
+    capture_before: "kubectl get deployment {name} -n {namespace} -o jsonpath='{.spec.replicas}'"
+    idempotent: false
+    destructive: false
+
+  restart_deployment:
+    description: "Restart a deployment by rolling update"
+    execute: "kubectl rollout restart deployment/{name} -n {namespace}"
+    rollback: null  # Rollout has built-in undo
+    capture_before: null
+    idempotent: true
+    destructive: false
+
+  delete_pod:
+    description: "Delete a pod (will be recreated by deployment)"
+    execute: "kubectl delete pod {pod_name} -n {namespace}"
+    rollback: null  # Pod will be recreated
+    capture_before: null
+    idempotent: true
+    destructive: false
+
+  cordon_node:
+    description: "Mark node as unschedulable"
+    execute: "kubectl cordon {node_name}"
+    rollback: "kubectl uncordon {node_name}"
+    capture_before: "kubectl get node {node_name} -o jsonpath='{.spec.unschedulable}'"
+    idempotent: true
+    destructive: false
+
+  drain_node:
+    description: "Safely evict all pods from node"
+    execute: "kubectl drain {node_name} --ignore-daemonsets --delete-emptydir-data"
+    rollback: "kubectl uncordon {node_name}"
+    capture_before: null
+    idempotent: true
+    destructive: true
+    requires_backup_check: true
+
+  apply_manifest:
+    description: "Apply a Kubernetes manifest"
+    execute: "kubectl apply -f {manifest_path}"
+    rollback: "kubectl delete -f {manifest_path}"
+    capture_before: null
+    idempotent: true
+    destructive: false
+
+# Metrics for Learning
+metrics:
+  success_count: 0
+  failure_count: 0
+  total_executions: 0
+  avg_resolution_time_seconds: 0
+  last_execution: null
+
+metadata:
+  created_at: "2026-01-30T00:00:00Z"
+  updated_at: "2026-01-30T00:00:00Z"
+  created_by: claude-gemini-collaboration
+  approved_by: gemini

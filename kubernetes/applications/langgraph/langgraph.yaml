@@ -115,6 +115,12 @@ data:
     BRAIN_TRUST_COLLECTION_ID = os.environ.get("BRAIN_TRUST_COLLECTION_ID", "9bd8c738-4505-494a-a867-74349a887dc6")
     OUTLINE_MCP_URL = os.environ.get("OUTLINE_MCP_URL", "http://outline-mcp:8000")
 
+    # Skill Router Configuration (Project 05)
+    # When enabled, routes requests through skill_router before assess_alert
+    SKILL_ROUTER_ENABLED = os.environ.get("SKILL_ROUTER_ENABLED", "false").lower() == "true"
+    SKILL_COLLISION_THRESHOLD = float(os.environ.get("SKILL_COLLISION_THRESHOLD", "0.2"))  # Relative threshold
+    MAX_MCPS_PER_REQUEST = int(os.environ.get("MAX_MCPS_PER_REQUEST", "8"))
+
     # Static context cache (refreshed hourly for cost savings)
     _static_context_cache = {}
     _static_context_timestamp = None
@@ -789,6 +795,11 @@ data:
         thread_id: str
         runbook_match: dict  # Matched runbook from Qdrant if found
         handled_locally: bool  # Whether issue was handled with existing runbook
+        # Project 05: Skill Router fields
+        skill_id: str  # ID of loaded skill (e.g., "infrastructure-skill")
+        skill_context: dict  # Skill metadata (system_prompt, runbook_patterns, etc.)
+        loaded_mcps: list  # List of loaded MCP server names
+        execution_checkpoint: dict  # Checkpoint for rollback support (persisted)
 
     pending_approvals = {}
     app = FastAPI(title="LangGraph Orchestrator")
@@ -2852,14 +2863,131 @@ data:
         except Exception as e:
             logger.error(f"[VALIDATE] Delayed validation failed: {e}")
 
+    # =========================================================================
+    # Project 05: Skill Router Node
+    # Routes requests to appropriate skills before assessment
+    # =========================================================================
+
+    async def skill_router(state: AgentState) -> dict:
+        """
+        Route request to appropriate skill based on intent.
+
+        Skill routing flow:
+        1. Check for explicit slash command (e.g., /troubleshoot)
+        2. If no command, use semantic search against skills collection
+        3. Handle collisions using relative threshold + command priority
+        4. Load skill context (MCPs, system_prompt, runbook_patterns)
+
+        Returns updated state with skill_id, skill_context, and loaded_mcps.
+        """
+        if not SKILL_ROUTER_ENABLED:
+            logger.debug("[SKILL_ROUTER] Disabled, passing through")
+            return {"skill_id": "", "skill_context": {}, "loaded_mcps": []}
+
+        alert = state.get("alert", {})
+        description = alert.get("description", "")
+        alertname = alert.get("alertname", "")
+        query = f"{alertname}: {description}"
+
+        logger.info(f"[SKILL_ROUTER] Routing: {query[:100]}...")
+
+        try:
+            # Step 1: Check for explicit slash command in description
+            command_match = re.match(r"^/(\w+)", description.strip())
+            if command_match:
+                command = f"/{command_match.group(1)}"
+                logger.info(f"[SKILL_ROUTER] Explicit command detected: {command}")
+
+                # Get skill by command
+                skill = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_skill_by_command", {
+                    "command": command
+                })
+
+                if skill and not skill.get("error"):
+                    logger.info(f"[SKILL_ROUTER] Matched skill: {skill.get('id')} via command")
+                    return {
+                        "skill_id": skill.get("id", ""),
+                        "skill_context": skill,
+                        "loaded_mcps": skill.get("mcps_primary", [])[:MAX_MCPS_PER_REQUEST]
+                    }
+
+            # Step 2: Semantic search for matching skills
+            matches = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_skills", {
+                "query": query,
+                "limit": 3,
+                "min_score": 0.5
+            })
+
+            if not matches or (isinstance(matches, list) and matches and matches[0].get("error")):
+                logger.warning("[SKILL_ROUTER] No skills found, using default")
+                return {"skill_id": "", "skill_context": {}, "loaded_mcps": ["knowledge-mcp"]}
+
+            # Step 3: Handle collisions using relative threshold
+            if len(matches) > 1:
+                top_score = matches[0].get("score", 0)
+                relative_threshold = top_score * SKILL_COLLISION_THRESHOLD
+
+                # Check if second match is within relative threshold
+                second_score = matches[1].get("score", 0)
+                if top_score - second_score <= relative_threshold:
+                    # Collision detected - check if either is from a command match
+                    top_commands = matches[0].get("commands", [])
+                    for cmd in top_commands:
+                        if cmd in query.lower():
+                            logger.info(f"[SKILL_ROUTER] Collision resolved via command match: {matches[0]['id']}")
+                            break
+                    else:
+                        # True collision - log and use top match
+                        logger.warning(
+                            f"[SKILL_ROUTER] Skill collision: {matches[0]['id']} ({top_score:.2f}) vs "
+                            f"{matches[1]['id']} ({second_score:.2f}), using top match"
+                        )
+
+            # Use top match
+            top_skill = matches[0]
+            skill_id = top_skill.get("id", "")
+
+            # Get full skill definition
+            full_skill = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_skill", {
+                "skill_id": skill_id
+            })
+
+            if full_skill and not full_skill.get("error"):
+                logger.info(f"[SKILL_ROUTER] Loaded skill: {skill_id} (score: {top_skill.get('score', 0):.2f})")
+                return {
+                    "skill_id": skill_id,
+                    "skill_context": full_skill,
+                    "loaded_mcps": full_skill.get("mcps_primary", [])[:MAX_MCPS_PER_REQUEST]
+                }
+
+            # Fallback
+            logger.warning(f"[SKILL_ROUTER] Could not load skill {skill_id}, using default")
+            return {"skill_id": "", "skill_context": {}, "loaded_mcps": ["knowledge-mcp"]}
+
+        except Exception as e:
+            logger.error(f"[SKILL_ROUTER] Error: {e}")
+            return {"skill_id": "", "skill_context": {}, "loaded_mcps": ["knowledge-mcp"]}
+
     def create_workflow():
         workflow = StateGraph(AgentState)
+
+        # Add skill_router if enabled (Project 05)
+        if SKILL_ROUTER_ENABLED:
+            workflow.add_node("skill_router", skill_router)
+
         workflow.add_node("assess_alert", assess_alert)
         workflow.add_node("generate_solutions", generate_solutions)
         workflow.add_node("request_approval", request_approval)
         workflow.add_node("execute_solution", execute_solution)
         workflow.add_node("record_outcome", record_outcome)
-        workflow.set_entry_point("assess_alert")
+
+        # Set entry point based on skill_router status
+        if SKILL_ROUTER_ENABLED:
+            workflow.set_entry_point("skill_router")
+            workflow.add_edge("skill_router", "assess_alert")
+        else:
+            workflow.set_entry_point("assess_alert")
+
         workflow.add_edge("assess_alert", "generate_solutions")
         workflow.add_conditional_edges(
             "generate_solutions",
@@ -2899,7 +3027,12 @@ data:
             "topic_id": 0,
             "thread_id": alert_dict["id"],
             "runbook_match": {},
-            "handled_locally": False
+            "handled_locally": False,
+            # Project 05: Skill Router fields
+            "skill_id": "",
+            "skill_context": {},
+            "loaded_mcps": [],
+            "execution_checkpoint": {}
         }
         # Spawn background task - returns immediately
         asyncio.create_task(_process_alert_background(alert_dict, initial_state))
@@ -2954,7 +3087,12 @@ data:
             "topic_id": 0,
             "thread_id": alert_dict["id"],
             "runbook_match": {},
-            "handled_locally": False
+            "handled_locally": False,
+            # Project 05: Skill Router fields
+            "skill_id": "",
+            "skill_context": {},
+            "loaded_mcps": [],
+            "execution_checkpoint": {}
         }
         # Spawn background task - returns immediately
         asyncio.create_task(_process_alert_background(alert_dict, initial_state))

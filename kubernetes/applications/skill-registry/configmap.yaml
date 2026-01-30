@@ -1,0 +1,173 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skill-registry
+  namespace: ai-platform
+  labels:
+    app: skill-registry
+    component: skills
+data:
+  # Skill definitions are stored as individual files
+  # These are seeded into Qdrant's skills collection on startup
+  infrastructure-skill.yaml: |
+    id: infrastructure-skill
+    name: Infrastructure & Remediation
+    domain: infrastructure
+    version: "1.1.0"
+    description: |
+      Handles all infrastructure operations including Kubernetes cluster management,
+      VM/container lifecycle, storage operations, networking, and automated remediation.
+    commands:
+      - /troubleshoot
+      - /deploy
+      - /remediate
+      - /cluster
+    mcps_primary:
+      - infrastructure-mcp
+      - knowledge-mcp
+    mcps_secondary:
+      - observability-mcp
+      - home-mcp
+    runbook_patterns:
+      - runbooks/infrastructure/*.md
+      - runbooks/alerts/pod-*.md
+      - runbooks/alerts/node-*.md
+      - runbooks/troubleshooting/k8s-*.md
+    priority_keywords:
+      - crash
+      - restart
+      - scale
+      - deploy
+      - oom
+      - evicted
+    system_prompt_ref: prompts/skills/infrastructure.md
+
+  observability-skill.yaml: |
+    id: observability-skill
+    name: Observability & Monitoring
+    domain: observability
+    version: "1.1.0"
+    description: |
+      Handles alerts, metrics analysis, anomaly detection, and monitoring operations.
+      Uses Keep for alert correlation, Coroot for service metrics, Grafana for dashboards.
+    commands:
+      - /investigate
+      - /status
+      - /metrics
+    mcps_primary:
+      - observability-mcp
+      - knowledge-mcp
+    mcps_secondary:
+      - infrastructure-mcp
+    runbook_patterns:
+      - runbooks/alerts/*.md
+      - runbooks/troubleshooting/*.md
+    priority_keywords:
+      - alert
+      - metric
+      - anomaly
+      - threshold
+      - latency
+      - error
+    system_prompt_ref: prompts/skills/observability.md
+
+  home-skill.yaml: |
+    id: home-skill
+    name: Home Automation
+    domain: home
+    version: "1.1.0"
+    description: |
+      Controls smart home devices via Home Assistant and Tasmota.
+      Manages lights, switches, climate, and automation routines.
+    commands:
+      - /home
+      - /lights
+      - /devices
+    mcps_primary:
+      - home-mcp
+      - knowledge-mcp
+    mcps_secondary: []
+    runbook_patterns:
+      - runbooks/home/*.md
+    priority_keywords:
+      - light
+      - switch
+      - sensor
+      - automation
+      - tasmota
+    system_prompt_ref: prompts/skills/home.md
+
+  media-skill.yaml: |
+    id: media-skill
+    name: Media Management
+    domain: media
+    version: "1.1.0"
+    description: |
+      Manages media library, downloads, and streaming via Plex, Sonarr, Radarr.
+      Handles movie/TV requests, library organization, and playback issues.
+    commands:
+      - /media
+      - /plex
+      - /download
+    mcps_primary:
+      - media-mcp
+      - knowledge-mcp
+    mcps_secondary: []
+    runbook_patterns:
+      - runbooks/media/*.md
+    priority_keywords:
+      - movie
+      - show
+      - download
+      - streaming
+      - plex
+    system_prompt_ref: prompts/skills/media.md
+
+  research-skill.yaml: |
+    id: research-skill
+    name: Research & External
+    domain: external
+    version: "1.0.0"
+    description: |
+      Web research, documentation lookup, GitHub operations, and external API access.
+      Uses SearXNG for web search, browser automation for complex pages.
+    commands:
+      - /research
+      - /search
+      - /web
+    mcps_primary:
+      - external-mcp
+      - knowledge-mcp
+    mcps_secondary: []
+    runbook_patterns: []
+    priority_keywords:
+      - search
+      - web
+      - github
+      - documentation
+      - api
+    system_prompt_ref: prompts/skills/research.md
+
+  data-skill.yaml: |
+    id: data-skill
+    name: Data & Knowledge Management
+    domain: knowledge
+    version: "1.0.0"
+    description: |
+      Manages knowledge base operations including runbook CRUD, entity management,
+      documentation indexing, and learning from outcomes.
+    commands:
+      - /learn
+      - /knowledge
+    mcps_primary:
+      - knowledge-mcp
+    mcps_secondary: []
+    runbook_patterns:
+      - runbooks/data/*.md
+    priority_keywords:
+      - backup
+      - restore
+      - database
+      - index
+      - learn
+    system_prompt_ref: prompts/skills/data.md

@@ -1,0 +1,171 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: skill-registry-seed
+  namespace: ai-platform
+  labels:
+    app: skill-registry
+    component: seed
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: seed
+        image: python:3.11-slim
+        command:
+        - /bin/bash
+        - -c
+        - |
+          pip install httpx pyyaml --quiet
+          python3 /scripts/seed-skills.py
+        env:
+        - name: QDRANT_URL
+          value: "http://qdrant.ai-platform.svc:6333"
+        - name: OLLAMA_URL
+          value: "http://ollama.ai-platform.svc:11434"
+        - name: EMBEDDING_MODEL
+          value: "nomic-embed-text"
+        volumeMounts:
+        - name: skills
+          mountPath: /skills
+          readOnly: true
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+      volumes:
+      - name: skills
+        configMap:
+          name: skill-registry
+      - name: scripts
+        configMap:
+          name: skill-registry-scripts
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skill-registry-scripts
+  namespace: ai-platform
+data:
+  seed-skills.py: |
+    #!/usr/bin/env python3
+    """Seed skills collection from ConfigMap YAML files."""
+    import os
+    import sys
+    import json
+    import httpx
+    import yaml
+    from pathlib import Path
+    from datetime import datetime
+
+    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant.ai-platform.svc:6333")
+    OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama.ai-platform.svc:11434")
+    EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
+    SKILLS_DIR = Path("/skills")
+
+    def get_embedding(text: str) -> list:
+        """Generate embedding using Ollama."""
+        response = httpx.post(
+            f"{OLLAMA_URL}/api/embeddings",
+            json={"model": EMBEDDING_MODEL, "prompt": text},
+            timeout=60.0
+        )
+        response.raise_for_status()
+        return response.json().get("embedding", [])
+
+    def ensure_collection():
+        """Create skills collection if it doesn't exist."""
+        # Check if collection exists
+        response = httpx.get(f"{QDRANT_URL}/collections/skills", timeout=10.0)
+        if response.status_code == 200:
+            print("Skills collection already exists")
+            return
+
+        # Create collection with 768-dim vectors (nomic-embed-text)
+        response = httpx.put(
+            f"{QDRANT_URL}/collections/skills",
+            json={
+                "vectors": {
+                    "size": 768,
+                    "distance": "Cosine"
+                }
+            },
+            timeout=30.0
+        )
+        response.raise_for_status()
+        print("Created skills collection")
+
+    def load_skill(filepath: Path) -> dict:
+        """Load skill definition from YAML file."""
+        with open(filepath) as f:
+            return yaml.safe_load(f)
+
+    def seed_skill(skill: dict):
+        """Upsert skill into Qdrant."""
+        skill_id = skill.get("id")
+        name = skill.get("name", "")
+        description = skill.get("description", "")
+        commands = skill.get("commands", [])
+
+        # Create embedding from name + description + commands
+        embed_text = f"{name}\n{description}\nCommands: {', '.join(commands)}"
+        embedding = get_embedding(embed_text)
+
+        # Build payload
+        payload = {
+            "id": skill_id,
+            "name": name,
+            "domain": skill.get("domain", ""),
+            "description": description,
+            "version": skill.get("version", "1.0.0"),
+            "commands": commands,
+            "mcps_primary": skill.get("mcps_primary", []),
+            "mcps_secondary": skill.get("mcps_secondary", []),
+            "runbook_patterns": skill.get("runbook_patterns", []),
+            "priority_keywords": skill.get("priority_keywords", []),
+            "system_prompt_ref": skill.get("system_prompt_ref"),
+            "success_count": 0,
+            "failure_count": 0,
+            "total_executions": 0,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+        # Upsert point
+        response = httpx.put(
+            f"{QDRANT_URL}/collections/skills/points",
+            json={
+                "points": [{
+                    "id": skill_id,
+                    "vector": embedding,
+                    "payload": payload
+                }]
+            },
+            timeout=30.0
+        )
+        response.raise_for_status()
+        print(f"Seeded skill: {skill_id}")
+
+    def main():
+        print("Starting skill registry seeding...")
+
+        # Ensure collection exists
+        ensure_collection()
+
+        # Load and seed all skills
+        skill_files = list(SKILLS_DIR.glob("*.yaml"))
+        print(f"Found {len(skill_files)} skill files")
+
+        for filepath in skill_files:
+            try:
+                skill = load_skill(filepath)
+                if skill and skill.get("id"):
+                    seed_skill(skill)
+            except Exception as e:
+                print(f"Error loading {filepath}: {e}", file=sys.stderr)
+
+        print("Skill registry seeding complete!")
+
+    if __name__ == "__main__":
+        main()
