@@ -73,6 +73,7 @@ data:
     HOME_ASSISTANT_MCP_URL = os.environ.get("HOME_ASSISTANT_MCP_URL", "http://home-assistant-mcp:8000")
     TASMOTA_MCP_URL = os.environ.get("TASMOTA_MCP_URL", "http://tasmota-mcp:8000")
     MONITORING_MCP_URL = os.environ.get("MONITORING_MCP_URL", "http://monitoring-mcp:8000")
+    EXTERNAL_MCP_URL = os.environ.get("EXTERNAL_MCP_URL", "http://external-mcp:8000")
 
     # Matrix bot for notifications (replaces Telegram)
     MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
@@ -94,6 +95,21 @@ data:
     MIN_CONFIDENCE_FOR_LOCAL_FIX = float(os.environ.get("MIN_CONFIDENCE_FOR_LOCAL_FIX", "0.7"))
     AUTO_APPROVE_MIN_SUCCESSES = int(os.environ.get("AUTO_APPROVE_MIN_SUCCESSES", "5"))
     CONTEXT_CACHE_TTL = int(os.environ.get("CONTEXT_CACHE_TTL", "3600"))
+
+    # APPROVAL_POLICY controls when human approval is required
+    # - VERBOSE: Always request approval (default - safest)
+    # - STANDARD: Auto-execute EXACT matches with high confidence (>= 0.9) and proven track record
+    # - AGGRESSIVE: Auto-execute EXACT and high-confidence SIMILAR matches
+    APPROVAL_POLICY = os.environ.get("APPROVAL_POLICY", "VERBOSE").upper()
+    AUTO_EXECUTE_MIN_CONFIDENCE = float(os.environ.get("AUTO_EXECUTE_MIN_CONFIDENCE", "0.9"))
+
+    # Temporal pattern detection - flag recurring alerts
+    TEMPORAL_WINDOW_HOURS = int(os.environ.get("TEMPORAL_WINDOW_HOURS", "24"))
+    RECURRING_ALERT_THRESHOLD = int(os.environ.get("RECURRING_ALERT_THRESHOLD", "3"))
+
+    # GitHub integration for runbook improvement suggestions
+    GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "charlieshreck")
+    GITHUB_REPO = os.environ.get("GITHUB_REPO", "agentic_lab")
 
     # Brain Trust Escalation - Outline collection for human review
     BRAIN_TRUST_COLLECTION_ID = os.environ.get("BRAIN_TRUST_COLLECTION_ID", "9bd8c738-4505-494a-a867-74349a887dc6")
@@ -1761,6 +1777,11 @@ data:
         alert = state["alert"]
         alert_text = f"{alert.get('alertname', '')} {alert.get('description', '')}"
 
+        # Step 0: Check temporal patterns (recurring alerts)
+        alert_fingerprint = alert.get("fingerprint", alert.get("id", ""))
+        alert_name = alert.get("alertname", "")
+        temporal_pattern = await check_temporal_patterns(alert_fingerprint, alert_name)
+
         # Step 1: Search Qdrant for diagnostic runbooks
         logger.info("Searching for matching diagnostic runbooks...")
         runbooks = await search_runbooks_qdrant(alert_text, limit=3)
@@ -1870,11 +1891,21 @@ data:
                 "recommended_topic": "infrastructure"
             }
 
+        # Add temporal pattern info to assessment
+        assessment["temporal_pattern"] = temporal_pattern
+        if temporal_pattern["is_recurring"]:
+            assessment["escalation_priority"] = temporal_pattern["escalation_priority"]
+            logger.warning(
+                f"[ASSESS] Recurring alert: {alert_name} "
+                f"({temporal_pattern['occurrence_count']} occurrences, priority: {temporal_pattern['escalation_priority']})"
+            )
+
         return {
             "assessment": assessment,
             "runbook_match": runbook_match or {},
             "match_type": match_type,
-            "handled_locally": match_type in ["EXACT", "SIMILAR"] and not assessment.get("escalated", False)
+            "handled_locally": match_type in ["EXACT", "SIMILAR"] and not assessment.get("escalated", False),
+            "temporal_pattern": temporal_pattern
         }
 
     async def generate_solutions(state):
@@ -2271,13 +2302,215 @@ data:
             }
             asyncio.create_task(_delayed_validation(initial_state, delay_seconds=300))
 
+        # 4. Create GitHub issue for successful SIMILAR match improvements (Project 04 Phase 7)
+        match_type = state["assessment"].get("match_type")
+        execution_success = state["execution_result"].get("success", False)
+
+        if match_type == "SIMILAR" and execution_success:
+            runbook_match = state.get("runbook_match", {})
+            tweaks_applied = state["assessment"].get("tweaks_applied", [])
+
+            if tweaks_applied:
+                asyncio.create_task(create_runbook_improvement_issue(
+                    runbook_name=runbook_match.get("name", "Unknown"),
+                    alert_name=state["alert"].get("alertname", state["alert"].get("name", "Unknown")),
+                    tweaks_applied=tweaks_applied,
+                    original_steps=runbook_match.get("steps", []),
+                    execution_result=state["execution_result"]
+                ))
+                logger.info(f"[GITHUB] Triggered improvement issue for SIMILAR match: {runbook_match.get('name')}")
+
         return {}
 
     def should_request_approval(state):
+        """Determine if human approval is required based on APPROVAL_POLICY.
+
+        Policies:
+        - VERBOSE: Always request approval (default, safest)
+        - STANDARD: Auto-execute EXACT matches with high confidence + proven track record
+        - AGGRESSIVE: Auto-execute EXACT and high-confidence SIMILAR matches
+        """
         assessment = state.get("assessment", {})
+        match_type = state.get("match_type", assessment.get("match_type", "NO_MATCH"))
+        confidence = assessment.get("confidence", 0)
+        runbook_match = state.get("runbook_match", {})
+
+        # Always require approval for escalated alerts or NO_MATCH
+        if assessment.get("escalated", False) or match_type == "NO_MATCH":
+            logger.info(f"[APPROVAL] Required: escalated={assessment.get('escalated')}, match_type={match_type}")
+            return "request_approval"
+
+        # VERBOSE policy: always ask (except runbooks marked auto_approve_eligible with history)
+        if APPROVAL_POLICY == "VERBOSE":
+            if not assessment.get("requires_approval", True):
+                # Runbook explicitly allows auto-approval (via metadata.auto_approve_eligible)
+                logger.info(f"[APPROVAL] Skipped: VERBOSE but runbook allows auto-approve")
+                return "execute_solution"
+            return "request_approval"
+
+        # STANDARD policy: auto-execute EXACT matches with high confidence
+        if APPROVAL_POLICY == "STANDARD":
+            if match_type == "EXACT" and confidence >= AUTO_EXECUTE_MIN_CONFIDENCE:
+                logger.info(f"[APPROVAL] Skipped: STANDARD policy, EXACT match, confidence={confidence:.2f}")
+                return "execute_solution"
+            return "request_approval"
+
+        # AGGRESSIVE policy: auto-execute EXACT and high-confidence SIMILAR
+        if APPROVAL_POLICY == "AGGRESSIVE":
+            if match_type == "EXACT":
+                logger.info(f"[APPROVAL] Skipped: AGGRESSIVE policy, EXACT match")
+                return "execute_solution"
+            if match_type == "SIMILAR" and confidence >= AUTO_EXECUTE_MIN_CONFIDENCE:
+                logger.info(f"[APPROVAL] Skipped: AGGRESSIVE policy, SIMILAR match, confidence={confidence:.2f}")
+                return "execute_solution"
+            return "request_approval"
+
+        # Fallback: require approval
         if assessment.get("requires_approval", True):
             return "request_approval"
         return "execute_solution"
+
+    # ============================================================================
+    # GITHUB ISSUE CREATION - Project 04 Phase 7: Runbook Improvement Suggestions
+    # ============================================================================
+
+    async def create_runbook_improvement_issue(
+        runbook_name: str,
+        alert_name: str,
+        tweaks_applied: list,
+        original_steps: list,
+        execution_result: dict
+    ) -> Optional[str]:
+        """Create a GitHub issue suggesting runbook improvements based on SIMILAR match execution.
+
+        Called when a SIMILAR match was executed with tweaks that worked.
+        Returns the issue URL if created successfully.
+        """
+        if not tweaks_applied:
+            return None
+
+        tweaks_summary = "\n".join([f"- {tweak}" for tweak in tweaks_applied])
+        original_summary = "\n".join([f"{i+1}. {step}" for i, step in enumerate(original_steps[:5])])
+
+        issue_body = (
+            "## Runbook Improvement Suggestion\n\n"
+            f"- Alert: `{alert_name}`\n"
+            f"- Runbook: `{runbook_name}`\n"
+            f"- Match Type: SIMILAR (executed with modifications)\n\n"
+            "### Original Steps\n"
+            f"{original_summary}\n\n"
+            "### Tweaks Applied During Execution\n"
+            f"{tweaks_summary}\n\n"
+            "### Execution Result\n"
+            f"- Success: {execution_result.get('success', 'unknown')}\n"
+            f"- Confidence: {execution_result.get('confidence', 0):.2f}\n"
+            f"- Output: {execution_result.get('output', 'N/A')[:500]}\n\n"
+            "### Suggested Action\n"
+            "Consider updating the runbook to incorporate these tweaks as the standard procedure.\n\n"
+            "---\n"
+            "_Generated by LangGraph Orchestrator (SIMILAR match auto-improvement)_"
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    EXTERNAL_MCP_URL + "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "github_create_issue",
+                            "arguments": {
+                                "owner": GITHUB_OWNER,
+                                "repo": GITHUB_REPO,
+                                "title": f"[Runbook Update] {runbook_name}: tweaks from SIMILAR match",
+                                "body": issue_body,
+                                "labels": ["runbook-improvement", "auto-generated"]
+                            }
+                        }
+                    }
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("result", {}).get("content", [])
+                    if content:
+                        issue_data = json.loads(content[0].get("text", "{}"))
+                        issue_url = issue_data.get("html_url")
+                        logger.info(f"[GITHUB] Created runbook improvement issue: {issue_url}")
+                        return issue_url
+        except Exception as e:
+            logger.warning(f"[GITHUB] Failed to create improvement issue: {e}")
+        return None
+
+    # ============================================================================
+    # TEMPORAL PATTERN DETECTION - Project 04 Phase 7: Recurring Alert Detection
+    # ============================================================================
+
+    async def check_temporal_patterns(alert_fingerprint: str, alert_name: str) -> dict:
+        """Check for recurring alerts with the same fingerprint in the temporal window.
+
+        Returns pattern info: is_recurring, occurrence_count, first_seen, escalation_priority
+        """
+        pattern_info = {
+            "is_recurring": False,
+            "occurrence_count": 1,
+            "first_seen": datetime.utcnow().isoformat(),
+            "escalation_priority": "normal"
+        }
+
+        try:
+            # Query recent events with same alert fingerprint
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    KNOWLEDGE_MCP_URL + "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "list_recent_events",
+                            "arguments": {
+                                "hours": TEMPORAL_WINDOW_HOURS,
+                                "event_type": "alert",
+                                "limit": 50
+                            }
+                        }
+                    }
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result.get("result", {}).get("content", [])
+                    if content:
+                        events = json.loads(content[0].get("text", "[]"))
+
+                        # Count matching fingerprints
+                        matching_events = [
+                            e for e in events
+                            if e.get("metadata", {}).get("alert_fingerprint") == alert_fingerprint
+                            or e.get("metadata", {}).get("alert_name") == alert_name
+                        ]
+
+                        if len(matching_events) >= RECURRING_ALERT_THRESHOLD:
+                            pattern_info["is_recurring"] = True
+                            pattern_info["occurrence_count"] = len(matching_events) + 1  # +1 for current
+                            pattern_info["escalation_priority"] = "high" if len(matching_events) >= 5 else "medium"
+
+                            # Find first occurrence
+                            if matching_events:
+                                timestamps = [e.get("timestamp") for e in matching_events if e.get("timestamp")]
+                                if timestamps:
+                                    pattern_info["first_seen"] = min(timestamps)
+
+                            logger.warning(
+                                f"[TEMPORAL] Recurring alert detected: {alert_name} "
+                                f"({pattern_info['occurrence_count']} times in {TEMPORAL_WINDOW_HOURS}h)"
+                            )
+
+        except Exception as e:
+            logger.warning(f"[TEMPORAL] Failed to check patterns: {e}")
+
+        return pattern_info
 
     # ============================================================================
     # VALIDATION SUBGRAPH - Project 03: Evaluator System
@@ -3441,6 +3674,23 @@ spec:
               value: "9bd8c738-4505-494a-a867-74349a887dc6"
             - name: OUTLINE_MCP_URL
               value: "http://outline-mcp:8000"
+            # Phase 7: Approval Policy (VERBOSE/STANDARD/AGGRESSIVE)
+            - name: APPROVAL_POLICY
+              value: "STANDARD"
+            - name: AUTO_EXECUTE_MIN_CONFIDENCE
+              value: "0.9"
+            # Phase 7: Temporal Pattern Detection
+            - name: TEMPORAL_WINDOW_HOURS
+              value: "24"
+            - name: RECURRING_ALERT_THRESHOLD
+              value: "3"
+            # Phase 7: GitHub Integration for Runbook Improvements
+            - name: GITHUB_OWNER
+              value: "charlieshreck"
+            - name: GITHUB_REPO
+              value: "agentic_lab"
+            - name: EXTERNAL_MCP_URL
+              value: "http://external-mcp:8000"
           # Import ALL MCP server URLs from shared ConfigMap
           # Source: /home/.mcp.json via sync-mcp-config.sh
           envFrom:
