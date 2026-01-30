@@ -56,22 +56,22 @@ spec:
           mountPath: /app/config.yaml
           subPath: config.yaml
           readOnly: true
+        # TCP probes as workaround for slow /health endpoint (>2min response time)
+        # TODO: Investigate LiteLLM health check performance
         livenessProbe:
-          httpGet:
-            path: /health
-            port: 4000
-          initialDelaySeconds: 120
-          periodSeconds: 60
-          timeoutSeconds: 60
-          failureThreshold: 5
-        readinessProbe:
-          httpGet:
-            path: /health
+          tcpSocket:
             port: 4000
           initialDelaySeconds: 60
           periodSeconds: 30
-          timeoutSeconds: 60
-          failureThreshold: 5
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 4000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
       volumes:
       - name: config
         configMap:
