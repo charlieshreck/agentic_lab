@@ -3829,6 +3829,13 @@ spec:
               value: "agentic_lab"
             - name: EXTERNAL_MCP_URL
               value: "http://external-mcp:8000"
+            # Project 05: Skill Router Configuration
+            - name: SKILL_ROUTER_ENABLED
+              value: "true"
+            - name: SKILL_COLLISION_THRESHOLD
+              value: "0.2"
+            - name: MAX_MCPS_PER_REQUEST
+              value: "8"
           # Import ALL MCP server URLs from shared ConfigMap
           # Source: /home/.mcp.json via sync-mcp-config.sh
           envFrom:
