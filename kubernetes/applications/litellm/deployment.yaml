@@ -46,10 +46,10 @@ spec:
         # Max subscription, not via LiteLLM API. No ANTHROPIC_API_KEY needed.
         resources:
           requests:
-            memory: "256Mi"
+            memory: "512Mi"
             cpu: "100m"
           limits:
-            memory: "1Gi"
+            memory: "2Gi"
             cpu: "1000m"
         volumeMounts:
         - name: config
