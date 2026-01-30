@@ -3596,12 +3596,15 @@ data:
             }
 
             # Build prompt with skill context
-            full_prompt = f"""You are handling a {skill_name} request.
-Domain: {skill.get('domain', 'general')}
-Command: {request.command}
-User Query: {request.query}
-
-Based on the skill context, provide a helpful response. If this requires infrastructure actions, describe what would be done. For informational queries, provide the relevant information."""
+            full_prompt = (
+                f"You are handling a {skill_name} request.\n"
+                f"Domain: {skill.get('domain', 'general')}\n"
+                f"Command: {request.command}\n"
+                f"User Query: {request.query}\n\n"
+                f"Based on the skill context, provide a helpful response. "
+                f"If this requires infrastructure actions, describe what would be done. "
+                f"For informational queries, provide the relevant information."
+            )
 
             # Call LLM with skill context
             messages = [
