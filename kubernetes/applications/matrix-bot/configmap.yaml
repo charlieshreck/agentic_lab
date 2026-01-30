@@ -60,6 +60,28 @@ data:
     GRAFANA_PASSWORD = os.environ.get("GRAFANA_PASSWORD", "")
     OPERATOR_USER_ID = os.environ.get("OPERATOR_USER_ID", "@charlie:agentic.local")
 
+    # Skill Router: Slash command → skill mapping
+    SKILL_COMMANDS = {
+        "/troubleshoot": "infrastructure-skill",
+        "/deploy": "infrastructure-skill",
+        "/remediate": "infrastructure-skill",
+        "/cluster": "infrastructure-skill",
+        "/investigate": "observability-skill",
+        "/status": "observability-skill",
+        "/metrics": "observability-skill",
+        "/home": "home-skill",
+        "/lights": "home-skill",
+        "/devices": "home-skill",
+        "/media": "media-skill",
+        "/plex": "media-skill",
+        "/download": "media-skill",
+        "/research": "research-skill",
+        "/search": "research-skill",
+        "/web": "research-skill",
+        "/learn": "data-skill",
+        "/knowledge": "data-skill",
+    }
+
     # Alert → Grafana dashboard mapping
     ALERT_DASHBOARD_MAP = {
         # Pod alerts → K8s Compute Resources / Pod
@@ -780,6 +802,11 @@ data:
 
             query_lower = query.lower()
 
+            # Slash command routing to skill system
+            if query.startswith("/"):
+                await self.handle_skill_command(room, query)
+                return
+
             # Quick commands
             if query_lower in [
                 "status",
@@ -829,6 +856,89 @@ data:
             self.conversations[conv_id] = history
 
             await self.send_message(room.room_id, response)
+
+        async def handle_skill_command(self, room, query: str):
+            """Handle slash commands by routing to skill system."""
+            parts = query.split(maxsplit=1)
+            command = parts[0].lower()
+            args = parts[1] if len(parts) > 1 else ""
+
+            skill_id = SKILL_COMMANDS.get(command)
+
+            if not skill_id:
+                # Unknown command - show available commands
+                available = ", ".join(sorted(SKILL_COMMANDS.keys()))
+                await self.send_message(
+                    room.room_id,
+                    f"Unknown command: {command}",
+                    (
+                        f"<p>Unknown command: <code>{command}</code></p>"
+                        f"<p>Available commands: <code>{available}</code></p>"
+                    ),
+                )
+                return
+
+            await self.set_typing(room.room_id, True)
+            try:
+                # Route to LangGraph /skill endpoint
+                payload = {
+                    "skill_id": skill_id,
+                    "command": command,
+                    "query": args or f"{command} request",
+                    "source": "matrix_bot",
+                    "room_id": room.room_id,
+                }
+
+                response = await self.http_client.post(
+                    f"{LANGGRAPH_URL}/skill",
+                    json=payload,
+                    timeout=120.0,
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result.get(
+                        "response",
+                        result.get("answer", "Skill executed successfully"),
+                    )
+                    skill_name = result.get("skill_name", skill_id)
+
+                    # Format response card
+                    card = MessageFormatter.card(
+                        f"{command} ({skill_name})",
+                        "ok",
+                        f"<p>{self.markdown_to_html(answer)}</p>",
+                    )
+                    await self.send_message(room.room_id, answer, card)
+                else:
+                    error_msg = f"Skill execution failed: {response.status_code}"
+                    try:
+                        error_detail = response.json().get("detail", response.text[:200])
+                        error_msg = f"{error_msg} - {error_detail}"
+                    except Exception:
+                        pass
+                    await self.send_message(
+                        room.room_id,
+                        error_msg,
+                        MessageFormatter.card(
+                            f"Error: {command}",
+                            "critical",
+                            f"<p>{error_msg}</p>",
+                        ),
+                    )
+            except Exception as e:
+                logger.error(f"Skill command error: {e}")
+                await self.send_message(
+                    room.room_id,
+                    f"Error executing {command}: {str(e)}",
+                    MessageFormatter.card(
+                        f"Error: {command}",
+                        "critical",
+                        f"<p>Error: {str(e)}</p>",
+                    ),
+                )
+            finally:
+                await self.set_typing(room.room_id, False)
 
         async def handle_reply_with_context(
             self, room, event, reply_to_event_id
