@@ -51,7 +51,7 @@ spec:
         # Create directory structure for remote backup path validation
         # Backrest validates paths exist locally before running SSH backups
         - name: init-backup-paths
-          image: busybox:1.36
+          image: busybox:1.37
           command:
             - sh
             - -c
