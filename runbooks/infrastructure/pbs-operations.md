@@ -4,10 +4,24 @@
 
 PBS provides VM/LXC snapshot-level backups as a disaster recovery layer, complementing Backrest file-level backups.
 
-**PBS Server**: 10.10.0.150 (VM 101 on Ruapehu)
-**Web UI**: https://10.10.0.150:8007
-**Datastore**: `pbs-ruapehu` → `/mnt/Taupo/pbs` (TrueNAS HDD)
+### Current Setup (Pihanga)
+
+**PBS Server**: 10.10.0.151 (LXC 101 on Pihanga)
+**Web UI**: https://10.10.0.151:8007
+**Datastore**: `pbs-datastore` → `/mnt/pbs-datastore` (NFS to TrueNAS-HDD)
+**NFS Path**: 10.20.0.103:/mnt/Taupo/pbs
 **Storage**: 13.3 TB available
+
+### Why Pihanga?
+
+PBS runs on Pihanga (separate from Ruapehu) for proper DR:
+- If Ruapehu fails, PBS and backups are still accessible
+- Can restore Ruapehu VMs to new hardware
+- Backups stored on TrueNAS-HDD (network storage)
+
+### Legacy Setup (Deprecated)
+
+Old PBS on Ruapehu (10.10.0.150, VM 101) should be decommissioned after migration.
 
 ## Backup Strategy
 
