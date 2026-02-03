@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-orchestrator
+  namespace: ai-platform
+  labels:
+    app: a2a-orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: a2a-orchestrator
+  template:
+    metadata:
+      labels:
+        app: a2a-orchestrator
+    spec:
+      containers:
+        - name: orchestrator
+          image: ghcr.io/charlieshreck/a2a-orchestrator:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            # OpenRouter API for Gemini
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-openrouter-credentials
+                  key: API_KEY
+            # A2A API token for MCP REST bridge
+            - name: A2A_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-api-token
+                  key: TOKEN
+            # MCP endpoints (ClusterIP services)
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp.ai-platform.svc.cluster.local:8000"
+            - name: OBSERVABILITY_MCP_URL
+              value: "http://observability-mcp.ai-platform.svc.cluster.local:8000"
+            - name: KNOWLEDGE_MCP_URL
+              value: "http://knowledge-mcp.ai-platform.svc.cluster.local:8000"
+            - name: HOME_MCP_URL
+              value: "http://home-mcp.ai-platform.svc.cluster.local:8000"
+            # Qwen fallback (via LiteLLM)
+            - name: QWEN_URL
+              value: "http://litellm.ai-platform.svc.cluster.local:4000/v1/chat/completions"
+            - name: QWEN_MODEL
+              value: "qwen/qwen2.5-coder-14b"
+            # Model configuration
+            - name: SPECIALIST_MODEL
+              value: "google/gemini-2.0-flash-001"
+            - name: SYNTHESIS_MODEL
+              value: "google/gemini-2.0-flash-001"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      # Allow access to MCP services
+      serviceAccountName: default
