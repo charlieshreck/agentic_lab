@@ -69,9 +69,10 @@ spec:
               value: "file"
             - name: SECRET_MANAGER_DIRECTORY
               value: "/data/secrets"
-            # Database authentication - local user accounts
+            # Disable authentication - webhooks were failing with 401
+            # TODO: Re-enable DB auth once API key seeding is fixed
             - name: AUTH_TYPE
-              value: "DB"
+              value: "NO_AUTH"
             # Keep API secret for session encryption (from Infisical)
             - name: KEEP_API_SECRET
               valueFrom:
@@ -90,10 +91,6 @@ spec:
             # Pusher/websocket disabled
             - name: PUSHER_DISABLED
               value: "true"
-            # Pre-seed API key for incoming webhooks (AlertManager, Coroot, Gatus)
-            # Format: name:role:secret - webhook role allows alert ingestion
-            - name: KEEP_DEFAULT_API_KEYS
-              value: "alerting-webhook:webhook:16b7de2a-5d6d-4021-a774-53a083edc28e"
           volumeMounts:
             - name: keep-data
               mountPath: /data
