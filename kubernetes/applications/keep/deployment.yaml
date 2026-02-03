@@ -90,6 +90,10 @@ spec:
             # Pusher/websocket disabled
             - name: PUSHER_DISABLED
               value: "true"
+            # Pre-seed API key for incoming webhooks (AlertManager, Coroot, Gatus)
+            # Format: name:role:secret - webhook role allows alert ingestion
+            - name: KEEP_DEFAULT_API_KEYS
+              value: "alerting-webhook:webhook:16b7de2a-5d6d-4021-a774-53a083edc28e"
           volumeMounts:
             - name: keep-data
               mountPath: /data
