@@ -1,6 +1,6 @@
 # A2A Orchestrator
 
-Parallel specialist agents for alert triage in the Kernow homelab.
+Parallel specialist agents (Gemini-powered) for alert triage in the Kernow homelab.
 
 ## Architecture
 
