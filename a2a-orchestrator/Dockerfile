@@ -9,6 +9,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source
 COPY src/a2a_orchestrator/ /app/a2a_orchestrator/
 
+# Set PYTHONPATH explicitly
+ENV PYTHONPATH=/app
+
+# Verify imports work at build time
+RUN python -c "from a2a_orchestrator.server import app; print('Import OK')"
+
 # Run as non-root
 RUN useradd -m -u 1000 app
 USER app
