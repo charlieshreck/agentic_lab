@@ -23,6 +23,7 @@ class SpecialistFinding(BaseModel):
     evidence: List[str] = Field(default_factory=list)
     tools_called: List[str] = Field(default_factory=list)
     confidence: float = 0.0
+    latency_ms: int = 0
     error: Optional[str] = None
 
 
@@ -43,6 +44,7 @@ class InvestigateResponse(BaseModel):
     recommended_domain: str
     escalation_reason: Optional[str] = None
     fallback_used: bool = False
+    latency_ms: int = 0
 
 
 # === Plan & Decide Models ===

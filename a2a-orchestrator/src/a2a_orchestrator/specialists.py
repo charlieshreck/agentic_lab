@@ -3,6 +3,7 @@
 import os
 import logging
 from datetime import datetime
+from typing import List, Optional
 
 from a2a_orchestrator.mcp_client import (
     kubectl_get_pods,
@@ -21,8 +22,14 @@ from a2a_orchestrator.llm import gemini_analyze
 logger = logging.getLogger(__name__)
 
 
-# Pydantic model imported from server to avoid circular import
+# Simple Finding class for specialists - converted to SpecialistFinding in server.py
+# Uses tools_used internally but server converts to tools_called for API response
 class Finding:
+    """Internal finding class used by specialists.
+
+    Note: This uses 'tools_used' internally for backwards compatibility,
+    but server.py converts to canonical 'tools_called' field name.
+    """
     def __init__(self, agent: str, status: str, issue: str = None,
                  evidence: str = None, recommendation: str = None,
                  tools_used: list = None, latency_ms: int = 0):

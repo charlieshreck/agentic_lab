@@ -1171,15 +1171,18 @@ data:
                 return {"error": str(e), "fallback": True}
 
     async def call_a2a_plan_and_decide(alert: dict, investigation: dict, request_id: str) -> dict:
-        """Call A2A /v1/plan_and_decide endpoint for runbook matching and decision."""
+        """Call A2A /v1/plan endpoint for runbook matching and decision.
+
+        Note: Uses /v1/plan (preferred) - /v1/plan_and_decide is deprecated alias.
+        """
         if not A2A_ENABLED:
-            logger.info("A2A disabled, skipping plan_and_decide")
+            logger.info("A2A disabled, skipping plan")
             return {"error": "A2A disabled", "fallback": True}
 
         async with httpx.AsyncClient(timeout=A2A_TIMEOUT) as client:
             try:
                 response = await client.post(
-                    A2A_URL + "/v1/plan_and_decide",
+                    A2A_URL + "/v1/plan",
                     json={
                         "request_id": request_id,
                         "alert": {
@@ -1201,10 +1204,10 @@ data:
                 response.raise_for_status()
                 return response.json()
             except httpx.TimeoutException:
-                logger.warning("A2A plan_and_decide timed out after %ss", A2A_TIMEOUT)
+                logger.warning("A2A plan timed out after %ss", A2A_TIMEOUT)
                 return {"error": "timeout", "fallback": True}
             except Exception as e:
-                logger.error("A2A plan_and_decide failed: %s", e)
+                logger.error("A2A plan failed: %s", e)
                 return {"error": str(e), "fallback": True}
 
     async def call_a2a_validate_and_document(
@@ -1214,15 +1217,18 @@ data:
         execution_result: dict,
         request_id: str
     ) -> dict:
-        """Call A2A /v1/validate_and_document endpoint for resolution validation."""
+        """Call A2A /v1/validate endpoint for resolution validation.
+
+        Note: Uses /v1/validate (preferred) - /v1/validate_and_document is deprecated alias.
+        """
         if not A2A_ENABLED:
-            logger.info("A2A disabled, skipping validate_and_document")
+            logger.info("A2A disabled, skipping validate")
             return {"error": "A2A disabled", "fallback": True}
 
         async with httpx.AsyncClient(timeout=A2A_TIMEOUT) as client:
             try:
                 response = await client.post(
-                    A2A_URL + "/v1/validate_and_document",
+                    A2A_URL + "/v1/validate",
                     json={
                         "request_id": request_id,
                         "alert": {
@@ -1246,10 +1252,10 @@ data:
                 response.raise_for_status()
                 return response.json()
             except httpx.TimeoutException:
-                logger.warning("A2A validate_and_document timed out after %ss", A2A_TIMEOUT)
+                logger.warning("A2A validate timed out after %ss", A2A_TIMEOUT)
                 return {"error": "timeout", "fallback": True}
             except Exception as e:
-                logger.error("A2A validate_and_document failed: %s", e)
+                logger.error("A2A validate failed: %s", e)
                 return {"error": str(e), "fallback": True}
 
     # ============================================================================
