@@ -131,6 +131,69 @@ data:
     _static_context_timestamp = None
 
     # ============================================================================
+    # REDIS PERSISTENCE FOR PENDING APPROVALS
+    # ============================================================================
+    import redis.asyncio as redis_async
+
+    _redis_client = None
+
+    async def get_redis_client():
+        """Get or create Redis client for pending approvals persistence."""
+        global _redis_client
+        if _redis_client is None:
+            _redis_client = await redis_async.from_url(REDIS_URL, decode_responses=True)
+        return _redis_client
+
+    async def store_pending_approval(alert_id: str, data: dict) -> None:
+        """Store pending approval in Redis with 24h TTL."""
+        try:
+            client = await get_redis_client()
+            key = f"pending_approval:{alert_id}"
+            await client.setex(key, 86400, json.dumps(data, default=str))  # 24h TTL
+            logger.debug(f"Stored pending approval {alert_id} in Redis")
+        except Exception as e:
+            logger.error(f"Failed to store pending approval in Redis: {e}")
+            # Fallback to in-memory
+            pending_approvals[alert_id] = data
+
+    async def get_pending_approval(alert_id: str) -> Optional[dict]:
+        """Retrieve pending approval from Redis."""
+        try:
+            client = await get_redis_client()
+            key = f"pending_approval:{alert_id}"
+            data = await client.get(key)
+            if data:
+                return json.loads(data)
+            # Fallback to in-memory
+            return pending_approvals.get(alert_id)
+        except Exception as e:
+            logger.error(f"Failed to get pending approval from Redis: {e}")
+            return pending_approvals.get(alert_id)
+
+    async def delete_pending_approval(alert_id: str) -> None:
+        """Delete pending approval from Redis."""
+        try:
+            client = await get_redis_client()
+            key = f"pending_approval:{alert_id}"
+            await client.delete(key)
+            # Also remove from in-memory if present
+            pending_approvals.pop(alert_id, None)
+            logger.debug(f"Deleted pending approval {alert_id} from Redis")
+        except Exception as e:
+            logger.error(f"Failed to delete pending approval from Redis: {e}")
+            pending_approvals.pop(alert_id, None)
+
+    async def get_pending_count() -> int:
+        """Get count of pending approvals from Redis."""
+        try:
+            client = await get_redis_client()
+            keys = await client.keys("pending_approval:*")
+            return len(keys)
+        except Exception as e:
+            logger.error(f"Failed to count pending approvals: {e}")
+            return len(pending_approvals)
+
+    # ============================================================================
     # TOOL CATALOG - Safe MCP tools for plan execution
     # ============================================================================
 
@@ -2441,12 +2504,13 @@ data:
         solutions = state["solutions"]
         assessment = state["assessment"]
 
-        pending_approvals[alert["id"]] = {
+        # Store in Redis for persistence across restarts
+        await store_pending_approval(alert["id"], {
             "alert": alert,
             "solutions": solutions,
             "assessment": assessment,
             "created_at": datetime.utcnow().isoformat()
-        }
+        })
 
         # Determine room based on severity
         severity = alert.get("severity", "warning")
@@ -3497,13 +3561,18 @@ data:
 
     @app.post("/approve")
     async def approve_action(request: ApprovalRequest):
-        if request.alert_id not in pending_approvals:
+        # Get from Redis-backed storage
+        pending = await get_pending_approval(request.alert_id)
+        if not pending:
             raise HTTPException(status_code=404, detail="Approval not found or expired")
-        pending = pending_approvals[request.alert_id]
         solutions = pending["solutions"]
         if request.solution_index < 1 or request.solution_index > len(solutions):
             raise HTTPException(status_code=400, detail="Invalid solution index")
         selected = solutions[request.solution_index - 1]
+
+        # Build complete state for graph execution
+        # Note: This still calls functions directly (graph bypass) but with proper state
+        # Future: Use LangGraph thread resumption for true graph integration
         state = {
             "messages": [],
             "alert": pending["alert"],
@@ -3512,24 +3581,30 @@ data:
             "selected_solution": selected,
             "approval_status": "approved",
             "execution_result": {},
-            "runbook_id": "",
+            "runbook_id": selected.get("runbook_id", ""),
+            "handled_locally": True,
             "topic_id": 0,
-            "thread_id": request.alert_id
+            "thread_id": request.alert_id,
+            "skill_id": "",
+            "skill_context": {},
+            "loaded_mcps": [],
+            "execution_checkpoint": {}
         }
         result = await execute_solution(state)
         state.update(result)
         await record_outcome(state)
-        del pending_approvals[request.alert_id]
+        # Remove from Redis-backed storage
+        await delete_pending_approval(request.alert_id)
         return {
             "success": result["execution_result"].get("success", False),
             "summary": result["execution_result"].get("summary", ""),
-            "runbook_id": "runbook-" + request.alert_id[:8]
+            "runbook_id": selected.get("runbook_id", f"runbook-{request.alert_id[:8]}")
         }
 
     @app.post("/ignore")
     async def ignore_action(request: IgnoreRequest):
-        if request.alert_id in pending_approvals:
-            pending = pending_approvals[request.alert_id]
+        pending = await get_pending_approval(request.alert_id)
+        if pending:
             await call_knowledge_mcp("record", "POST", {
                 "collection": "decisions",
                 "data": {
@@ -3540,18 +3615,18 @@ data:
                     "timestamp": datetime.utcnow().isoformat()
                 }
             })
-            del pending_approvals[request.alert_id]
+            await delete_pending_approval(request.alert_id)
         return {"status": "ignored"}
 
     @app.get("/pending/{alert_id}")
     async def get_pending(alert_id: str):
-        if alert_id not in pending_approvals:
-            return None
-        return pending_approvals[alert_id]
+        pending = await get_pending_approval(alert_id)
+        return pending
 
     @app.get("/status")
     async def get_status():
-        return {"pending_count": len(pending_approvals), "auto_executed": 0, "active_runbooks": 0, "learning_queue": 0}
+        pending_count = await get_pending_count()
+        return {"pending_count": pending_count, "auto_executed": 0, "active_runbooks": 0, "learning_queue": 0}
 
     # ============================================================================
     # VALIDATION ENDPOINTS - Project 03: Evaluator System

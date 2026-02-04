@@ -1,0 +1,94 @@
+# KubePodCrashLooping - Machine Executable Runbook (v2 Schema)
+# This runbook is automatically matched by alertname for tiered lookup
+
+alertname: KubePodCrashLooping
+title: "Restart crashlooping pod"
+description: "Pod is in CrashLoopBackOff state - restart or investigate based on restart count"
+severity: warning
+clusters:
+  - prod
+  - agentic
+  - monit
+
+automation_level: prompted  # Requires human approval before execution
+
+# Alert label references use {alert.labels.xxx} placeholders
+# These are substituted at execution time with actual alert values
+
+steps:
+  - order: 1
+    action: "Get pod status and restart count"
+    tool: kubectl_get_pods
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      name: "{alert.labels.pod}"
+    risk: low
+
+  - order: 2
+    action: "Get pod events for crash reason"
+    tool: kubectl_get_events
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      field_selector: "involvedObject.name={alert.labels.pod}"
+    risk: low
+
+  - order: 3
+    action: "Get previous container logs for crash diagnosis"
+    tool: kubectl_logs
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      pod_name: "{alert.labels.pod}"
+      previous: true
+      tail: 100
+    risk: low
+
+  - order: 4
+    action: "Delete crashlooping pod to trigger restart"
+    tool: kubectl_delete_pod
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      pod_name: "{alert.labels.pod}"
+    risk: medium
+    condition: "restart_count >= 5"  # Only if many restarts
+    rollback_tool: null  # Pod will be recreated by controller
+    rollback_args: null
+
+verification_steps:
+  - order: 1
+    action: "Verify new pod is running"
+    tool: kubectl_get_pods
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      label_selector: "{alert.labels.app_label}"
+    expected:
+      status: Running
+      ready: true
+    wait_seconds: 60
+
+  - order: 2
+    action: "Check pod is not crashlooping again"
+    tool: kubectl_get_pods
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      name: "{alert.labels.pod}"
+    expected:
+      restart_count_increased: false
+    wait_seconds: 120
+
+rollback_steps: []  # No rollback needed - controller recreates pod
+
+escalation:
+  condition: "restart_count < 5 or logs indicate config issue"
+  reason: "Low restart count or configuration problem detected"
+  action: "Escalate to human for investigation - do not blindly restart"
+
+tags:
+  - kubernetes
+  - pod
+  - crashloop
+  - restart
+
+related_alerts:
+  - KubePodNotReady
+  - KubeContainerWaiting
+  - KubeDeploymentReplicasMismatch

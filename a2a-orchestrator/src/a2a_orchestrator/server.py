@@ -291,24 +291,65 @@ RUNBOOK_SIMILAR_THRESHOLD = float(os.environ.get("RUNBOOK_SIMILAR_THRESHOLD", "0
 
 
 async def search_runbooks_for_alert(alert: Alert, investigation: dict) -> dict:
-    """Search knowledge-mcp for matching runbooks."""
+    """Search knowledge-mcp for matching runbooks using tiered lookup.
+
+    Tier 1: Exact match by alertname
+    Tier 2: Semantic search fallback
+    """
     from a2a_orchestrator.mcp_client import call_mcp_tool
 
-    # Build search query from alert and findings
-    query_parts = [alert.name]
+    # Build context for semantic search fallback
+    context_parts = []
     if alert.description:
-        query_parts.append(alert.description[:100])
+        context_parts.append(alert.description[:100])
 
-    # Add key issues from investigation - handle dict format
+    # Add key issues from investigation
     findings = investigation.get("findings", [])
     for finding in findings[:3]:
         issue = finding.get("summary") or finding.get("issue")
         if issue:
-            query_parts.append(issue[:50])
+            context_parts.append(issue[:50])
 
-    query = " ".join(query_parts)[:200]
+    context = " ".join(context_parts)[:300] if context_parts else None
 
-    result = await call_mcp_tool("knowledge", "search_runbooks", {"query": query, "limit": 3})
+    # Use tiered lookup: exact match by alertname first, then semantic fallback
+    result = await call_mcp_tool("knowledge", "get_runbook_for_alert", {
+        "alertname": alert.name,
+        "context": context,
+        "exact_threshold": RUNBOOK_EXACT_THRESHOLD,
+        "semantic_threshold": RUNBOOK_SIMILAR_THRESHOLD
+    })
+
+    # Convert tiered lookup response to expected format
+    if result.get("status") == "success":
+        output = result.get("output", {})
+        if isinstance(output, str):
+            import json
+            try:
+                output = json.loads(output)
+            except json.JSONDecodeError:
+                return result
+
+        match_type = output.get("match_type", "NO_MATCH")
+        runbook = output.get("runbook")
+
+        if runbook and match_type in ("EXACT", "SIMILAR"):
+            # Transform to list format expected by downstream code
+            return {
+                "status": "success",
+                "output": [{
+                    "id": runbook.get("id"),
+                    "score": output.get("score", 1.0 if match_type == "EXACT" else 0.8),
+                    "name": runbook.get("title"),
+                    "alertname": runbook.get("alertname"),
+                    "steps": runbook.get("steps", []),
+                    "automation_level": runbook.get("automation_level", "manual"),
+                    "path": runbook.get("path"),
+                    "match_type": match_type,
+                    "alternatives": output.get("alternatives", [])
+                }]
+            }
+
     return result
 
 
@@ -459,10 +500,32 @@ async def plan_and_decide(request: PlanAndDecideRequest):
 
         if runbook_result.get("status") == "success":
             output = runbook_result.get("output", "")
-            # Parse runbook search results (expecting JSON or structured output)
+            # Parse runbook search results (handles JSON, markdown, or structured output)
             try:
                 import json
-                runbooks = json.loads(output) if isinstance(output, str) else output
+                import re
+
+                runbooks = None
+                if isinstance(output, list):
+                    runbooks = output
+                elif isinstance(output, str):
+                    # Try direct JSON parse first
+                    try:
+                        runbooks = json.loads(output)
+                    except json.JSONDecodeError:
+                        # Try to extract JSON from markdown code blocks
+                        json_match = re.search(r'```(?:json)?\s*([\[\{].*?[\]\}])\s*```', output, re.DOTALL)
+                        if json_match:
+                            runbooks = json.loads(json_match.group(1))
+                        else:
+                            # Try to find bare JSON array or object
+                            array_match = re.search(r'(\[[\s\S]*\])', output)
+                            if array_match:
+                                try:
+                                    runbooks = json.loads(array_match.group(1))
+                                except json.JSONDecodeError:
+                                    pass
+
                 if runbooks and isinstance(runbooks, list) and len(runbooks) > 0:
                     best_match = runbooks[0]
                     runbook_score = best_match.get("score", 0)

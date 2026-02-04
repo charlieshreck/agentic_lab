@@ -1,0 +1,92 @@
+# TargetDown - Machine Executable Runbook (v2 Schema)
+
+alertname: TargetDown
+title: "Investigate down Prometheus target"
+description: "Prometheus scrape target is down - verify service health and restart if needed"
+severity: warning
+clusters:
+  - prod
+  - agentic
+  - monit
+
+automation_level: prompted
+
+steps:
+  - order: 1
+    action: "Get pods in target namespace"
+    tool: kubectl_get_pods
+    arguments:
+      namespace: "{alert.labels.namespace}"
+    risk: low
+
+  - order: 2
+    action: "Get service for the target"
+    tool: kubectl_get_services
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      name: "{alert.labels.service}"
+    risk: low
+
+  - order: 3
+    action: "Get events in namespace"
+    tool: kubectl_get_events
+    arguments:
+      namespace: "{alert.labels.namespace}"
+    risk: low
+
+  - order: 4
+    action: "Check if target pods are crashlooping"
+    tool: kubectl_get_pods
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      label_selector: "app={alert.labels.job}"
+    risk: low
+
+  - order: 5
+    action: "Restart deployment if pods are unhealthy"
+    tool: kubectl_restart_deployment
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      deployment_name: "{alert.labels.job}"
+    risk: medium
+    condition: "pods_unhealthy or no_ready_pods"
+    rollback_tool: null  # Deployment controller handles rollback
+
+verification_steps:
+  - order: 1
+    action: "Verify pods are running"
+    tool: kubectl_get_pods
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      label_selector: "app={alert.labels.job}"
+    expected:
+      status: Running
+      ready: true
+    wait_seconds: 120
+
+  - order: 2
+    action: "Check Prometheus target status"
+    tool: query_metrics_instant
+    arguments:
+      query: "up{job=\"{alert.labels.job}\"}"
+    expected:
+      value: 1
+    wait_seconds: 60
+
+rollback_steps: []
+
+escalation:
+  condition: "service_missing or persistent_down"
+  reason: "Service does not exist or target persistently unavailable"
+  action: "Escalate for investigation - may be intentional removal or networking issue"
+
+tags:
+  - prometheus
+  - monitoring
+  - scrape
+  - service
+
+related_alerts:
+  - KubePodCrashLooping
+  - KubePodNotReady
+  - PrometheusJobMissing

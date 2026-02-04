@@ -1,0 +1,104 @@
+# KubeDeploymentReplicasMismatch - Machine Executable Runbook (v2 Schema)
+
+alertname: KubeDeploymentReplicasMismatch
+title: "Scale deployment to desired replicas"
+description: "Deployment has fewer ready replicas than desired - check rollout status and fix"
+severity: warning
+clusters:
+  - prod
+  - agentic
+  - monit
+
+automation_level: prompted
+
+steps:
+  - order: 1
+    action: "Get deployment status"
+    tool: kubectl_get_deployments
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      name: "{alert.labels.deployment}"
+    risk: low
+
+  - order: 2
+    action: "Check rollout status"
+    tool: kubectl_rollout_status
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      deployment_name: "{alert.labels.deployment}"
+    risk: low
+
+  - order: 3
+    action: "Get deployment events"
+    tool: kubectl_get_events
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      field_selector: "involvedObject.name={alert.labels.deployment}"
+    risk: low
+
+  - order: 4
+    action: "Get pods for this deployment"
+    tool: kubectl_get_pods
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      label_selector: "app={alert.labels.deployment}"
+    risk: low
+
+  - order: 5
+    action: "Restart deployment to trigger fresh rollout"
+    tool: kubectl_restart_deployment
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      deployment_name: "{alert.labels.deployment}"
+    risk: medium
+    condition: "rollout_stuck_duration > 10m"
+    rollback_tool: kubectl_rollout_status  # Just verify status
+    rollback_args:
+      namespace: "{alert.labels.namespace}"
+      deployment_name: "{alert.labels.deployment}"
+
+verification_steps:
+  - order: 1
+    action: "Verify deployment rollout completed"
+    tool: kubectl_rollout_status
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      deployment_name: "{alert.labels.deployment}"
+    expected:
+      status: "successfully rolled out"
+    wait_seconds: 120
+
+  - order: 2
+    action: "Verify replica count matches desired"
+    tool: kubectl_get_deployments
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      name: "{alert.labels.deployment}"
+    expected:
+      ready_replicas_equals_desired: true
+    wait_seconds: 30
+
+rollback_steps:
+  - order: 1
+    action: "Undo deployment rollout"
+    tool: kubectl_rollout_status  # Note: would need kubectl rollout undo
+    arguments:
+      namespace: "{alert.labels.namespace}"
+      deployment_name: "{alert.labels.deployment}"
+    risk: medium
+
+escalation:
+  condition: "resource_quota_exceeded or persistent_failure"
+  reason: "Deployment cannot scale due to resource constraints or persistent issues"
+  action: "Escalate to human for capacity planning or investigation"
+
+tags:
+  - kubernetes
+  - deployment
+  - replicas
+  - scaling
+
+related_alerts:
+  - KubePodCrashLooping
+  - KubePodNotReady
+  - KubeDeploymentRolloutStuck
