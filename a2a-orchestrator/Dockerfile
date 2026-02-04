@@ -2,15 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Copy source and config
 COPY pyproject.toml .
-RUN pip install --no-cache-dir .
-
-# Copy source
 COPY src/ src/
 
 # Install the package
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir .
 
 # Run as non-root
 RUN useradd -m -u 1000 app
