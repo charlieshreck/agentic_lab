@@ -131,6 +131,215 @@ data:
     _static_context_timestamp = None
 
     # ============================================================================
+    # TOOL CATALOG - Safe MCP tools for plan execution
+    # ============================================================================
+
+    # Auth token for MCP REST bridge
+    A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
+
+    # Tool-to-MCP mapping with required arguments
+    TOOL_CATALOG = {
+        # Kubernetes Pod Operations
+        "kubectl_delete_pod": {"mcp": "infrastructure", "required": ["namespace", "pod_name"], "risk": "medium"},
+        "kubectl_get_pods": {"mcp": "infrastructure", "required": ["namespace"], "risk": "low"},
+        "kubectl_logs": {"mcp": "infrastructure", "required": ["pod_name", "namespace"], "risk": "low"},
+
+        # Kubernetes Deployment Operations
+        "kubectl_restart_deployment": {"mcp": "infrastructure", "required": ["deployment_name", "namespace"], "risk": "medium"},
+        "kubectl_scale_deployment": {"mcp": "infrastructure", "required": ["deployment_name", "namespace", "replicas"], "risk": "high"},
+        "kubectl_get_deployments": {"mcp": "infrastructure", "required": ["namespace"], "risk": "low"},
+        "kubectl_rollout_status": {"mcp": "infrastructure", "required": ["deployment_name", "namespace"], "risk": "low"},
+
+        # Kubernetes Service Operations
+        "kubectl_get_services": {"mcp": "infrastructure", "required": ["namespace"], "risk": "low"},
+        "kubectl_get_events": {"mcp": "infrastructure", "required": ["namespace"], "risk": "low"},
+
+        # ArgoCD Operations
+        "argocd_sync_application": {"mcp": "infrastructure", "required": ["app_name"], "risk": "medium"},
+        "argocd_get_applications": {"mcp": "infrastructure", "required": [], "risk": "low"},
+
+        # Alerting Operations
+        "create_silence": {"mcp": "observability", "required": ["matchers", "duration"], "risk": "low"},
+        "delete_silence": {"mcp": "observability", "required": ["silence_id"], "risk": "low"},
+        "list_alerts": {"mcp": "observability", "required": [], "risk": "low"},
+
+        # Metrics Operations
+        "query_metrics_instant": {"mcp": "observability", "required": ["query"], "risk": "low"},
+    }
+
+    # MCP base URLs by domain
+    MCP_DOMAIN_URLS = {
+        "infrastructure": INFRASTRUCTURE_MCP_URL,
+        "observability": os.environ.get("OBSERVABILITY_MCP_URL", "http://observability-mcp:8000"),
+        "knowledge": KNOWLEDGE_MCP_URL,
+    }
+
+    # Command-to-tool patterns for backwards compatibility
+    COMMAND_TO_TOOL_PATTERNS = [
+        # kubectl delete pod <pod> -n <namespace>
+        (r"kubectl\s+delete\s+pods?\s+([a-z0-9][a-z0-9\-\.]*)\s+(?:-n\s+|--namespace[=\s])([a-z0-9][a-z0-9\-]*)",
+         "kubectl_delete_pod", lambda m: {"pod_name": m.group(1), "namespace": m.group(2)}),
+        # kubectl delete pod <pod> (default namespace)
+        (r"kubectl\s+delete\s+pods?\s+([a-z0-9][a-z0-9\-\.]*)\s*$",
+         "kubectl_delete_pod", lambda m: {"pod_name": m.group(1), "namespace": "default"}),
+        # kubectl rollout restart deployment/<name> -n <namespace>
+        (r"kubectl\s+rollout\s+restart\s+deployment[/]?([a-z0-9][a-z0-9\-]*)\s+(?:-n\s+|--namespace[=\s])([a-z0-9][a-z0-9\-]*)",
+         "kubectl_restart_deployment", lambda m: {"deployment_name": m.group(1), "namespace": m.group(2)}),
+        # kubectl scale deployment/<name> --replicas=N -n <namespace>
+        (r"kubectl\s+scale\s+deployment[/]?([a-z0-9][a-z0-9\-]*)\s+--replicas[=\s]?(\d+)\s+(?:-n\s+|--namespace[=\s])([a-z0-9][a-z0-9\-]*)",
+         "kubectl_scale_deployment", lambda m: {"deployment_name": m.group(1), "replicas": int(m.group(2)), "namespace": m.group(3)}),
+        # argocd app sync <app>
+        (r"argocd\s+app\s+sync\s+([a-z0-9][a-z0-9\-]*)",
+         "argocd_sync_application", lambda m: {"app_name": m.group(1)}),
+    ]
+
+    def command_to_tool(command: str) -> tuple:
+        """Convert a shell command to a tool call.
+
+        Returns:
+            Tuple of (tool_name, arguments) or (None, None) if no match
+        """
+        command = command.strip()
+        for pattern, tool_name, extractor in COMMAND_TO_TOOL_PATTERNS:
+            match = re.search(pattern, command, re.IGNORECASE)
+            if match:
+                try:
+                    args = extractor(match)
+                    logger.info(f"Mapped command to tool: {tool_name} with args {args}")
+                    return tool_name, args
+                except Exception as e:
+                    logger.warning(f"Failed to extract args from command: {e}")
+                    continue
+        return None, None
+
+    async def call_mcp_rest(mcp_url: str, tool_name: str, arguments: dict) -> dict:
+        """Call MCP tool via REST bridge (/api/call).
+
+        This is the safe execution path for plan steps.
+
+        Args:
+            mcp_url: Base URL of the MCP server
+            tool_name: Name of the tool to call
+            arguments: Tool arguments
+
+        Returns:
+            Dict with status, output, and optional error
+        """
+        headers = {"Content-Type": "application/json"}
+        if A2A_API_TOKEN:
+            headers["Authorization"] = f"Bearer {A2A_API_TOKEN}"
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(
+                    f"{mcp_url}/api/call",
+                    json={"tool": tool_name, "arguments": arguments},
+                    headers=headers
+                )
+                result = response.json()
+
+                if response.status_code == 200 and result.get("status") == "success":
+                    return {
+                        "success": True,
+                        "tool": tool_name,
+                        "output": result.get("output"),
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "tool": tool_name,
+                        "error": result.get("error", f"HTTP {response.status_code}"),
+                    }
+            except Exception as e:
+                logger.error(f"REST bridge call failed: {tool_name} - {e}")
+                return {
+                    "success": False,
+                    "tool": tool_name,
+                    "error": str(e),
+                }
+
+    async def capture_pre_state(pre_capture: list, arguments: dict) -> dict:
+        """Capture pre-execution state for rollback.
+
+        Args:
+            pre_capture: List of state capture definitions
+            arguments: Tool arguments (for context like namespace, deployment_name)
+
+        Returns:
+            Dict of captured values keyed by capture key
+        """
+        captured = {}
+        for capture in pre_capture:
+            capture_tool = capture.get("tool")
+            capture_key = capture.get("key")
+            extract_path = capture.get("extract")
+
+            if not capture_tool or not capture_key:
+                continue
+
+            # Build arguments for the capture tool from the main arguments
+            capture_args = {}
+            spec = TOOL_CATALOG.get(capture_tool, {})
+            for req_arg in spec.get("required", []):
+                if req_arg in arguments:
+                    capture_args[req_arg] = arguments[req_arg]
+
+            # Get MCP URL for the capture tool
+            mcp_domain = spec.get("mcp", "infrastructure")
+            mcp_url = MCP_DOMAIN_URLS.get(mcp_domain, INFRASTRUCTURE_MCP_URL)
+
+            result = await call_mcp_rest(mcp_url, capture_tool, capture_args)
+            if result.get("success"):
+                output = result.get("output", {})
+                # Try to extract the specific field
+                if isinstance(output, str):
+                    try:
+                        output = json.loads(output)
+                    except:
+                        pass
+
+                if isinstance(output, dict) and extract_path:
+                    # Simple dot-notation extraction
+                    value = output
+                    for part in extract_path.split("."):
+                        if isinstance(value, dict):
+                            value = value.get(part)
+                        elif isinstance(value, list) and part.isdigit():
+                            value = value[int(part)]
+                        else:
+                            value = None
+                            break
+                    captured[capture_key] = value
+                else:
+                    captured[capture_key] = output
+
+                logger.info(f"Captured state: {capture_key}={captured[capture_key]}")
+
+        return captured
+
+    def substitute_captured(template: dict, captured: dict) -> dict:
+        """Substitute {captured.key} placeholders in rollback args.
+
+        Args:
+            template: Dict with potential placeholders
+            captured: Dict of captured values
+
+        Returns:
+            Dict with placeholders substituted
+        """
+        result = {}
+        for key, value in template.items():
+            if isinstance(value, str):
+                # Replace {captured.X} with actual value
+                def replacer(m):
+                    cap_key = m.group(1)
+                    return str(captured.get(cap_key, m.group(0)))
+                result[key] = re.sub(r'\{captured\.(\w+)\}', replacer, value)
+            else:
+                result[key] = value
+        return result
+
+    # ============================================================================
     # SYSTEM PROMPT - Injected into all LLM calls
     # ============================================================================
 
@@ -367,28 +576,37 @@ data:
             return re.sub(r'\{\{(\w+)\}\}', replacer, text)
 
         async def _execute_command(self, command: str, timeout: int = 30) -> tuple:
-            """Execute a command via infrastructure MCP and return (success, output)."""
+            """Execute a command via MCP tool (using REST bridge).
+
+            First tries to convert the command to a tool call.
+            Falls back to error if command is not supported.
+            """
             cmd = self._substitute_variables(command)
             self.execution_log.append(f"EXEC: {cmd}")
 
-            async with httpx.AsyncClient(timeout=float(timeout + 10)) as client:
-                try:
-                    response = await client.post(
-                        INFRASTRUCTURE_MCP_URL + "/execute",
-                        json={"command": cmd, "timeout": timeout}
-                    )
-                    if response.status_code == 200:
-                        result = response.json()
-                        output = result.get("output", result.get("stdout", ""))
-                        success = result.get("success", result.get("exit_code", 1) == 0)
-                        self.execution_log.append(f"  -> {'OK' if success else 'FAIL'}: {output[:200]}")
-                        return success, output
-                    # Command execution not available - escalate
-                    self.execution_log.append(f"  -> INFRA MCP unavailable ({response.status_code})")
-                    return False, f"Command execution unavailable (HTTP {response.status_code})"
-                except Exception as e:
-                    self.execution_log.append(f"  -> ERROR: {e}")
-                    return False, str(e)
+            # Try to convert command to tool call
+            tool_name, arguments = command_to_tool(cmd)
+
+            if tool_name:
+                # Execute via REST bridge
+                spec = TOOL_CATALOG.get(tool_name, {})
+                mcp_domain = spec.get("mcp", "infrastructure")
+                mcp_url = MCP_DOMAIN_URLS.get(mcp_domain, INFRASTRUCTURE_MCP_URL)
+
+                result = await call_mcp_rest(mcp_url, tool_name, arguments)
+
+                if result.get("success"):
+                    output = str(result.get("output", ""))
+                    self.execution_log.append(f"  -> OK (tool: {tool_name}): {output[:200]}")
+                    return True, output
+                else:
+                    error = result.get("error", "Unknown error")
+                    self.execution_log.append(f"  -> FAIL (tool: {tool_name}): {error}")
+                    return False, error
+            else:
+                # Command not supported in tool catalog
+                self.execution_log.append(f"  -> UNSUPPORTED: Command not in tool catalog: {cmd[:50]}")
+                return False, f"Command not supported (no tool mapping): {cmd[:50]}..."
 
         def _extract_jsonpath(self, data: str, path: str) -> Any:
             """Extract value using simplified JSONPath."""
@@ -2260,20 +2478,24 @@ data:
         return {"approval_status": "pending", "thread_id": result.get("thread_id", "")}
 
     async def execute_solution(state):
-        """Execute the selected solution - uses runbook executor for diagnostic runbooks."""
+        """Execute the selected solution using MCP tools via REST bridge.
+
+        Supports three execution paths:
+        1. Diagnostic runbook with executor (existing)
+        2. Tool-based steps from A2A v2 schema (new preferred path)
+        3. Legacy commands converted to tool calls (backwards compatible)
+        """
         solution = state["selected_solution"]
         if not solution:
             return {"execution_result": {"success": False, "error": "No solution selected"}}
 
-        # Case 1: Diagnostic runbook with executor
+        # Case 1: Diagnostic runbook with executor (unchanged)
         if solution.get("source") == "diagnostic_runbook" and solution.get("executor"):
             executor = solution["executor"]
             logger.info(f"Executing diagnostic runbook fix via executor")
 
-            # Run the approved fix through the executor
             fix_result = await executor.execute_approved_fix()
 
-            # Update runbook stats
             runbook_id = solution.get("runbook_id")
             if runbook_id:
                 await update_runbook_stats(runbook_id, success=fix_result.get("success", False))
@@ -2289,35 +2511,87 @@ data:
                 }
             }
 
-        # Case 2: Legacy runbook or direct commands
-        commands = solution.get("commands", [])
-        if not commands and solution.get("fix_steps"):
-            # Extract commands from fix_steps
-            commands = [s.get("command", "") for s in solution.get("fix_steps", []) if s.get("command")]
-
-        if not commands:
-            return {"execution_result": {"success": False, "error": "No commands to execute"}}
-
-        logger.info(f"Executing {len(commands)} commands directly")
+        # Case 2: Tool-based execution (from A2A plan or converted commands)
+        steps = solution.get("plan", solution.get("fix_steps", []))
         results = []
-        for cmd in commands:
-            if not cmd:
-                continue
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                try:
-                    response = await client.post(
-                        INFRASTRUCTURE_MCP_URL + "/execute",
-                        json={"command": cmd, "timeout": 60}
-                    )
-                    result = response.json()
-                    results.append(result)
-                    if not result.get("success", True):
-                        logger.warning(f"Command failed: {cmd[:50]}...")
-                except Exception as e:
-                    results.append({"error": str(e), "command": cmd})
-                    logger.error(f"Command error: {e}")
+        rollback_stack = []
+        all_captured = {}
 
-        success = all(r.get("success", True) and "error" not in r for r in results)
+        for step in steps:
+            # Determine tool and arguments
+            tool_name = step.get("tool")
+            arguments = step.get("arguments", {})
+
+            # If no tool specified, try to convert legacy command
+            if not tool_name and step.get("command"):
+                tool_name, arguments = command_to_tool(step.get("command"))
+                if not tool_name:
+                    logger.warning(f"Cannot convert command to tool: {step.get('command', '')[:50]}...")
+                    results.append({
+                        "success": False,
+                        "error": f"Unsupported command: {step.get('command', '')[:50]}",
+                        "step": step.get("order", len(results) + 1),
+                    })
+                    continue
+
+            # Validate tool is in catalog
+            spec = TOOL_CATALOG.get(tool_name)
+            if not spec:
+                logger.warning(f"Tool not in catalog: {tool_name}")
+                results.append({
+                    "success": False,
+                    "error": f"Unknown tool: {tool_name}",
+                    "step": step.get("order", len(results) + 1),
+                })
+                continue
+
+            # Check required arguments
+            missing = [arg for arg in spec.get("required", []) if arg not in arguments]
+            if missing:
+                logger.warning(f"Missing arguments for {tool_name}: {missing}")
+                results.append({
+                    "success": False,
+                    "error": f"Missing required arguments: {missing}",
+                    "step": step.get("order", len(results) + 1),
+                    "tool": tool_name,
+                })
+                continue
+
+            # Capture pre-execution state for rollback (if configured)
+            pre_capture = step.get("pre_capture", [])
+            if pre_capture:
+                captured = await capture_pre_state(pre_capture, arguments)
+                all_captured.update(captured)
+                logger.info(f"Pre-execution state captured: {list(captured.keys())}")
+
+            # Get MCP URL for this tool
+            mcp_domain = spec.get("mcp", "infrastructure")
+            mcp_url = MCP_DOMAIN_URLS.get(mcp_domain, INFRASTRUCTURE_MCP_URL)
+
+            # Execute the tool via REST bridge
+            logger.info(f"Executing tool: {tool_name}({arguments}) via {mcp_domain}-mcp")
+            result = await call_mcp_rest(mcp_url, tool_name, arguments)
+            result["step"] = step.get("order", len(results) + 1)
+            result["action"] = step.get("action", tool_name)
+            results.append(result)
+
+            # Track rollback info if step failed or for potential rollback
+            if step.get("rollback_tool"):
+                rollback_args = step.get("rollback_args", {})
+                # Substitute captured values
+                rollback_args = substitute_captured(rollback_args, all_captured)
+                rollback_stack.append({
+                    "tool": step["rollback_tool"],
+                    "arguments": rollback_args,
+                    "original_step": step.get("order", len(results)),
+                })
+
+            # Stop execution on failure (unless step allows continue)
+            if not result.get("success") and step.get("on_failure", "abort") == "abort":
+                logger.error(f"Step {step.get('order', len(results))} failed, aborting execution")
+                break
+
+        success = all(r.get("success", False) for r in results)
 
         # Update runbook stats if applicable
         runbook_id = solution.get("runbook_id")
@@ -2328,7 +2602,9 @@ data:
             "execution_result": {
                 "success": success,
                 "results": results,
-                "summary": f"Executed {len(results)} commands, {'all succeeded' if success else 'some failed'}"
+                "rollback_stack": rollback_stack if not success else [],
+                "captured_state": all_captured,
+                "summary": f"Executed {len(results)} tool calls, {'all succeeded' if success else 'some failed'}"
             }
         }
 
@@ -4072,6 +4348,15 @@ spec:
               value: "agentic_lab"
             - name: EXTERNAL_MCP_URL
               value: "http://external-mcp:8000"
+            # A2A API token for MCP REST bridge authentication
+            - name: A2A_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-api-token
+                  key: TOKEN
+            # Observability MCP for alerting tools
+            - name: OBSERVABILITY_MCP_URL
+              value: "http://observability-mcp:8000"
             # Project 05: Skill Router Configuration
             - name: SKILL_ROUTER_ENABLED
               value: "true"
