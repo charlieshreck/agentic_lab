@@ -118,6 +118,44 @@ Analyze this alert and provide your assessment.
         raise
 
 
+def _get_attr(finding, attr_name: str, default=None):
+    """Get attribute from finding, supporting both old Finding and new SpecialistFinding.
+
+    Attribute mappings:
+    - agent/specialist: The specialist name
+    - issue/summary: The finding description
+    - recommendation: Only in old Finding (returns None for SpecialistFinding)
+    - evidence: str in old Finding, List[str] in SpecialistFinding
+    """
+    attr_map = {
+        "agent": ["agent", "specialist"],
+        "specialist": ["specialist", "agent"],
+        "issue": ["issue", "summary"],
+        "summary": ["summary", "issue"],
+        "recommendation": ["recommendation"],
+    }
+
+    attrs_to_try = attr_map.get(attr_name, [attr_name])
+
+    for attr in attrs_to_try:
+        if hasattr(finding, attr):
+            value = getattr(finding, attr, None)
+            if value is not None:
+                return value
+
+    return default
+
+
+def _get_evidence(finding) -> str:
+    """Get evidence as string, handling both str and List[str] types."""
+    evidence = getattr(finding, "evidence", None)
+    if evidence is None:
+        return ""
+    if isinstance(evidence, list):
+        return "; ".join(str(e) for e in evidence[:3])
+    return str(evidence)
+
+
 async def gemini_synthesize(
     findings: list,
     alert: Any,
@@ -126,7 +164,7 @@ async def gemini_synthesize(
     """Synthesize findings from multiple specialists.
 
     Args:
-        findings: List of Finding objects from specialists
+        findings: List of Finding or SpecialistFinding objects from specialists
         alert: Original alert
         domain_weights: Weight per domain for prioritization
 
@@ -135,8 +173,8 @@ async def gemini_synthesize(
     """
     if not OPENROUTER_API_KEY:
         # Simple rule-based synthesis without LLM
-        fail_count = sum(1 for f in findings if f.status == "FAIL")
-        warn_count = sum(1 for f in findings if f.status == "WARN")
+        fail_count = sum(1 for f in findings if getattr(f, "status", "PASS") == "FAIL")
+        warn_count = sum(1 for f in findings if getattr(f, "status", "PASS") == "WARN")
 
         if fail_count > 0:
             verdict = "ACTIONABLE"
@@ -148,8 +186,8 @@ async def gemini_synthesize(
             verdict = "FALSE_POSITIVE"
             confidence = 0.6
 
-        issues = [f.issue for f in findings if f.issue]
-        recommendations = [f.recommendation for f in findings if f.recommendation]
+        issues = [_get_attr(f, "issue") for f in findings if _get_attr(f, "issue")]
+        recommendations = [_get_attr(f, "recommendation") for f in findings if _get_attr(f, "recommendation")]
 
         return {
             "verdict": verdict,
@@ -171,14 +209,23 @@ Output JSON with:
 - suggested_action: Specific command or action to take (if actionable)
 """
 
-    findings_text = "\n\n".join([
-        f"**{f.agent.upper()}** (weight: {domain_weights.get(f.agent, 0.5)}):\n"
-        f"Status: {f.status}\n"
-        f"Issue: {f.issue or 'None'}\n"
-        f"Evidence: {f.evidence[:200] if f.evidence else 'None'}\n"
-        f"Recommendation: {f.recommendation or 'None'}"
-        for f in findings
-    ])
+    def format_finding(f):
+        agent = _get_attr(f, "agent", "unknown")
+        status = getattr(f, "status", "UNKNOWN")
+        issue = _get_attr(f, "issue", "None")
+        evidence = _get_evidence(f)[:200] or "None"
+        recommendation = _get_attr(f, "recommendation", "None")
+        weight = domain_weights.get(agent, 0.5)
+
+        return (
+            f"**{agent.upper()}** (weight: {weight}):\n"
+            f"Status: {status}\n"
+            f"Issue: {issue}\n"
+            f"Evidence: {evidence}\n"
+            f"Recommendation: {recommendation}"
+        )
+
+    findings_text = "\n\n".join([format_finding(f) for f in findings])
 
     user_message = f"""
 Alert: {alert.name} ({alert.severity})
@@ -226,5 +273,25 @@ Synthesize these findings into a final verdict and action.
 
     except Exception as e:
         logger.error(f"Synthesis failed, using rule-based: {e}")
-        # Fallback to rule-based
-        return await gemini_synthesize.__wrapped__(findings, alert, domain_weights)
+        # Fallback to rule-based synthesis
+        fail_count = sum(1 for f in findings if getattr(f, "status", "PASS") == "FAIL")
+        warn_count = sum(1 for f in findings if getattr(f, "status", "PASS") == "WARN")
+
+        if fail_count > 0:
+            verdict = "ACTIONABLE"
+            confidence = 0.7 + (fail_count * 0.1)
+        elif warn_count > 0:
+            verdict = "UNKNOWN"
+            confidence = 0.5
+        else:
+            verdict = "FALSE_POSITIVE"
+            confidence = 0.6
+
+        issues = [_get_attr(f, "issue") for f in findings if _get_attr(f, "issue")]
+
+        return {
+            "verdict": verdict,
+            "confidence": min(confidence, 0.95),
+            "synthesis": "; ".join(issues[:3]) if issues else "No significant issues found",
+            "suggested_action": None
+        }

@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 from a2a_orchestrator.llm import gemini_synthesize
 
@@ -25,6 +25,34 @@ SEVERITY_SCORES = {
 }
 
 
+def _get_finding_attr(finding, attr_name: str, default=None):
+    """Get attribute from finding, supporting both old Finding and new SpecialistFinding.
+
+    Attribute mappings:
+    - agent/specialist: The specialist name
+    - issue/summary: The finding description
+    - recommendation: Only in old Finding (returns None for SpecialistFinding)
+    """
+    # Map old attribute names to new ones
+    attr_map = {
+        "agent": ["agent", "specialist"],
+        "specialist": ["specialist", "agent"],
+        "issue": ["issue", "summary"],
+        "summary": ["summary", "issue"],
+        "recommendation": ["recommendation"],  # Only in old Finding
+    }
+
+    attrs_to_try = attr_map.get(attr_name, [attr_name])
+
+    for attr in attrs_to_try:
+        if hasattr(finding, attr):
+            value = getattr(finding, attr, None)
+            if value is not None:
+                return value
+
+    return default
+
+
 async def synthesize_findings(
     findings: list,
     alert,
@@ -36,7 +64,7 @@ async def synthesize_findings(
     Falls back to rule-based synthesis if LLM unavailable.
 
     Args:
-        findings: List of Finding objects from specialists
+        findings: List of Finding or SpecialistFinding objects from specialists
         alert: Original alert
         domain_weights: Weight per domain
 
@@ -73,6 +101,7 @@ def rule_based_synthesis(
     """Rule-based synthesis when LLM unavailable.
 
     Weights findings by domain authority and severity to determine verdict.
+    Supports both old Finding and new SpecialistFinding objects.
     """
     if not findings:
         return SynthesisResult(
@@ -88,17 +117,26 @@ def rule_based_synthesis(
     recommendations = []
 
     for f in findings:
-        weight = domain_weights.get(f.agent, 0.5)
-        severity = SEVERITY_SCORES.get(f.status, 1)
+        # Get agent/specialist name (supports both old and new models)
+        agent_name = _get_finding_attr(f, "agent", "unknown")
+        weight = domain_weights.get(agent_name, 0.5)
+
+        # Get status (same in both models)
+        status = getattr(f, "status", "PASS")
+        severity = SEVERITY_SCORES.get(status, 1)
 
         weighted_score += weight * severity
         total_weight += weight
 
-        if f.issue and f.status in ("FAIL", "WARN", "ERROR"):
-            issues.append(f"{f.agent}: {f.issue}")
+        # Get issue/summary (supports both old and new models)
+        issue_text = _get_finding_attr(f, "issue")
+        if issue_text and status in ("FAIL", "WARN", "ERROR"):
+            issues.append(f"{agent_name}: {issue_text}")
 
-        if f.recommendation:
-            recommendations.append(f.recommendation)
+        # Get recommendation (only in old Finding, None for SpecialistFinding)
+        recommendation = _get_finding_attr(f, "recommendation")
+        if recommendation:
+            recommendations.append(recommendation)
 
     # Normalize score
     if total_weight > 0:
@@ -107,8 +145,8 @@ def rule_based_synthesis(
         normalized_score = 0
 
     # Determine verdict
-    fail_count = sum(1 for f in findings if f.status == "FAIL")
-    error_count = sum(1 for f in findings if f.status == "ERROR")
+    fail_count = sum(1 for f in findings if getattr(f, "status", "PASS") == "FAIL")
+    error_count = sum(1 for f in findings if getattr(f, "status", "PASS") == "ERROR")
 
     if fail_count > 0 or normalized_score >= 2.0:
         verdict = "ACTIONABLE"
