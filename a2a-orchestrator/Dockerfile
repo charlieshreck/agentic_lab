@@ -2,12 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy everything needed for install
-COPY pyproject.toml README.md ./
-COPY src/ src/
+# Install dependencies directly
+RUN pip install --no-cache-dir \
+    fastapi>=0.109.0 \
+    "uvicorn[standard]>=0.27.0" \
+    httpx>=0.26.0 \
+    pydantic>=2.5.0
 
-# Install the package
-RUN pip install --no-cache-dir .
+# Copy source
+COPY src/a2a_orchestrator/ /app/a2a_orchestrator/
 
 # Run as non-root
 RUN useradd -m -u 1000 app
