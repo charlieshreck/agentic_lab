@@ -313,7 +313,7 @@ async def search_runbooks_for_alert(alert: Alert, investigation: dict) -> dict:
     context = " ".join(context_parts)[:300] if context_parts else None
 
     # Use tiered lookup: exact match by alertname first, then semantic fallback
-    result = await call_mcp_tool("knowledge", "get_runbook_for_alert", {
+    result = await call_mcp_tool("knowledge", "lookup_runbook_tiered", {
         "alertname": alert.name,
         "context": context,
         "exact_threshold": RUNBOOK_EXACT_THRESHOLD,
