@@ -42,7 +42,7 @@ spec:
         - name: MATRIX_HOMESERVER
           value: "http://conduit:6167"
         - name: MATRIX_USER_ID
-          value: "@agentic-bot:agentic.local"
+          value: "@alert-bot:agentic.local"
         - name: MATRIX_PASSWORD
           valueFrom:
             secretKeyRef:

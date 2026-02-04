@@ -28,9 +28,8 @@ data:
     max_request_size = 104857600
 
     # Registration settings
-    # Users: chaz, agentic-bot
-    # TEMPORARY: Enabled to create bot user - will be disabled after
-    allow_registration = true
+    # Users: chaz, agentic-bot, alert-bot
+    allow_registration = false
     allow_guest_registration = false
 
     # Admin registration secret for creating users via API
