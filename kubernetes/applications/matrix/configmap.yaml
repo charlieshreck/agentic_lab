@@ -29,7 +29,8 @@ data:
 
     # Registration settings
     # Users: chaz, agentic-bot
-    allow_registration = false
+    # TEMPORARY: Enabled to create bot user - will be disabled after
+    allow_registration = true
     allow_guest_registration = false
 
     # Admin registration secret for creating users via API
