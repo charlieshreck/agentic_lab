@@ -115,6 +115,11 @@ data:
     BRAIN_TRUST_COLLECTION_ID = os.environ.get("BRAIN_TRUST_COLLECTION_ID", "9bd8c738-4505-494a-a867-74349a887dc6")
     OUTLINE_MCP_URL = os.environ.get("OUTLINE_MCP_URL", "http://outline-mcp:8000")
 
+    # A2A Orchestrator - handles all reasoning (investigate, plan, validate)
+    A2A_URL = os.environ.get("A2A_URL", "http://a2a-orchestrator.ai-platform.svc.cluster.local:8000")
+    A2A_ENABLED = os.environ.get("A2A_ENABLED", "true").lower() == "true"
+    A2A_TIMEOUT = float(os.environ.get("A2A_TIMEOUT", "30.0"))
+
     # Skill Router Configuration (Project 05)
     # When enabled, routes requests through skill_router before assess_alert
     SKILL_ROUTER_ENABLED = os.environ.get("SKILL_ROUTER_ENABLED", "false").lower() == "true"
@@ -906,6 +911,128 @@ data:
             except Exception as e:
                 logger.error("Matrix bot call failed: %s", e)
                 return {"error": str(e)}
+
+    # ============================================================================
+    # A2A ORCHESTRATOR - Gemini-powered parallel specialist agents
+    # ============================================================================
+
+    async def call_a2a_investigate(alert: dict, request_id: str) -> dict:
+        """Call A2A /v1/investigate endpoint for parallel specialist investigation."""
+        if not A2A_ENABLED:
+            logger.info("A2A disabled, skipping investigation")
+            return {"error": "A2A disabled", "fallback": True}
+
+        async with httpx.AsyncClient(timeout=A2A_TIMEOUT) as client:
+            try:
+                response = await client.post(
+                    A2A_URL + "/v1/investigate",
+                    json={
+                        "request_id": request_id,
+                        "alert": {
+                            "name": alert.get("alertname", alert.get("name", "unknown")),
+                            "labels": {
+                                "namespace": alert.get("namespace"),
+                                "pod": alert.get("pod"),
+                                "service": alert.get("service"),
+                                "node": alert.get("node"),
+                            },
+                            "severity": alert.get("severity", "warning"),
+                            "description": alert.get("description", alert.get("summary", "")),
+                            "fingerprint": alert.get("fingerprint", alert.get("id", "")),
+                        },
+                        "context": {}
+                    }
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.TimeoutException:
+                logger.warning("A2A investigate timed out after %ss", A2A_TIMEOUT)
+                return {"error": "timeout", "fallback": True}
+            except Exception as e:
+                logger.error("A2A investigate failed: %s", e)
+                return {"error": str(e), "fallback": True}
+
+    async def call_a2a_plan_and_decide(alert: dict, investigation: dict, request_id: str) -> dict:
+        """Call A2A /v1/plan_and_decide endpoint for runbook matching and decision."""
+        if not A2A_ENABLED:
+            logger.info("A2A disabled, skipping plan_and_decide")
+            return {"error": "A2A disabled", "fallback": True}
+
+        async with httpx.AsyncClient(timeout=A2A_TIMEOUT) as client:
+            try:
+                response = await client.post(
+                    A2A_URL + "/v1/plan_and_decide",
+                    json={
+                        "request_id": request_id,
+                        "alert": {
+                            "name": alert.get("alertname", alert.get("name", "unknown")),
+                            "labels": {
+                                "namespace": alert.get("namespace"),
+                                "pod": alert.get("pod"),
+                                "service": alert.get("service"),
+                                "node": alert.get("node"),
+                            },
+                            "severity": alert.get("severity", "warning"),
+                            "description": alert.get("description", alert.get("summary", "")),
+                            "fingerprint": alert.get("fingerprint", alert.get("id", "")),
+                        },
+                        "investigation": investigation,
+                        "context": {}
+                    }
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.TimeoutException:
+                logger.warning("A2A plan_and_decide timed out after %ss", A2A_TIMEOUT)
+                return {"error": "timeout", "fallback": True}
+            except Exception as e:
+                logger.error("A2A plan_and_decide failed: %s", e)
+                return {"error": str(e), "fallback": True}
+
+    async def call_a2a_validate_and_document(
+        alert: dict,
+        investigation: dict,
+        plan: dict,
+        execution_result: dict,
+        request_id: str
+    ) -> dict:
+        """Call A2A /v1/validate_and_document endpoint for resolution validation."""
+        if not A2A_ENABLED:
+            logger.info("A2A disabled, skipping validate_and_document")
+            return {"error": "A2A disabled", "fallback": True}
+
+        async with httpx.AsyncClient(timeout=A2A_TIMEOUT) as client:
+            try:
+                response = await client.post(
+                    A2A_URL + "/v1/validate_and_document",
+                    json={
+                        "request_id": request_id,
+                        "alert": {
+                            "name": alert.get("alertname", alert.get("name", "unknown")),
+                            "labels": {
+                                "namespace": alert.get("namespace"),
+                                "pod": alert.get("pod"),
+                                "service": alert.get("service"),
+                                "node": alert.get("node"),
+                            },
+                            "severity": alert.get("severity", "warning"),
+                            "description": alert.get("description", alert.get("summary", "")),
+                            "fingerprint": alert.get("fingerprint", alert.get("id", "")),
+                        },
+                        "investigation": investigation,
+                        "plan": plan,
+                        "execution_result": execution_result,
+                        "context": {}
+                    }
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.TimeoutException:
+                logger.warning("A2A validate_and_document timed out after %ss", A2A_TIMEOUT)
+                return {"error": "timeout", "fallback": True}
+            except Exception as e:
+                logger.error("A2A validate_and_document failed: %s", e)
+                return {"error": str(e), "fallback": True}
 
     # ============================================================================
     # BRAIN TRUST ESCALATION - Outline-based human review workflow
@@ -1778,129 +1905,82 @@ data:
     Respond with JSON array containing objects with: name, description, impact, risk, commands"""
 
     async def assess_alert(state):
-        """Assess alert using TIERED runbook matching with Brain Trust escalation.
+        """Assess alert using A2A Orchestrator for parallel specialist investigation.
 
-        Match Types:
-        - EXACT (>= 0.95): Execute runbook as-is
-        - SIMILAR (>= 0.80): Execute with tweaks, propose runbook update
-        - NO_MATCH (< 0.80): Escalate to Brain Trust (humans via Outline)
+        A2A handles all reasoning - LangGraph only orchestrates.
+        Falls back to Brain Trust escalation if A2A unavailable.
         """
         alert = state["alert"]
-        alert_text = f"{alert.get('alertname', '')} {alert.get('description', '')}"
+        request_id = state.get("request_id", str(uuid_mod.uuid4()))
+        alert_name = alert.get("alertname", alert.get("name", "unknown"))
 
         # Step 0: Check temporal patterns (recurring alerts)
         alert_fingerprint = alert.get("fingerprint", alert.get("id", ""))
-        alert_name = alert.get("alertname", "")
         temporal_pattern = await check_temporal_patterns(alert_fingerprint, alert_name)
 
-        # Step 1: Search Qdrant for diagnostic runbooks
-        logger.info("Searching for matching diagnostic runbooks...")
-        runbooks = await search_runbooks_qdrant(alert_text, limit=3)
+        # Step 1: Call A2A /v1/investigate for parallel specialist investigation
+        logger.info(f"[A2A] Investigating alert: {alert_name}")
+        investigation = await call_a2a_investigate(alert, request_id)
 
-        runbook_match = None
-        executor_result = None
-        match_type = "NO_MATCH"
-
-        # Step 2: Classify match using tiered thresholds
-        if runbooks and runbooks[0].get("score", 0) > 0:
-            match = runbooks[0]
-            score = match.get("score", 0)
-            match_type = classify_runbook_match(score)
-            logger.info(f"Runbook match: {match.get('name', 'Unknown')} (score: {score:.2f}, type: {match_type})")
-
-            # Only process if we have at least a SIMILAR match
-            if match_type in ["EXACT", "SIMILAR"]:
-                if match.get("version") == 2 and match.get("runbook"):
-                    # V2 diagnostic runbook - run full diagnosis
-                    runbook = match["runbook"]
-                    logger.info(f"Running diagnostic runbook: {runbook.name} (match: {match_type})")
-
-                    executor = RunbookExecutor(runbook, alert)
-                    executor_result = await executor.execute()
-
-                    runbook_match = {
-                        "id": match["id"],
-                        "score": score,
-                        "name": runbook.name,
-                        "version": 2,
-                        "match_type": match_type,
-                        "runbook": runbook,
-                        "executor": executor,
-                        "executor_result": executor_result
-                    }
-                else:
-                    # V1 legacy runbook
-                    runbook_match = {
-                        "id": match["id"],
-                        "score": score,
-                        "name": match.get("name", "Unknown"),
-                        "version": 1,
-                        "match_type": match_type,
-                        "steps": match.get("steps", []),
-                        "fix_command": match.get("fix_command", "")
-                    }
-
-        # Step 3: Build assessment based on match type and executor results
-        if executor_result:
-            assessment = {
-                "domain": "infrastructure",
-                "complexity": "low" if executor_result.get("action") == "fix_ready" else "medium",
-                "requires_approval": executor_result.get("requires_approval", True),
-                "confidence": executor_result.get("confidence", 0),
-                "diagnosis_result": executor_result.get("diagnosis_result", "unknown"),
-                "escalated": executor_result.get("escalated", False),
-                "escalation_reason": executor_result.get("escalation_reason"),
-                "similar_runbook": runbook_match.get("name") if runbook_match else None,
-                "similarity_score": runbook_match.get("score", 0) if runbook_match else 0,
-                "match_type": match_type,
-                "recommended_topic": "infrastructure"
-            }
-
-            # SIMILAR matches may need tweaks - flag for potential runbook update
-            if match_type == "SIMILAR":
-                assessment["needs_runbook_update"] = True
-                assessment["tweaks_applied"] = []  # Will be populated during execution
-
-        elif match_type == "NO_MATCH":
-            # No matching runbook - use Ollama for basic assessment, then escalate
-            prompt = build_assessment_prompt(alert, runbooks)
-            logger.info("No matching runbook (score < 0.80) - assessing with Ollama...")
-            result = await call_litellm([
-                {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ])
-
-            try:
-                clean_result = result.strip()
-                if "```json" in clean_result:
-                    clean_result = clean_result.split("```json")[1].split("```")[0]
-                elif "```" in clean_result:
-                    clean_result = clean_result.split("```")[1].split("```")[0]
-                assessment = json.loads(clean_result.strip())
-            except:
-                assessment = {
-                    "domain": "infrastructure",
-                    "complexity": "high",
-                    "requires_approval": True,
-                    "recommended_topic": "infrastructure"
-                }
-
-            # Mark for Brain Trust escalation
-            assessment["escalated"] = True
-            assessment["match_type"] = "NO_MATCH"
-            assessment["escalation_reason"] = "No matching runbook found (score < 0.80) - escalating to Brain Trust"
-            assessment["ollama_analysis"] = result[:1000] if result else None
-        else:
-            # Should not reach here, but handle edge case
+        # Check for A2A failure - escalate to Brain Trust
+        if investigation.get("error") or investigation.get("fallback"):
+            logger.warning(f"[A2A] Investigation failed, escalating to Brain Trust: {investigation.get('error')}")
             assessment = {
                 "domain": "infrastructure",
                 "complexity": "high",
                 "requires_approval": True,
                 "escalated": True,
-                "match_type": match_type,
-                "escalation_reason": "Unexpected assessment path",
-                "recommended_topic": "infrastructure"
+                "match_type": "NO_MATCH",
+                "escalation_reason": f"A2A investigation failed: {investigation.get('error', 'unknown')} - escalating to Brain Trust",
+                "recommended_topic": "infrastructure",
+                "confidence": 0.0,
+                "a2a_error": investigation.get("error")
             }
+            assessment["temporal_pattern"] = temporal_pattern
+            return {
+                "assessment": assessment,
+                "runbook_match": {},
+                "match_type": "NO_MATCH",
+                "handled_locally": False,
+                "temporal_pattern": temporal_pattern,
+                "a2a_investigation": None
+            }
+
+        # Step 2: Process A2A investigation results
+        verdict = investigation.get("verdict", "UNKNOWN")
+        confidence = investigation.get("confidence", 0.5)
+        synthesis = investigation.get("synthesis", "")
+        findings = investigation.get("findings", [])
+
+        logger.info(f"[A2A] Investigation complete: {verdict} ({confidence:.0%} confidence)")
+
+        # Map A2A verdict to assessment
+        if verdict == "ACTIONABLE":
+            escalated = False
+            complexity = "low" if confidence >= 0.8 else "medium"
+        elif verdict == "FALSE_POSITIVE":
+            escalated = False
+            complexity = "low"
+        else:  # UNKNOWN
+            escalated = True
+            complexity = "high"
+
+        # Build assessment from A2A investigation
+        assessment = {
+            "domain": investigation.get("recommended_domain", "infrastructure"),
+            "complexity": complexity,
+            "requires_approval": True,  # Always require approval initially
+            "confidence": confidence,
+            "diagnosis_result": verdict.lower(),
+            "escalated": escalated,
+            "escalation_reason": investigation.get("escalation_reason") if escalated else None,
+            "match_type": "A2A_INVESTIGATED",  # New match type for A2A
+            "recommended_topic": investigation.get("recommended_domain", "infrastructure"),
+            "a2a_verdict": verdict,
+            "a2a_synthesis": synthesis,
+            "a2a_findings": findings,
+            "suggested_action": investigation.get("suggested_action")
+        }
 
         # Add temporal pattern info to assessment
         assessment["temporal_pattern"] = temporal_pattern
@@ -1911,195 +1991,187 @@ data:
                 f"({temporal_pattern['occurrence_count']} occurrences, priority: {temporal_pattern['escalation_priority']})"
             )
 
+        # Handle escalation for inconclusive/conflicting findings
+        if verdict in ["INCONCLUSIVE", "CONFLICTING"] or (verdict == "UNKNOWN" and confidence < 0.5):
+            assessment["escalated"] = True
+            assessment["escalation_reason"] = f"A2A investigation: {verdict} - needs human review"
+
         return {
             "assessment": assessment,
-            "runbook_match": runbook_match or {},
-            "match_type": match_type,
-            "handled_locally": match_type in ["EXACT", "SIMILAR"] and not assessment.get("escalated", False),
-            "temporal_pattern": temporal_pattern
+            "runbook_match": {},  # Runbook matching happens in plan_and_decide
+            "match_type": "A2A_INVESTIGATED",
+            "handled_locally": not assessment.get("escalated", False) and verdict == "ACTIONABLE",
+            "temporal_pattern": temporal_pattern,
+            "a2a_investigation": investigation
         }
 
     async def generate_solutions(state):
-        """Generate solutions using TIERED runbook matching with Brain Trust escalation.
+        """Generate solutions using A2A Orchestrator for planning and decision.
 
-        Match handling:
-        - EXACT (>= 0.95): Execute runbook as documented
-        - SIMILAR (>= 0.80): Execute with Ollama-determined tweaks, propose runbook update
-        - NO_MATCH (< 0.80): Escalate to Brain Trust (humans via Outline)
+        A2A handles runbook matching, plan generation, and decision (EXECUTE/ESCALATE/WAIT).
+        Falls back to Brain Trust escalation if A2A unavailable.
         """
         alert = state["alert"]
         assessment = state["assessment"]
-        runbook_match = state.get("runbook_match", {})
-        match_type = state.get("match_type", runbook_match.get("match_type", "NO_MATCH"))
+        request_id = state.get("request_id", str(uuid_mod.uuid4()))
+        a2a_investigation = state.get("a2a_investigation")
 
-        # =====================================================================
-        # Case 1: EXACT or SIMILAR match with V2 diagnostic runbook
-        # =====================================================================
-        if runbook_match.get("version") == 2 and runbook_match.get("executor_result"):
-            executor_result = runbook_match["executor_result"]
-            runbook = runbook_match.get("runbook")
-
-            if executor_result.get("action") == "fix_ready":
-                # Diagnosis passed, fix is ready to apply
-                logger.info(f"Runbook diagnosis passed (confidence: {executor_result.get('confidence', 0):.2f}, match: {match_type})")
-
-                solutions = [{
-                    "name": f"Apply Runbook: {runbook.name}",
-                    "description": f"Diagnosis: {executor_result.get('diagnosis_result', 'confirmed')} (confidence: {executor_result.get('confidence', 0):.0%})",
-                    "impact": "low",
-                    "risk": "low",
-                    "fix_steps": executor_result.get("fix_steps", []),
-                    "source": "diagnostic_runbook",
-                    "match_type": match_type,
-                    "runbook_id": runbook_match.get("id"),
-                    "runbook": runbook,
-                    "executor": runbook_match.get("executor"),
-                    "gathered_info": executor_result.get("gathered_info", {})
-                }]
-
-                # For SIMILAR matches, flag for potential runbook update after execution
-                if match_type == "SIMILAR":
-                    solutions[0]["propose_update"] = True
-                    solutions[0]["similarity_score"] = runbook_match.get("score", 0)
-
-                return {"solutions": solutions, "handled_locally": True, "match_type": match_type}
-
-            elif executor_result.get("action") == "escalate":
-                # Diagnosis determined escalation is needed - escalate to Brain Trust
-                logger.info(f"Escalating to Brain Trust: {executor_result.get('escalation_reason')}")
-
-                # Update escalation stats
-                await update_runbook_stats(runbook_match.get("id"), success=False, escalated=True)
-
-                # Escalate to Brain Trust (humans via Outline) instead of cloud LLM
-                escalation_result = await escalate_to_brain_trust(
-                    alert=alert,
-                    context={
-                        "assessment": assessment,
-                        "gathered_info": executor_result.get("gathered_info", {}),
-                        "diagnosis": {
-                            "result": executor_result.get("diagnosis_result"),
-                            "confidence": executor_result.get("confidence"),
-                            "execution_log": executor_result.get("execution_log", [])
-                        }
-                    },
-                    reason=executor_result.get("escalation_reason", "Runbook executor determined escalation needed"),
-                    suggestions=[]
-                )
-
-                # Return escalation status as solution
-                solutions = [{
+        # If already escalated in assess_alert, continue escalation
+        if assessment.get("escalated"):
+            logger.info(f"Assessment already escalated: {assessment.get('escalation_reason')}")
+            escalation_result = await escalate_to_brain_trust(
+                alert=alert,
+                context={
+                    "assessment": assessment,
+                    "a2a_investigation": a2a_investigation,
+                },
+                reason=assessment.get("escalation_reason", "Assessment determined escalation needed"),
+                suggestions=[{
+                    "name": "A2A Investigation Summary",
+                    "description": assessment.get("a2a_synthesis", "Investigation complete"),
+                    "risk": "unknown"
+                }] if assessment.get("a2a_synthesis") else []
+            )
+            return {
+                "solutions": [{
                     "name": f"Brain Trust Review: {alert.get('alertname', 'Unknown')}",
-                    "description": f"Escalated to Brain Trust for human review. Reason: {executor_result.get('escalation_reason')}",
+                    "description": assessment.get("escalation_reason", "Escalated for human review"),
                     "impact": "pending",
                     "risk": "pending",
                     "source": "brain_trust_escalation",
                     "escalation_document": escalation_result.get("document_id"),
                     "requires_human_action": True
-                }]
-                return {"solutions": solutions, "handled_locally": False, "escalated_to_brain_trust": True}
+                }],
+                "handled_locally": False,
+                "escalated_to_brain_trust": True
+            }
 
-        # =====================================================================
-        # Case 2: SIMILAR or EXACT match with V1 legacy runbook
-        # =====================================================================
-        elif runbook_match.get("version") == 1 and match_type in ["EXACT", "SIMILAR"]:
-            logger.info(f"Using legacy runbook: {runbook_match.get('name')} (match: {match_type})")
+        # Call A2A /v1/plan_and_decide for runbook matching and plan generation
+        logger.info(f"[A2A] Planning for alert: {alert.get('alertname', 'Unknown')}")
+        plan_result = await call_a2a_plan_and_decide(alert, a2a_investigation or {}, request_id)
 
-            solutions = [{
-                "name": f"Apply Runbook: {runbook_match.get('name')}",
-                "description": "Legacy runbook (no diagnostic verification)",
-                "impact": "medium",
-                "risk": "medium",
-                "commands": runbook_match.get("steps", []),
-                "fix_command": runbook_match.get("fix_command"),
-                "source": "legacy_runbook",
-                "match_type": match_type,
-                "runbook_id": runbook_match.get("id")
-            }]
+        # Check for A2A failure - escalate to Brain Trust
+        if plan_result.get("error") or plan_result.get("fallback"):
+            logger.warning(f"[A2A] Plan generation failed, escalating: {plan_result.get('error')}")
+            escalation_result = await escalate_to_brain_trust(
+                alert=alert,
+                context={
+                    "assessment": assessment,
+                    "a2a_investigation": a2a_investigation,
+                    "plan_error": plan_result.get("error")
+                },
+                reason=f"A2A planning failed: {plan_result.get('error', 'unknown')}",
+                suggestions=[]
+            )
+            return {
+                "solutions": [{
+                    "name": f"Brain Trust Review: {alert.get('alertname', 'Unknown')}",
+                    "description": f"A2A planning failed. Escalated for human review.",
+                    "impact": "pending",
+                    "risk": "pending",
+                    "source": "brain_trust_escalation",
+                    "escalation_document": escalation_result.get("document_id"),
+                    "requires_human_action": True
+                }],
+                "handled_locally": False,
+                "escalated_to_brain_trust": True
+            }
 
-            # For SIMILAR matches, flag for potential runbook update
-            if match_type == "SIMILAR":
-                solutions[0]["propose_update"] = True
-                solutions[0]["similarity_score"] = runbook_match.get("score", 0)
+        # Process A2A plan_and_decide result
+        decision = plan_result.get("decision", "ESCALATE")
+        match_type = plan_result.get("match_type", "NO_PLAN")
+        plan_steps = plan_result.get("plan", [])
+        confidence = plan_result.get("confidence", 0)
 
-            return {"solutions": solutions, "handled_locally": True, "match_type": match_type}
+        logger.info(f"[A2A] Plan decision: {decision} (match: {match_type}, confidence: {confidence:.0%})")
 
-        # =====================================================================
-        # Case 3: NO_MATCH - Escalate to Brain Trust
-        # =====================================================================
-        logger.info("No matching runbook (score < 0.80) - escalating to Brain Trust for human review")
+        # Handle ESCALATE decision
+        if decision == "ESCALATE" or match_type == "NO_PLAN":
+            logger.info(f"[A2A] Escalating to Brain Trust: {plan_result.get('escalation_reason')}")
+            escalation_result = await escalate_to_brain_trust(
+                alert=alert,
+                context={
+                    "assessment": assessment,
+                    "a2a_investigation": a2a_investigation,
+                    "a2a_plan": plan_result
+                },
+                reason=plan_result.get("escalation_reason", plan_result.get("decision_rationale", "A2A decided escalation")),
+                suggestions=[{
+                    "name": "A2A Suggested Action",
+                    "description": assessment.get("suggested_action", "Review required"),
+                    "risk": plan_result.get("risk_level", "unknown")
+                }] if assessment.get("suggested_action") else []
+            )
+            return {
+                "solutions": [{
+                    "name": f"Brain Trust Review: {alert.get('alertname', 'Unknown')}",
+                    "description": plan_result.get("decision_rationale", "Escalated for human review"),
+                    "impact": "pending",
+                    "risk": "pending",
+                    "source": "brain_trust_escalation",
+                    "escalation_document": escalation_result.get("document_id"),
+                    "requires_human_action": True
+                }],
+                "handled_locally": False,
+                "escalated_to_brain_trust": True
+            }
 
-        # Use Ollama to generate initial analysis and suggestions
-        analysis_prompt = dedent(f"""\
-            Analyze this alert and provide suggestions:
+        # Handle WAIT decision
+        if decision == "WAIT":
+            logger.info("[A2A] Decision: WAIT - will re-evaluate later")
+            return {
+                "solutions": [{
+                    "name": "Wait and Re-evaluate",
+                    "description": plan_result.get("decision_rationale", "A2A suggests waiting before action"),
+                    "impact": "low",
+                    "risk": "low",
+                    "source": "a2a_wait",
+                    "wait_reason": plan_result.get("decision_rationale")
+                }],
+                "handled_locally": False,
+                "wait_and_retry": True
+            }
 
-            ALERT: {alert.get('alertname', 'Unknown')}
-            SEVERITY: {alert.get('severity', 'warning')}
-            DESCRIPTION: {alert.get('description', 'No description')}
-            NAMESPACE: {alert.get('namespace', 'default')}
-            LABELS: {json.dumps(alert.get('labels', {}))}
+        # Handle EXECUTE decision - convert A2A plan to solutions
+        runbook_name = plan_result.get("runbook_name")
+        runbook_id = plan_result.get("runbook_id")
 
-            Provide:
-            1. Likely root cause
-            2. Recommended investigation steps
-            3. Potential fix approaches (if any are obvious)
-
-            Format as JSON with fields: root_cause, investigation_steps, fix_suggestions""")
-
-        ollama_analysis = await call_litellm([
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": analysis_prompt}
-        ])
-
-        # Try to parse Ollama's suggestions
-        suggestions = []
-        try:
-            clean_result = ollama_analysis.strip()
-            if "```json" in clean_result:
-                clean_result = clean_result.split("```json")[1].split("```")[0]
-            elif "```" in clean_result:
-                clean_result = clean_result.split("```")[1].split("```")[0]
-            parsed = json.loads(clean_result.strip())
-
-            if parsed.get("fix_suggestions"):
-                for i, fix in enumerate(parsed["fix_suggestions"][:3]):
-                    suggestions.append({
-                        "name": f"Suggestion {i+1}: {fix if isinstance(fix, str) else fix.get('name', 'Fix')}",
-                        "description": fix if isinstance(fix, str) else fix.get('description', str(fix)),
-                        "risk": "unknown"
-                    })
-        except:
-            # If parsing fails, include raw analysis as suggestion
-            suggestions = [{
-                "name": "Ollama Analysis",
-                "description": ollama_analysis[:800] if ollama_analysis else "Analysis failed",
-                "risk": "unknown"
-            }]
-
-        # Escalate to Brain Trust
-        escalation_result = await escalate_to_brain_trust(
-            alert=alert,
-            context={
-                "assessment": assessment,
-                "ollama_analysis": ollama_analysis[:2000] if ollama_analysis else None
-            },
-            reason="No matching runbook found (score < 0.80 threshold)",
-            suggestions=suggestions
-        )
-
-        # Return escalation status as solution
         solutions = [{
-            "name": f"Brain Trust Review Required: {alert.get('alertname', 'Unknown')}",
-            "description": f"No matching runbook found. Escalated to Brain Trust for human analysis and runbook creation.",
-            "impact": "pending",
-            "risk": "pending",
-            "source": "brain_trust_escalation",
-            "escalation_document": escalation_result.get("document_id"),
-            "ollama_suggestions": suggestions,
-            "requires_human_action": True
+            "name": f"Execute Plan: {runbook_name or alert.get('alertname', 'A2A Plan')}",
+            "description": f"A2A {match_type} plan (confidence: {confidence:.0%}). {plan_result.get('decision_rationale', '')}",
+            "impact": "low" if confidence >= 0.8 else "medium",
+            "risk": plan_result.get("risk_level", "medium"),
+            "fix_steps": [
+                {
+                    "order": step.get("order", i + 1),
+                    "action": step.get("action", ""),
+                    "command": step.get("command"),
+                    "rollback": step.get("rollback"),
+                    "risk": step.get("risk", "low")
+                }
+                for i, step in enumerate(plan_steps)
+            ],
+            "source": "a2a_plan",
+            "match_type": match_type,
+            "runbook_id": runbook_id,
+            "runbook_name": runbook_name,
+            "a2a_confidence": confidence,
+            "requires_approval": plan_result.get("requires_approval", True)
         }]
 
-        return {"solutions": solutions, "handled_locally": False, "escalated_to_brain_trust": True}
+        # Flag SIMILAR/GENERATED matches for runbook updates
+        if match_type in ["SIMILAR", "GENERATED"]:
+            solutions[0]["propose_update"] = True
+            solutions[0]["tweaks_applied"] = plan_result.get("tweaks_applied", [])
+            if plan_result.get("runbook_score"):
+                solutions[0]["similarity_score"] = plan_result["runbook_score"]
+
+        return {
+            "solutions": solutions,
+            "handled_locally": True,
+            "match_type": match_type,
+            "a2a_plan": plan_result
+        }
 
     def _parse_solutions_from_response(result: str, alert: dict) -> list:
         """Parse solutions from Claude's response."""
@@ -2525,7 +2597,10 @@ data:
 
     # ============================================================================
     # VALIDATION SUBGRAPH - Project 03: Evaluator System
-    # 4-node workflow: fetch_context → gather_truth → compute_verdict → record_validation
+    # 3-node workflow with A2A reasoning:
+    #   fetch_context → call_a2a_validation → record_validation
+    # A2A handles: evidence gathering, verdict computation, incident documentation
+    # LangGraph handles: orchestration, context fetching, result recording
     # ============================================================================
 
     # Consolidated MCP URLs for observability tools
@@ -2537,12 +2612,20 @@ data:
         event: dict
         runbook: Optional[dict]
         reported_success: bool
+        # Legacy fields (kept for compatibility)
         ground_truth: dict
         verdict: str  # pending, confirmed, false_positive, false_negative, uncertain
         confidence: float
         actual_success: Optional[bool]
         signal_count: int
         validation_recorded: bool
+        # A2A fields
+        alert: dict  # Reconstructed alert for A2A
+        investigation: dict  # Reconstructed or retrieved investigation
+        plan: dict  # Reconstructed or retrieved plan
+        execution_result: dict  # Execution result for validation
+        a2a_response: dict  # Full A2A validate_and_document response
+        incident_document: dict  # Generated incident documentation
 
     async def call_mcp_tool(mcp_url: str, tool_name: str, arguments: dict = None) -> dict:
         """Generic MCP tool caller using JSON-RPC protocol."""
@@ -2568,7 +2651,7 @@ data:
                 return {}
 
     async def fetch_validation_context(state: ValidationState) -> dict:
-        """Node 1: Fetch event and runbook from knowledge-mcp."""
+        """Node 1: Fetch event and runbook from knowledge-mcp, reconstruct A2A context."""
         event_id = state["event_id"]
         logger.info(f"[VALIDATE] Fetching context for event {event_id}")
 
@@ -2582,202 +2665,174 @@ data:
                 "reported_success": False,
                 "verdict": "uncertain",
                 "confidence": 0.0,
+                "alert": {},
+                "investigation": {},
+                "plan": {},
+                "execution_result": {},
             }
+
+        metadata = event.get("metadata", {})
 
         # Get runbook if referenced
         runbook = None
-        runbook_id = event.get("metadata", {}).get("runbook_id")
+        runbook_id = metadata.get("runbook_id")
         if runbook_id:
             runbook = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_runbook", {"runbook_id": runbook_id})
 
-        reported_success = event.get("metadata", {}).get("success", event.get("resolution") == "completed")
+        reported_success = metadata.get("success", event.get("resolution") == "completed")
+
+        # Reconstruct alert from event metadata for A2A
+        alert = {
+            "name": metadata.get("alert_name", metadata.get("alertname", event.get("event_type", "unknown"))),
+            "labels": {
+                "namespace": metadata.get("namespace"),
+                "pod": metadata.get("pod"),
+                "service": metadata.get("service_name", metadata.get("service")),
+                "node": metadata.get("node"),
+            },
+            "severity": metadata.get("severity", "warning"),
+            "description": event.get("description", ""),
+            "fingerprint": metadata.get("alert_fingerprint", metadata.get("alert_id", event_id)),
+        }
+
+        # Reconstruct investigation context from event metadata
+        investigation = {
+            "request_id": event_id,
+            "grade": metadata.get("investigation_grade", "PARTIAL"),
+            "confidence": metadata.get("investigation_confidence", 0.5),
+            "findings": metadata.get("findings", []),
+            "synthesis": metadata.get("synthesis", ""),
+            "recommended_domain": metadata.get("domain", "general"),
+        }
+
+        # Reconstruct plan context from event metadata
+        plan = {
+            "request_id": event_id,
+            "match_type": metadata.get("match_type", "GENERATED"),
+            "runbook_id": runbook_id,
+            "runbook_name": runbook.get("name") if runbook else None,
+            "plan": metadata.get("plan_steps", []),
+            "decision": metadata.get("decision", "EXECUTE"),
+            "confidence": metadata.get("plan_confidence", 0.5),
+        }
+
+        # Get execution result from event
+        execution_result = {
+            "success": reported_success,
+            "steps_executed": metadata.get("steps_executed", []),
+            "output": metadata.get("execution_output", ""),
+            "errors": metadata.get("execution_errors", []),
+        }
 
         return {
             "event": event,
             "runbook": runbook,
             "reported_success": bool(reported_success),
+            "alert": alert,
+            "investigation": investigation,
+            "plan": plan,
+            "execution_result": execution_result,
         }
 
-    async def gather_ground_truth(state: ValidationState) -> dict:
-        """Node 2: Query observability sources for actual state."""
-        event = state.get("event", {})
-        metadata = event.get("metadata", {})
-        ground_truth = {}
-        signal_count = 0
+    async def call_a2a_validation(state: ValidationState) -> dict:
+        """Node 2: Call A2A /v1/validate_and_document for reasoning.
 
-        if not event:
-            return {"ground_truth": {}, "signal_count": 0}
+        A2A handles all validation reasoning:
+        - Gathering ground truth signals from observability tools
+        - Computing verdict based on evidence
+        - Generating incident documentation
+        """
+        event_id = state["event_id"]
+        alert = state.get("alert", {})
+        investigation = state.get("investigation", {})
+        plan = state.get("plan", {})
+        execution_result = state.get("execution_result", {})
 
-        # Check Keep alert state
-        alert_fingerprint = metadata.get("alert_fingerprint") or metadata.get("alert_id")
-        if alert_fingerprint:
-            try:
-                alert_state = await call_mcp_tool(OBSERVABILITY_MCP_URL, "keep_get_alert", {"alert_id": alert_fingerprint})
-                if alert_state and not alert_state.get("error"):
-                    ground_truth["alert_state"] = {
-                        "status": alert_state.get("status"),
-                        "resolved": alert_state.get("status") in ("resolved", "inactive"),
-                    }
-                    signal_count += 1
-            except Exception as e:
-                logger.warning(f"[VALIDATE] Keep check failed: {e}")
-
-        # Check Coroot service health
-        service_name = metadata.get("service_name")
-        if service_name:
-            try:
-                service_metrics = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_metrics", {"service": service_name})
-                if service_metrics and not service_metrics.get("error"):
-                    ground_truth["service_health"] = service_metrics
-                    signal_count += 1
-            except Exception as e:
-                logger.warning(f"[VALIDATE] Coroot check failed: {e}")
-
-        # Check Gatus endpoint status
-        endpoint = metadata.get("endpoint")
-        if endpoint:
-            try:
-                gatus_status = await call_mcp_tool(OBSERVABILITY_MCP_URL, "gatus_get_endpoint_status", {"endpoint": endpoint})
-                if gatus_status and not gatus_status.get("error"):
-                    ground_truth["endpoint_status"] = gatus_status
-                    signal_count += 1
-            except Exception as e:
-                logger.warning(f"[VALIDATE] Gatus check failed: {e}")
-
-        # Check Kubernetes pod state if namespace/service available
-        namespace = metadata.get("namespace")
-        if namespace and service_name:
-            try:
-                pods = await call_mcp_tool(
-                    INFRASTRUCTURE_MCP_URL, "kubectl_get_pods",
-                    {"namespace": namespace, "label_selector": f"app={service_name}"}
-                )
-                if pods and not pods.get("error"):
-                    pod_list = pods if isinstance(pods, list) else pods.get("pods", [])
-                    running_count = sum(1 for p in pod_list if isinstance(p, dict) and p.get("status") == "Running")
-                    ground_truth["kubernetes"] = {
-                        "total_pods": len(pod_list),
-                        "running_pods": running_count,
-                        "healthy": running_count > 0,
-                    }
-                    signal_count += 1
-            except Exception as e:
-                logger.warning(f"[VALIDATE] Kubernetes check failed: {e}")
-
-        logger.info(f"[VALIDATE] Gathered {signal_count} ground truth signals")
-        return {"ground_truth": ground_truth, "signal_count": signal_count}
-
-    async def compute_verdict(state: ValidationState) -> dict:
-        """Node 3: Deterministic verdict first, Ollama fallback if uncertain (Gemini R1)."""
-        reported_success = state.get("reported_success", False)
-        ground_truth = state.get("ground_truth", {})
-        signal_count = state.get("signal_count", 0)
-
-        # No signals = uncertain
-        if signal_count == 0:
-            logger.info("[VALIDATE] No ground truth signals, verdict: uncertain")
+        if not alert:
+            logger.warning(f"[VALIDATE] No alert context for event {event_id}")
             return {
+                "a2a_response": {},
                 "verdict": "uncertain",
                 "confidence": 0.3,
-                "actual_success": None,
+                "ground_truth": {},
+                "signal_count": 0,
+                "incident_document": {},
             }
 
-        # Deterministic evaluation
-        success_signals = 0
-        failure_signals = 0
+        # Call A2A for validation reasoning
+        logger.info(f"[VALIDATE] Calling A2A validate_and_document for event {event_id}")
+        a2a_response = await call_a2a_validate_and_document(
+            alert=alert,
+            investigation=investigation,
+            plan=plan,
+            execution_result=execution_result,
+            request_id=event_id
+        )
 
-        # Check alert state
-        alert = ground_truth.get("alert_state", {})
-        if alert:
-            if alert.get("resolved"):
-                success_signals += 1
-            else:
-                failure_signals += 1
+        if a2a_response.get("fallback") or a2a_response.get("error"):
+            # A2A unavailable - escalate to Brain Trust
+            logger.warning(f"[VALIDATE] A2A failed for {event_id}: {a2a_response.get('error')}, escalating to Brain Trust")
+            await escalate_to_brain_trust(
+                alert=alert,
+                context={
+                    "event_id": event_id,
+                    "reason": "validation_a2a_failed",
+                    "error": a2a_response.get("error", "A2A unavailable"),
+                    "execution_result": execution_result,
+                },
+                domain="validation"
+            )
+            return {
+                "a2a_response": a2a_response,
+                "verdict": "uncertain",
+                "confidence": 0.0,
+                "ground_truth": {},
+                "signal_count": 0,
+                "incident_document": {},
+            }
 
-        # Check service health
-        service = ground_truth.get("service_health", {})
-        if service:
-            health_status = service.get("status", "")
-            if health_status in ("OK", "healthy", "ok"):
-                success_signals += 1
-            elif health_status:
-                failure_signals += 1
+        # Map A2A verdict to validation verdict
+        a2a_verdict = a2a_response.get("verdict", "PARTIAL")
+        verdict_map = {
+            "RESOLVED": "confirmed",
+            "PARTIAL": "uncertain",
+            "STILL_FAILING": "false_positive",
+            "FALSE_POSITIVE": "false_negative",  # Alert was false, execution was right to ignore
+        }
+        verdict = verdict_map.get(a2a_verdict, "uncertain")
 
-        # Check endpoint
-        endpoint = ground_truth.get("endpoint_status", {})
-        if endpoint:
-            if endpoint.get("healthy", endpoint.get("status") == "up"):
-                success_signals += 1
-            else:
-                failure_signals += 1
-
-        # Check kubernetes
-        k8s = ground_truth.get("kubernetes", {})
-        if k8s:
-            if k8s.get("healthy"):
-                success_signals += 1
-            else:
-                failure_signals += 1
-
-        # Determine actual success from signals
-        total_signals = success_signals + failure_signals
-        if total_signals == 0:
-            actual_success = None
-            verdict = "uncertain"
-            confidence = 0.3
-        elif success_signals > failure_signals:
-            actual_success = True
-            confidence = min(0.5 + (success_signals / signal_count) * 0.5, 1.0)
-            verdict = "confirmed" if reported_success else "false_negative"
-        else:
-            actual_success = False
-            confidence = min(0.5 + (failure_signals / signal_count) * 0.5, 1.0)
-            verdict = "false_positive" if reported_success else "confirmed"
-
-        # If confidence is low, try Ollama for nuanced analysis (Gemini R1)
-        if confidence < 0.7 and signal_count > 0:
-            try:
-                analysis_prompt = f"""Analyze this runbook execution validation:
-
-    Reported success: {reported_success}
-    Ground truth signals: {json.dumps(ground_truth, indent=2, default=str)}
-
-    Based on the ground truth data, did the execution actually succeed?
-    Respond with JSON: {{"actual_success": true/false/null, "confidence": 0.0-1.0, "reasoning": "..."}}"""
-
-                llm_result = await call_gemini(analysis_prompt)
-                if llm_result:
-                    try:
-                        parsed = json.loads(llm_result)
-                        llm_success = parsed.get("actual_success")
-                        llm_confidence = parsed.get("confidence", 0.5)
-                        if llm_confidence > confidence:
-                            actual_success = llm_success
-                            confidence = llm_confidence
-                            if actual_success is True:
-                                verdict = "confirmed" if reported_success else "false_negative"
-                            elif actual_success is False:
-                                verdict = "false_positive" if reported_success else "confirmed"
-                            else:
-                                verdict = "uncertain"
-                            logger.info(f"[VALIDATE] LLM refined verdict: {verdict} (confidence {confidence})")
-                    except (json.JSONDecodeError, KeyError):
-                        pass
-            except Exception as e:
-                logger.warning(f"[VALIDATE] LLM fallback failed: {e}")
-
-        logger.info(f"[VALIDATE] Verdict: {verdict}, confidence: {confidence:.2f}, actual_success: {actual_success}")
-        return {
-            "verdict": verdict,
-            "confidence": confidence,
-            "actual_success": actual_success,
+        # Extract validation evidence as ground_truth for compatibility
+        validation_evidence = a2a_response.get("validation_evidence", [])
+        ground_truth = {
+            "a2a_evidence": validation_evidence,
+            "a2a_verdict": a2a_verdict,
         }
 
+        # Get incident document
+        incident_document = a2a_response.get("document", {})
+
+        logger.info(f"[VALIDATE] A2A verdict: {a2a_verdict} -> {verdict}, confidence: {a2a_response.get('confidence', 0.5)}")
+        return {
+            "a2a_response": a2a_response,
+            "verdict": verdict,
+            "confidence": a2a_response.get("confidence", 0.5),
+            "actual_success": a2a_verdict == "RESOLVED",
+            "ground_truth": ground_truth,
+            "signal_count": len(validation_evidence),
+            "incident_document": incident_document,
+        }
+
+    # NOTE: compute_verdict removed - reasoning now handled by A2A /v1/validate_and_document
+
     async def record_validation(state: ValidationState) -> dict:
-        """Node 4: Record validation result back to knowledge-mcp."""
+        """Node 3: Record validation result and incident documentation back to knowledge-mcp."""
         event_id = state["event_id"]
         verdict = state.get("verdict", "uncertain")
         confidence = state.get("confidence", 0.0)
+        a2a_response = state.get("a2a_response", {})
+        incident_document = state.get("incident_document", {})
+        event = state.get("event", {})
+        runbook_id = event.get("metadata", {}).get("runbook_id")
 
         validation_payload = {
             "validated": True,
@@ -2788,6 +2843,10 @@ data:
             "actual_success": state.get("actual_success"),
             "signal_count": state.get("signal_count", 0),
             "ground_truth": state.get("ground_truth", {}),
+            # A2A-specific validation data
+            "a2a_verdict": a2a_response.get("verdict"),
+            "validation_evidence": a2a_response.get("validation_evidence", []),
+            "runbook_action": a2a_response.get("runbook_action"),
         }
 
         # Update event with validation
@@ -2834,20 +2893,80 @@ data:
             },
         })
 
+        # Create incident documentation in Outline if A2A generated it
+        incident_document = state.get("incident_document", {})
+        if incident_document and incident_document.get("title"):
+            try:
+                # Create incident document in Outline
+                doc_content = f"""# {incident_document.get('title', 'Incident Report')}
+
+## Summary
+{incident_document.get('summary', 'No summary available.')}
+
+## Timeline
+{chr(10).join('- ' + t for t in incident_document.get('timeline', []))}
+
+## Root Cause
+{incident_document.get('root_cause', 'Under investigation.')}
+
+## Resolution
+{incident_document.get('resolution', 'Pending resolution.')}
+
+## Lessons Learned
+{chr(10).join('- ' + l for l in incident_document.get('lessons_learned', []))}
+
+---
+*Generated by A2A Validation Workflow*
+*Event ID: {event_id}*
+*Validated at: {datetime.utcnow().isoformat()}*
+"""
+                # Store in Outline incidents collection
+                await call_mcp_tool(KNOWLEDGE_MCP_URL, "create_document", {
+                    "collection_id": "incidents",  # Outline collection for incidents
+                    "title": incident_document.get("title"),
+                    "content": doc_content,
+                    "publish": True,
+                })
+                logger.info(f"[VALIDATE] Created incident document: {incident_document.get('title')}")
+            except Exception as e:
+                logger.warning(f"[VALIDATE] Failed to create incident document: {e}")
+
+        # Handle runbook action recommendation from A2A
+        runbook_action = a2a_response.get("runbook_action")
+        if runbook_action and runbook_id:
+            if runbook_action == "CREATE":
+                # Propose new runbook from incident
+                logger.info(f"[VALIDATE] A2A recommends creating new runbook from incident {event_id}")
+                await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+                    "event_type": "runbook.proposal",
+                    "description": f"New runbook proposed based on incident {event_id}",
+                    "source_agent": "validation-workflow",
+                    "metadata": {
+                        "event_id": event_id,
+                        "proposed_runbook": incident_document.get("runbook_proposal"),
+                    },
+                })
+            elif runbook_action == "UPDATE":
+                # Recommend runbook update
+                logger.info(f"[VALIDATE] A2A recommends updating runbook {runbook_id}")
+
         logger.info(f"[VALIDATE] Recorded validation for {event_id}: {verdict}")
         return {"validation_recorded": True}
 
     def create_validation_workflow():
-        """Create the 4-node validation SubGraph."""
+        """Create the 3-node validation SubGraph with A2A reasoning.
+
+        Flow: fetch_context -> call_a2a_validation -> record_validation
+        A2A handles all reasoning (gather evidence, compute verdict, generate docs).
+        LangGraph handles orchestration (fetch context, record results).
+        """
         workflow = StateGraph(ValidationState)
         workflow.add_node("fetch_context", fetch_validation_context)
-        workflow.add_node("gather_truth", gather_ground_truth)
-        workflow.add_node("compute_verdict", compute_verdict)
+        workflow.add_node("call_a2a_validation", call_a2a_validation)  # Replaces gather_truth + compute_verdict
         workflow.add_node("record_validation", record_validation)
         workflow.set_entry_point("fetch_context")
-        workflow.add_edge("fetch_context", "gather_truth")
-        workflow.add_edge("gather_truth", "compute_verdict")
-        workflow.add_edge("compute_verdict", "record_validation")
+        workflow.add_edge("fetch_context", "call_a2a_validation")
+        workflow.add_edge("call_a2a_validation", "record_validation")
         workflow.add_edge("record_validation", END)
         return workflow.compile()
 
