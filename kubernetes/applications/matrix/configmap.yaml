@@ -31,6 +31,10 @@ data:
     # Users: chaz, agentic-bot
     allow_registration = false
     allow_guest_registration = false
+
+    # Admin registration secret for creating users via API
+    # POST /_matrix/client/v3/register with ?kind=user and shared_secret auth
+    registration_shared_secret = "kernow-agentic-admin-2026"
     allow_encryption = true
     allow_federation = false  # Internal only, no federation
 
