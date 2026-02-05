@@ -1625,13 +1625,20 @@ data:
                         continue
 
                     logger.info(f"POLL: Querying reactions for event {event_id} in room {room_id}")
-                    # Query reactions via Matrix relations API
+                    # Query reactions via Matrix relations API using httpx directly
                     try:
-                        # Use the client's API to get relations
-                        resp = await bot.client._send(
-                            "GET",
-                            f"/_matrix/client/v1/rooms/{room_id}/relations/{event_id}/m.annotation",
-                        )
+                        import urllib.parse
+                        encoded_room = urllib.parse.quote(room_id, safe='')
+                        encoded_event = urllib.parse.quote(event_id, safe='')
+                        url = f"{MATRIX_HOMESERVER}/_matrix/client/v1/rooms/{encoded_room}/relations/{encoded_event}/m.annotation"
+                        headers = {"Authorization": f"Bearer {bot.client.access_token}"}
+                        async with httpx.AsyncClient() as http_client:
+                            response = await http_client.get(url, headers=headers, timeout=10.0)
+                            if response.status_code == 200:
+                                resp = response.json()
+                            else:
+                                logger.info(f"POLL: Relations API returned {response.status_code}: {response.text[:200]}")
+                                resp = {}
                         logger.info(f"POLL: Relations API response: {resp}")
                         if resp and "chunk" in resp:
                             for reaction in resp["chunk"]:
