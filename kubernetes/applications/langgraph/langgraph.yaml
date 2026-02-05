@@ -78,6 +78,9 @@ data:
     # Matrix bot for notifications (replaces Telegram)
     MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
 
+    # Afferent mobile PWA for alert approvals
+    AFFERENT_WEBHOOK_URL = os.environ.get("AFFERENT_WEBHOOK_URL", "")
+
     # Model configuration - Gemini only (via LiteLLM)
     # Using 2.0-flash for everything - best free tier limits (1500 RPD, 10 RPM)
     GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini/gemini-2.0-flash")
@@ -1191,6 +1194,46 @@ data:
                 return response.json()
             except Exception as e:
                 logger.error("Matrix bot call failed: %s", e)
+                return {"error": str(e)}
+
+    async def notify_afferent(alert: dict, solutions: list, assessment: dict) -> dict:
+        """Send approval request to Afferent mobile PWA webhook."""
+        if not AFFERENT_WEBHOOK_URL:
+            return {"skipped": True, "reason": "AFFERENT_WEBHOOK_URL not configured"}
+
+        # Format plan from first solution for mobile display
+        plan = {}
+        if solutions:
+            sol = solutions[0]
+            plan = {
+                "summary": sol.get("description", "Execute remediation"),
+                "risk_level": sol.get("risk", "unknown"),
+                "steps": sol.get("steps", []),
+                "rollback": sol.get("rollback", "Manual intervention required")
+            }
+
+        payload = {
+            "id": alert.get("id"),
+            "alert_fingerprint": alert.get("id"),
+            "alert_name": alert.get("alertname", "Unknown Alert"),
+            "service": alert.get("namespace", "unknown"),
+            "severity": alert.get("severity", "warning"),
+            "source": "LangGraph",
+            "labels": alert.get("labels", {}),
+            "plan": plan
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(AFFERENT_WEBHOOK_URL, json=payload)
+                if response.status_code < 300:
+                    logger.info(f"Afferent notified for alert {alert.get('id')}")
+                    return {"success": True}
+                else:
+                    logger.warning(f"Afferent notification failed: {response.status_code}")
+                    return {"error": f"HTTP {response.status_code}"}
+            except Exception as e:
+                logger.error(f"Afferent notification error: {e}")
                 return {"error": str(e)}
 
     # ============================================================================
@@ -2544,6 +2587,12 @@ data:
                 "confidence": assessment.get("confidence", 0)
             }
         })
+
+        # Also notify Afferent mobile PWA (non-blocking)
+        try:
+            await notify_afferent(alert, solutions, assessment)
+        except Exception as e:
+            logger.warning(f"Afferent notification failed (non-blocking): {e}")
 
         return {"approval_status": "pending", "thread_id": result.get("thread_id", "")}
 
@@ -4381,6 +4430,9 @@ spec:
             # Matrix bot (replaces Telegram)
             - name: MATRIX_BOT_URL
               value: "http://matrix-bot:8000"
+            # Afferent mobile PWA for alert approvals
+            - name: AFFERENT_WEBHOOK_URL
+              value: "http://10.10.0.22:3458/webhook/new-approval"
             # Model configuration - Gemini only
             - name: GEMINI_MODEL
               value: "gemini/gemini-2.0-pro"
