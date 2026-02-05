@@ -1606,7 +1606,9 @@ data:
                     continue
 
                 for key in pending_keys:
-                    event_id = key.decode().replace("matrix:approval:", "")
+                    # Handle both bytes and str keys (depends on redis library version)
+                    key_str = key.decode() if isinstance(key, bytes) else str(key)
+                    event_id = key_str.replace("matrix:approval:", "")
                     pending = await bot._get_pending_approval(event_id)
                     if not pending:
                         continue
