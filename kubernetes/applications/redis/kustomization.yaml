@@ -6,3 +6,4 @@ namespace: ai-platform
 resources:
   - statefulset.yaml
   - service.yaml
+  - service-nodeport.yaml
