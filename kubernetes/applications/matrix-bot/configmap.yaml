@@ -273,6 +273,14 @@ data:
             self.client.add_event_callback(self.on_message, RoomMessageText)
             self.client.add_event_callback(self.on_reaction, ReactionEvent)
             self.client.add_event_callback(self.on_invite, InviteMemberEvent)
+            # Debug: catch-all for event types
+            self.client.add_event_callback(self.on_any_event, (RoomMessageText, ReactionEvent, InviteMemberEvent))
+            logger.info("Event callbacks registered: RoomMessageText, ReactionEvent, InviteMemberEvent")
+
+        async def on_any_event(self, room, event):
+            """Debug: log all received events."""
+            event_type = type(event).__name__
+            logger.info(f"EVENT RECEIVED: type={event_type} room={room.room_id} sender={getattr(event, 'sender', 'N/A')}")
 
         # ── Core Matrix Operations ────────────────────────────────────────
 
@@ -1001,11 +1009,17 @@ data:
 
         async def on_reaction(self, room, event):
             """Handle reaction-based approvals with power level RBAC."""
+            # Debug: log all reaction events
+            logger.info(f"REACTION received: key={event.key!r} from={event.sender} reacts_to={event.reacts_to} room={room.room_id}")
+
             event_id = event.reacts_to
 
             pending = await self._get_pending_approval(event_id)
             if not pending:
+                logger.debug(f"No pending approval found for event_id={event_id}")
                 return
+
+            logger.info(f"Found pending approval for {event_id}: alert_id={pending.get('alert_id')}")
 
             # Power level check
             if not await self.check_power_level(room.room_id, event.sender):
