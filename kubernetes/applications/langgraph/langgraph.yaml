@@ -4363,6 +4363,9 @@ spec:
           env:
             - name: PORT
               value: "8000"
+            # Python path for pip installed deps
+            - name: PYTHONPATH
+              value: "/app/deps"
             # Core services
             - name: POSTGRES_URL
               value: "postgresql://postgres:postgres@postgres:5432/langgraph"
