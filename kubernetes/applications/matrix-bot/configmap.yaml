@@ -1597,11 +1597,15 @@ data:
     async def poll_reactions_loop(bot: "AgenticMatrixBot", interval: int = 10):
         """Poll for reactions on pending approvals (workaround for Conduit not sending reactions in sync)."""
         logger.info(f"Starting reaction polling loop (interval={interval}s)")
+        poll_count = 0
         while True:
             try:
                 await asyncio.sleep(interval)
+                poll_count += 1
                 # Get all pending approvals from Redis
                 pending_keys = await bot.state.redis.keys("matrix:approval:*")
+                if poll_count % 6 == 0:  # Log every minute
+                    logger.info(f"POLL #{poll_count}: Found {len(pending_keys) if pending_keys else 0} pending approvals")
                 if not pending_keys:
                     continue
 
@@ -1609,14 +1613,18 @@ data:
                     # Handle both bytes and str keys (depends on redis library version)
                     key_str = key.decode() if isinstance(key, bytes) else str(key)
                     event_id = key_str.replace("matrix:approval:", "")
+                    logger.info(f"POLL: Checking event {event_id}")
                     pending = await bot._get_pending_approval(event_id)
                     if not pending:
+                        logger.info(f"POLL: No pending data for {event_id}")
                         continue
 
                     room_id = pending.get("room_id")
                     if not room_id:
+                        logger.info(f"POLL: No room_id in pending for {event_id}")
                         continue
 
+                    logger.info(f"POLL: Querying reactions for event {event_id} in room {room_id}")
                     # Query reactions via Matrix relations API
                     try:
                         # Use the client's API to get relations
@@ -1624,6 +1632,7 @@ data:
                             "GET",
                             f"/_matrix/client/v1/rooms/{room_id}/relations/{event_id}/m.annotation",
                         )
+                        logger.info(f"POLL: Relations API response: {resp}")
                         if resp and "chunk" in resp:
                             for reaction in resp["chunk"]:
                                 sender = reaction.get("sender", "")
@@ -1649,7 +1658,7 @@ data:
                                     logger.info(f"POLL: Processing rejection from {sender}")
                                     await bot.process_approval(room_id, event_id, pending, approved=False, user=sender)
                     except Exception as e:
-                        logger.debug(f"Relations API call failed for {event_id}: {e}")
+                        logger.info(f"POLL: Relations API call failed for {event_id}: {e}")
 
             except Exception as e:
                 logger.error(f"Reaction polling error: {e}")
