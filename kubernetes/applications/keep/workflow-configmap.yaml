@@ -18,14 +18,13 @@ data:
         - name: Forward to LangGraph
           provider:
             type: http
-            config:
+            config: "{{ providers.default-http }}"
+            with:
               url: http://langgraph.ai-platform.svc.cluster.local:8000/keep-alert
               method: POST
               headers:
                 Content-Type: application/json
-              authentication: {}
-          with:
-            body: |
+              body: |
               {
                 "fingerprint": "{{ alert.fingerprint }}",
                 "id": "{{ alert.id }}",
