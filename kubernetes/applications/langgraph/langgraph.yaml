@@ -78,9 +78,6 @@ data:
     # Keep API for fetching incident details
     KEEP_API_URL = os.environ.get("KEEP_API_URL", "http://keep.keep.svc.cluster.local:8080")
 
-    # Matrix bot for notifications (replaces Telegram)
-    MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
-
     # Afferent mobile PWA for alert approvals
     AFFERENT_WEBHOOK_URL = os.environ.get("AFFERENT_WEBHOOK_URL", "")
 
@@ -1218,17 +1215,6 @@ data:
                 logger.error("Knowledge MCP call failed: %s", e)
                 return {"error": str(e)}
 
-    async def call_matrix(endpoint: str, data: dict) -> dict:
-        """Send notifications and requests to Matrix bot."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.post(MATRIX_BOT_URL + "/" + endpoint, json=data)
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                logger.error("Matrix bot call failed: %s", e)
-                return {"error": str(e)}
-
     async def _resolve_coroot_app_id(alert: dict) -> str:
         """Resolve Coroot app_id from alert data.
 
@@ -1856,36 +1842,11 @@ data:
 
         if "error" in result:
             logger.error(f"Failed to create Brain Trust document: {result['error']}")
-            # Fallback: notify via Matrix with error details
-            await call_matrix("message", {
-                "room_id": os.environ.get("ALERT_ROOM_ID", "!alerts:agentic.local"),
-                "message": f"⚠️ **BRAIN TRUST ESCALATION FAILED**\n\nAlert: {alert.get('alertname')}\nReason: {reason}\nError: {result['error']}\n\nPlease review manually."
-            })
             return {"status": "error", "error": result["error"]}
 
-        # Notify via Matrix using the new /brain-trust endpoint
         doc_id = result.get("id", "unknown")
         outline_url = f"https://outline.kernow.io/doc/{doc_id}"
-
-        # Build context summary for notification
-        context_summary = None
-        if context:
-            diagnosis = context.get("diagnosis", {})
-            if diagnosis:
-                context_summary = f"Diagnosis: {diagnosis.get('summary', 'N/A')[:300]}"
-
-        await call_matrix("brain-trust", {
-            "alert_name": alert.get("alertname", "Unknown Alert"),
-            "alert_id": alert.get("alert_id", alert.get("fingerprint", str(hash(str(alert)))[:12])),
-            "severity": alert.get("severity", "info"),
-            "reason": reason,
-            "outline_url": outline_url,
-            "outline_doc_id": doc_id,
-            "context_summary": context_summary,
-            "suggestions": suggestions
-        })
-
-        logger.info(f"Created Brain Trust document: {doc_id}")
+        logger.info(f"Created Brain Trust document: {doc_id} - {outline_url}")
         return {
             "status": "escalated",
             "document_id": doc_id,
@@ -1961,14 +1922,7 @@ data:
             doc_id = result.get("id", "unknown")
             outline_url = f"https://outline.kernow.io/doc/{doc_id}"
 
-            # Notify via Matrix using the new /runbook-proposal endpoint
-            await call_matrix("runbook-proposal", {
-                "alert_name": execution_result.get("alert_name", "Unknown Alert"),
-                "runbook_title": runbook_match.get("name", "Unknown Runbook"),
-                "tweaks_made": "\n".join(f"- {t}" for t in tweaks[:5]),
-                "outline_url": outline_url,
-                "execution_success": execution_result.get("success", True)
-            })
+            logger.info(f"Created runbook proposal: {outline_url}")
 
         return result
 
@@ -1985,8 +1939,11 @@ data:
         """Call Coroot tool via observability-mcp streamable HTTP (/mcp).
 
         Uses MCP protocol with correct Accept headers.
-        Arguments should be flat (e.g. app_id="xxx"), not wrapped in params.
+        Wraps kwargs in 'params' key for pydantic model tools.
         """
+        # Observability-mcp tools use pydantic models (e.g. params: TimeRangeInput)
+        # so kwargs must be nested under 'params' key
+        arguments = {"params": kwargs} if kwargs else {}
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 response = await client.post(
@@ -1995,7 +1952,7 @@ data:
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "tools/call",
-                        "params": {"name": tool_name, "arguments": kwargs}
+                        "params": {"name": tool_name, "arguments": arguments}
                     },
                     headers={
                         "Content-Type": "application/json",
@@ -2926,7 +2883,7 @@ data:
         }]
 
     async def request_approval(state):
-        """Request approval via Matrix bot."""
+        """Request approval via Afferent mobile PWA."""
         alert = state["alert"]
         solutions = state["solutions"]
         assessment = state["assessment"]
@@ -2939,46 +2896,13 @@ data:
             "created_at": datetime.utcnow().isoformat()
         })
 
-        # Determine room based on severity
-        severity = alert.get("severity", "warning")
-        room = "#critical" if severity == "critical" else "#infrastructure"
-
-        # Format solutions for Matrix message
-        solutions_text = ""
-        for i, sol in enumerate(solutions, 1):
-            solutions_text += f"\n{i}. **{sol.get('name', 'Solution')}**\n"
-            solutions_text += f"   {sol.get('description', '')}\n"
-            solutions_text += f"   Risk: {sol.get('risk', 'unknown')}\n"
-
-        result = await call_matrix("approval", {
-            "alert_id": alert["id"],
-            "room": room,
-            "alert": alert,
-            "solutions": solutions,
-            "message": (
-                f"**Alert: {alert.get('alertname', 'Unknown')}**\n"
-                f"Severity: {severity}\n"
-                f"Namespace: {alert.get('namespace', 'default')}\n\n"
-                f"{alert.get('description', 'No description')}\n\n"
-                f"**Recommended Solutions:**\n"
-                f"{solutions_text}\n\n"
-                f"React ✅ to approve solution 1, or reply with solution number.\n"
-                f"React ❌ to reject/ignore."
-            ),
-            "context": {
-                "similar_runbook": assessment.get("similar_runbook"),
-                "similarity": assessment.get("similarity_score", 0),
-                "confidence": assessment.get("confidence", 0)
-            }
-        })
-
-        # Also notify Afferent mobile PWA (non-blocking)
+        # Notify Afferent mobile PWA
         try:
             await notify_afferent(alert, solutions, assessment)
         except Exception as e:
-            logger.warning(f"Afferent notification failed (non-blocking): {e}")
+            logger.warning(f"Afferent notification failed: {e}")
 
-        return {"approval_status": "pending", "thread_id": result.get("thread_id", "")}
+        return {"approval_status": "pending"}
 
     async def execute_solution(state):
         """Execute the selected solution using MCP tools via REST bridge.
@@ -4537,7 +4461,7 @@ data:
     async def execute_skill(request: SkillRequest):
         """Execute a skill by ID or command routing.
 
-        This endpoint is called by Matrix bot for slash commands like:
+        Slash commands like:
         /troubleshoot pod crash -> infrastructure-skill
         /home turn on lights -> home-skill
         """
@@ -4876,9 +4800,6 @@ spec:
             # Claude services (validator runs separately as daily cronjob)
             - name: CLAUDE_AGENT_URL
               value: "http://claude-agent:8000"
-            # Matrix bot (replaces Telegram)
-            - name: MATRIX_BOT_URL
-              value: "http://matrix-bot:8000"
             # Keep API for incident details
             - name: KEEP_API_URL
               value: "http://keep.keep.svc.cluster.local:8080"
