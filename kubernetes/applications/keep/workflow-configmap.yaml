@@ -14,9 +14,6 @@ data:
       description: Route alerts to LangGraph for AI triage
       triggers:
         - type: alert
-          filters:
-            - key: severity
-              value: ["critical", "warning"]
       actions:
         - name: Forward to LangGraph
           provider:
