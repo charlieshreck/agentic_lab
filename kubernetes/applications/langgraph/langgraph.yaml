@@ -1111,10 +1111,28 @@ data:
         status: str = "firing"
         severity: str = "warning"
         lastReceived: Optional[str] = None
+        firingStartTime: Optional[str] = None
+        firingStartTimeSinceLastResolved: Optional[str] = None
+        firingCounter: Optional[int] = None
+        unresolvedCounter: Optional[int] = None
         description: Optional[str] = None
         message: Optional[str] = None
         labels: Optional[dict] = None
+        annotations: Optional[dict] = None
         source: Optional[list] = None
+        url: Optional[str] = None  # Coroot incident link
+        generatorURL: Optional[str] = None  # Prometheus query link
+        cluster: Optional[str] = None
+        namespace: Optional[str] = None  # Top-level namespace from Keep
+        pod: Optional[str] = None
+        deployment: Optional[str] = None
+        daemonset: Optional[str] = None
+        service: Optional[str] = None
+        container: Optional[str] = None
+        payload: Optional[dict] = None  # Raw payload with startsAt/endsAt
+        alert_hash: Optional[str] = None
+        startedAt: Optional[str] = None
+        firstTimestamp: Optional[str] = None
         # Accept any additional fields Keep might send
         class Config:
             extra = "allow"
@@ -1231,6 +1249,20 @@ data:
             "labels": alert.get("labels", {}),
             "annotations": alert.get("annotations", {}),
             "plan": plan,
+            # Rich context from Keep for detailed mobile display
+            "url": alert.get("url"),  # Coroot incident link
+            "generatorURL": alert.get("generatorURL"),  # Prometheus query link
+            "cluster": alert.get("cluster"),
+            "namespace": alert.get("namespace", "unknown"),
+            "pod": alert.get("pod"),
+            "deployment": alert.get("deployment"),
+            "daemonset": alert.get("daemonset"),
+            "container": alert.get("container"),
+            "firingStartTime": alert.get("firingStartTime"),
+            "firingCounter": alert.get("firingCounter"),
+            "lastReceived": alert.get("lastReceived"),
+            "startedAt": alert.get("startedAt"),
+            "payload": alert.get("payload"),
             # Include assessment context for better understanding
             "assessment": {
                 "confidence": assessment.get("confidence", 0),
@@ -3588,11 +3620,12 @@ data:
         logger.info("Parsed KeepAlert: name=%s, alertname=%s, fingerprint=%s, labels=%s",
                     alert.name, alert.alertname, alert.fingerprint, alert.labels)
 
-        # Transform Keep alert to internal format
+        # Transform Keep alert to internal format (preserve rich context)
         alert_id = alert.fingerprint or alert.id or f"keep-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-        namespace = "default"
-        if alert.labels:
-            namespace = alert.labels.get("namespace", "default")
+        namespace = alert.namespace or "default"
+        if not namespace or namespace == "default":
+            if alert.labels:
+                namespace = alert.labels.get("namespace", "default")
 
         alert_dict = {
             "id": alert_id,
@@ -3601,9 +3634,25 @@ data:
             "namespace": namespace,
             "description": alert.description or alert.message or "",
             "labels": alert.labels or {},
-            "annotations": {},
+            "annotations": alert.annotations or {},
             "source": alert.source,
-            "keep_status": alert.status
+            "keep_status": alert.status,
+            # Rich context from Keep
+            "url": alert.url,  # Coroot incident link
+            "generatorURL": alert.generatorURL,  # Prometheus query link
+            "cluster": alert.cluster,
+            "pod": alert.pod or (alert.labels or {}).get("pod"),
+            "deployment": alert.deployment or (alert.labels or {}).get("deployment"),
+            "daemonset": alert.daemonset or (alert.labels or {}).get("daemonset"),
+            "service": alert.service or (alert.labels or {}).get("service"),
+            "container": alert.container or (alert.labels or {}).get("container"),
+            "firingStartTime": alert.firingStartTime,
+            "firingCounter": alert.firingCounter,
+            "lastReceived": alert.lastReceived,
+            "startedAt": alert.startedAt,
+            "firstTimestamp": alert.firstTimestamp,
+            "alert_hash": alert.alert_hash,
+            "payload": alert.payload,
         }
 
         initial_state = {
