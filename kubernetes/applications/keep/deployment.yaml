@@ -94,6 +94,10 @@ spec:
             # Load workflows from configmap on startup
             - name: KEEP_WORKFLOWS_DIRECTORY
               value: "/workflows"
+            # Use single worker to ensure workflow queue works correctly
+            # (with multiple workers, each has its own in-memory queue)
+            - name: WORKERS
+              value: "1"
           volumeMounts:
             - name: keep-data
               mountPath: /data
