@@ -1249,10 +1249,11 @@ data:
                         if match:
                             return match.group(1)
             elif overview and isinstance(overview, dict):
-                # Dict response - search services
-                for svc_id, svc_info in overview.get("services", {}).items():
-                    if f":{ns}:" in svc_id and app_name.lower() in svc_id.lower():
-                        return svc_id
+                # Dict response - search services (key=display name, id in value)
+                for svc_name, svc_info in overview.get("services", {}).items():
+                    full_id = svc_info.get("id", "")
+                    if f":{ns}:" in full_id and app_name.lower() in full_id.lower():
+                        return full_id
         except Exception as e:
             logger.warning(f"Failed to resolve Coroot app_id via overview: {e}")
 
