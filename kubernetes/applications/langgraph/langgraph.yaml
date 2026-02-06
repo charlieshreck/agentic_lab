@@ -1214,25 +1214,66 @@ data:
                 logger.error("Matrix bot call failed: %s", e)
                 return {"error": str(e)}
 
-    async def _fetch_coroot_metrics_for_alert(alert: dict) -> dict:
-        """Fetch Coroot service metrics for an alert to enrich Afferent display."""
+    async def _resolve_coroot_app_id(alert: dict) -> str:
+        """Resolve Coroot app_id from alert data.
+
+        Strategy:
+        1. Extract cluster_id from Coroot incident URL if present
+        2. Otherwise, search Coroot infrastructure overview for matching app
+        """
         import re
         labels = alert.get("labels", {})
         alert_url = alert.get("url", "") or ""
+        ns = labels.get("namespace", alert.get("namespace", ""))
+        kind = labels.get("kind", "Deployment")
+        app_name = labels.get("application", alert.get("alertname", ""))
 
-        # Build Coroot app_id from alert data
-        coroot_app_id = None
+        if not ns or not app_name:
+            return ""
+
+        # Strategy 1: Extract cluster_id from Coroot URL
         if "coroot" in alert_url:
             url_match = re.search(r'/p/([^/]+)/', alert_url)
             if url_match:
-                cluster_id = url_match.group(1)
-                ns = labels.get("namespace", alert.get("namespace", ""))
-                kind = labels.get("kind", "Deployment")
-                app_name = labels.get("application", alert.get("alertname", ""))
-                if ns and app_name:
-                    coroot_app_id = f"{cluster_id}:{ns}:{kind}:{app_name}"
+                return f"{url_match.group(1)}:{ns}:{kind}:{app_name}"
 
+        # Strategy 2: Search infrastructure overview for matching namespace:app
+        try:
+            overview = await call_coroot_mcp("coroot_get_infrastructure_overview")
+            if overview and isinstance(overview, str):
+                # Parse the markdown/text response to find app IDs
+                for line in overview.split('\n'):
+                    # Look for app_id pattern containing our namespace and app name
+                    if f":{ns}:" in line and app_name.lower() in line.lower():
+                        match = re.search(r'([a-z0-9]+:[^:\s]+:[^:\s]+:[^:\s]+)', line)
+                        if match:
+                            return match.group(1)
+            elif overview and isinstance(overview, dict):
+                # Dict response - search services
+                for svc_id, svc_info in overview.get("services", {}).items():
+                    if f":{ns}:" in svc_id and app_name.lower() in svc_id.lower():
+                        return svc_id
+        except Exception as e:
+            logger.warning(f"Failed to resolve Coroot app_id via overview: {e}")
+
+        return ""
+
+    async def _fetch_coroot_metrics_for_alert(alert: dict) -> dict:
+        """Fetch Coroot service metrics for an alert to enrich Afferent display."""
+        labels = alert.get("labels", {})
+        source = alert.get("source")
+        source_str = source[0] if isinstance(source, list) else (source or "")
+
+        # Only attempt for alerts that could have Coroot data
+        has_coroot_url = "coroot" in (alert.get("url", "") or "")
+        is_coroot_source = "coroot" in source_str.lower()
+
+        if not has_coroot_url and not is_coroot_source:
+            return {}
+
+        coroot_app_id = await _resolve_coroot_app_id(alert)
         if not coroot_app_id:
+            logger.info(f"Could not resolve Coroot app_id for {alert.get('alertname', '?')}")
             return {}
 
         try:
