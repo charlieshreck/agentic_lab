@@ -58,8 +58,8 @@ data:
             return None
 
     def send_to_keep(alert_data):
-        """POST an alert to Keep's generic webhook endpoint."""
-        url = f"{KEEP_URL}/alerts/event/webhook"
+        """POST an alert to Keep's event endpoint."""
+        url = f"{KEEP_URL}/alerts/event"
         headers = {
             "Content-Type": "application/json",
             "X-API-KEY": KEEP_API_KEY,
