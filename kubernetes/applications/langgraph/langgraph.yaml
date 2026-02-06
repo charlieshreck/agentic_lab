@@ -65,7 +65,7 @@ data:
     # Convenience accessors for frequently used MCPs
     KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
     INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
-    COROOT_MCP_URL = os.environ.get("COROOT_MCP_URL", "http://coroot-mcp:8000")
+    COROOT_MCP_URL = os.environ.get("COROOT_MCP_URL", "http://observability-mcp:8000")
     OPNSENSE_MCP_URL = os.environ.get("OPNSENSE_MCP_URL", "http://opnsense-mcp:8000")
     UNIFI_MCP_URL = os.environ.get("UNIFI_MCP_URL", "http://unifi-mcp:8000")
     TRUENAS_MCP_URL = os.environ.get("TRUENAS_MCP_URL", "http://truenas-mcp:8000")
@@ -1214,6 +1214,35 @@ data:
                 logger.error("Matrix bot call failed: %s", e)
                 return {"error": str(e)}
 
+    async def _fetch_coroot_metrics_for_alert(alert: dict) -> dict:
+        """Fetch Coroot service metrics for an alert to enrich Afferent display."""
+        import re
+        labels = alert.get("labels", {})
+        alert_url = alert.get("url", "") or ""
+
+        # Build Coroot app_id from alert data
+        coroot_app_id = None
+        if "coroot" in alert_url:
+            url_match = re.search(r'/p/([^/]+)/', alert_url)
+            if url_match:
+                cluster_id = url_match.group(1)
+                ns = labels.get("namespace", alert.get("namespace", ""))
+                kind = labels.get("kind", "Deployment")
+                app_name = labels.get("application", alert.get("alertname", ""))
+                if ns and app_name:
+                    coroot_app_id = f"{cluster_id}:{ns}:{kind}:{app_name}"
+
+        if not coroot_app_id:
+            return {}
+
+        try:
+            metrics = await call_coroot_mcp("coroot_get_service_metrics", params={"app_id": coroot_app_id})
+            if metrics:
+                return {"app_id": coroot_app_id, "raw": metrics}
+        except Exception as e:
+            logger.warning(f"Failed to fetch Coroot metrics for {coroot_app_id}: {e}")
+        return {}
+
     async def notify_afferent(alert: dict, solutions: list, assessment: dict) -> dict:
         """Send approval request to Afferent mobile PWA webhook."""
         if not AFFERENT_WEBHOOK_URL:
@@ -1236,6 +1265,9 @@ data:
             source_str = source[0] if source else "unknown"
         else:
             source_str = source or "unknown"
+
+        # Fetch Coroot service metrics for enrichment
+        coroot_data = await _fetch_coroot_metrics_for_alert(alert)
 
         payload = {
             "id": alert.get("id"),
@@ -1263,6 +1295,8 @@ data:
             "lastReceived": alert.get("lastReceived"),
             "startedAt": alert.get("startedAt"),
             "payload": alert.get("payload"),
+            # Coroot service metrics (CPU, memory, latency, error rate)
+            "coroot_metrics": coroot_data if coroot_data else None,
             # Include assessment context for better understanding
             "assessment": {
                 "confidence": assessment.get("confidence", 0),
@@ -1854,11 +1888,29 @@ data:
                 context["cluster_state"] = {}
 
         # Get Coroot metrics and anomalies for affected service
-        service = alert.get("labels", {}).get("service") or alert.get("namespace", "")
-        if service:
-            context["coroot_metrics"] = await call_coroot_mcp("get_service_metrics", service=service)
-            context["coroot_anomalies"] = await call_coroot_mcp("get_recent_anomalies", hours=24)
-            context["service_dependencies"] = await call_coroot_mcp("get_service_dependencies", service=service)
+        # Build Coroot app_id from alert labels: cluster_id:namespace:Kind:name
+        coroot_app_id = None
+        alert_url = alert.get("url", "")
+        labels = alert.get("labels", {})
+        if alert_url and "coroot" in str(alert_url):
+            # Extract cluster_id from Coroot URL: https://coroot.kernow.io/p/{cluster_id}/...
+            import re
+            url_match = re.search(r'/p/([^/]+)/', str(alert_url))
+            if url_match:
+                cluster_id = url_match.group(1)
+                ns = labels.get("namespace", alert.get("namespace", ""))
+                kind = labels.get("kind", "Deployment")
+                app_name = labels.get("application", alert.get("alertname", ""))
+                if ns and app_name:
+                    coroot_app_id = f"{cluster_id}:{ns}:{kind}:{app_name}"
+
+        if coroot_app_id:
+            context["coroot_metrics"] = await call_coroot_mcp("coroot_get_service_metrics", params={"app_id": coroot_app_id})
+            context["coroot_anomalies"] = await call_coroot_mcp("coroot_get_recent_anomalies", params={"hours": 24})
+            context["service_dependencies"] = await call_coroot_mcp("coroot_get_service_dependencies", params={"app_id": coroot_app_id})
+        elif labels.get("namespace"):
+            # For Prometheus alerts, try anomalies at least
+            context["coroot_anomalies"] = await call_coroot_mcp("coroot_get_recent_anomalies", params={"hours": 24})
 
         # Get similar past decisions from Qdrant
         if alert_embedding:
@@ -3990,25 +4042,29 @@ data:
                     logger.warning(f"Failed to get OPNsense context: {e}")
                     errors.append(f"OPNsense connection failed: {str(e)}")
 
-            # Coroot context for monitoring queries
+            # Coroot context for monitoring queries (via observability-mcp)
             if any(kw in prompt_lower for kw in ["metric", "alert", "anomaly", "monitoring", "performance", "latency", "error rate", "health"]):
                 try:
                     resp = await client.post(
                         COROOT_MCP_URL + "/mcp",
-                        json={"tool": "get_recent_anomalies", "arguments": {"hours": 24}}
+                        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "coroot_get_recent_anomalies", "arguments": {"params": {"hours": 24}}}}
                     )
                     if resp.status_code == 200:
-                        data = resp.json()
-                        if data.get("success"):
-                            context["coroot_anomalies"] = data.get("result", [])
+                        result = resp.json()
+                        content = result.get("result", {}).get("content", [])
+                        if content:
+                            context["coroot_anomalies"] = content[0].get("text", "")
                     resp = await client.post(
                         COROOT_MCP_URL + "/mcp",
-                        json={"tool": "get_alerts", "arguments": {}}
+                        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                              "params": {"name": "coroot_get_alerts", "arguments": {}}}
                     )
                     if resp.status_code == 200:
-                        data = resp.json()
-                        if data.get("success"):
-                            context["coroot_alerts"] = data.get("result", [])
+                        result = resp.json()
+                        content = result.get("result", {}).get("content", [])
+                        if content:
+                            context["coroot_alerts"] = content[0].get("text", "")
                 except Exception as e:
                     logger.warning(f"Failed to get Coroot context: {e}")
                     errors.append(f"Coroot connection failed: {str(e)}")
