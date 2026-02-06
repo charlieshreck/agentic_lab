@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: keep
     app.kubernetes.io/component: workflows
 data:
-  # Workflow: Route all critical/warning alerts to LangGraph for AI triage
+  # Workflow: Route all alerts to LangGraph for AI triage
   triage-to-langgraph.yaml: |
     workflow:
       id: triage-to-langgraph
@@ -18,23 +18,19 @@ data:
         - name: Forward to LangGraph
           provider:
             type: http
-            config: "{{ providers.default-http }}"
             with:
-              url: http://langgraph.ai-platform.svc.cluster.local:8000/keep-alert
               method: POST
+              url: "http://langgraph.ai-platform.svc.cluster.local:8000/keep-alert"
               headers:
-                Content-Type: application/json
-              body: |
-              {
-                "fingerprint": "{{ alert.fingerprint }}",
-                "id": "{{ alert.id }}",
-                "name": "{{ alert.name }}",
-                "alertname": "{{ alert.alertname }}",
-                "severity": "{{ alert.severity }}",
-                "status": "{{ alert.status }}",
-                "description": "{{ alert.description }}",
-                "labels": {{ alert.labels | tojson }},
-                "annotations": {{ alert.annotations | tojson if alert.annotations else '{}' }},
-                "source": {{ alert.source | tojson if alert.source else '[]' }},
-                "lastReceived": "{{ alert.lastReceived }}"
-              }
+                Content-Type: "application/json"
+              body:
+                fingerprint: "{{ alert.fingerprint }}"
+                id: "{{ alert.id }}"
+                name: "{{ alert.name }}"
+                alertname: "{{ alert.name }}"
+                severity: "{{ alert.severity }}"
+                status: "{{ alert.status }}"
+                description: "{{ alert.description }}"
+                labels: "{{ alert.labels }}"
+                source: "{{ alert.source }}"
+                lastReceived: "{{ alert.lastReceived }}"
