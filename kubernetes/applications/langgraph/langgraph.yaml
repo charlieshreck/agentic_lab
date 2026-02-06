@@ -1277,7 +1277,7 @@ data:
             return {}
 
         try:
-            metrics = await call_coroot_mcp("coroot_get_service_metrics", params={"app_id": coroot_app_id})
+            metrics = await call_coroot_mcp("coroot_get_service_metrics", app_id=coroot_app_id)
             if metrics:
                 return {"app_id": coroot_app_id, "raw": metrics}
         except Exception as e:
@@ -1757,7 +1757,11 @@ data:
             return "NO_MATCH"
 
     async def call_coroot_mcp(tool_name: str, **kwargs) -> dict:
-        """Call Coroot MCP for metrics and anomaly data."""
+        """Call Coroot tool via observability-mcp streamable HTTP (/mcp).
+
+        Uses MCP protocol with correct Accept headers.
+        Arguments should be flat (e.g. app_id="xxx"), not wrapped in params.
+        """
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 response = await client.post(
@@ -1767,13 +1771,26 @@ data:
                         "id": 1,
                         "method": "tools/call",
                         "params": {"name": tool_name, "arguments": kwargs}
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream"
                     }
                 )
                 if response.status_code == 200:
-                    result = response.json()
-                    content = result.get("result", {}).get("content", [])
-                    if content:
-                        return json.loads(content[0].get("text", "{}"))
+                    # Response is SSE format: "event: message\ndata: {json}\n\n"
+                    for line in response.text.split('\n'):
+                        if line.startswith('data: '):
+                            data = json.loads(line[6:])
+                            content = data.get("result", {}).get("content", [])
+                            if content:
+                                text_val = content[0].get("text", "{}")
+                                try:
+                                    return json.loads(text_val)
+                                except (json.JSONDecodeError, ValueError):
+                                    return {"text": text_val}
+                else:
+                    logger.warning(f"Coroot MCP {tool_name}: HTTP {response.status_code}")
                 return {}
             except Exception as e:
                 logger.warning(f"Coroot MCP call failed: {e}")
@@ -1946,12 +1963,12 @@ data:
                     coroot_app_id = f"{cluster_id}:{ns}:{kind}:{app_name}"
 
         if coroot_app_id:
-            context["coroot_metrics"] = await call_coroot_mcp("coroot_get_service_metrics", params={"app_id": coroot_app_id})
-            context["coroot_anomalies"] = await call_coroot_mcp("coroot_get_recent_anomalies", params={"hours": 24})
-            context["service_dependencies"] = await call_coroot_mcp("coroot_get_service_dependencies", params={"app_id": coroot_app_id})
+            context["coroot_metrics"] = await call_coroot_mcp("coroot_get_service_metrics", app_id=coroot_app_id)
+            context["coroot_anomalies"] = await call_coroot_mcp("coroot_get_recent_anomalies", hours=24)
+            context["service_dependencies"] = await call_coroot_mcp("coroot_get_service_dependencies", app_id=coroot_app_id)
         elif labels.get("namespace"):
             # For Prometheus alerts, try anomalies at least
-            context["coroot_anomalies"] = await call_coroot_mcp("coroot_get_recent_anomalies", params={"hours": 24})
+            context["coroot_anomalies"] = await call_coroot_mcp("coroot_get_recent_anomalies", hours=24)
 
         # Get similar past decisions from Qdrant
         if alert_embedding:
@@ -4086,26 +4103,12 @@ data:
             # Coroot context for monitoring queries (via observability-mcp)
             if any(kw in prompt_lower for kw in ["metric", "alert", "anomaly", "monitoring", "performance", "latency", "error rate", "health"]):
                 try:
-                    resp = await client.post(
-                        COROOT_MCP_URL + "/mcp",
-                        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                              "params": {"name": "coroot_get_recent_anomalies", "arguments": {"params": {"hours": 24}}}}
-                    )
-                    if resp.status_code == 200:
-                        result = resp.json()
-                        content = result.get("result", {}).get("content", [])
-                        if content:
-                            context["coroot_anomalies"] = content[0].get("text", "")
-                    resp = await client.post(
-                        COROOT_MCP_URL + "/mcp",
-                        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                              "params": {"name": "coroot_get_alerts", "arguments": {}}}
-                    )
-                    if resp.status_code == 200:
-                        result = resp.json()
-                        content = result.get("result", {}).get("content", [])
-                        if content:
-                            context["coroot_alerts"] = content[0].get("text", "")
+                    anomalies = await call_coroot_mcp("coroot_get_recent_anomalies", hours=24)
+                    if anomalies:
+                        context["coroot_anomalies"] = anomalies.get("text", json.dumps(anomalies))
+                    alerts = await call_coroot_mcp("coroot_get_alerts")
+                    if alerts:
+                        context["coroot_alerts"] = alerts.get("text", json.dumps(alerts))
                 except Exception as e:
                     logger.warning(f"Failed to get Coroot context: {e}")
                     errors.append(f"Coroot connection failed: {str(e)}")
