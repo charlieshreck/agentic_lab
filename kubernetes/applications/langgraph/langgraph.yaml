@@ -3560,8 +3560,17 @@ data:
         return {"content_type": content_type, "query_params": query_params, "body": body.decode('utf-8', errors='replace')[:500]}
 
     @app.post("/keep-alert", status_code=202)
-    async def process_keep_alert(alert: KeepAlert):
+    async def process_keep_alert(request: Request):
         """Receive alert from Keep and process. Transforms Keep format to internal format."""
+        # Debug: Log raw request body
+        body = await request.body()
+        logger.info("Keep alert raw body: %s", body.decode('utf-8', errors='replace')[:2000])
+
+        # Parse as KeepAlert
+        alert = KeepAlert.parse_raw(body)
+        logger.info("Parsed KeepAlert: name=%s, alertname=%s, fingerprint=%s, labels=%s",
+                    alert.name, alert.alertname, alert.fingerprint, alert.labels)
+
         # Transform Keep alert to internal format
         alert_id = alert.fingerprint or alert.id or f"keep-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
         namespace = "default"
