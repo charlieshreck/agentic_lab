@@ -1,0 +1,397 @@
+---
+# Alert Forwarder CronJob
+# Polls TrueNAS and PBS APIs for alerts/failures and forwards to Keep
+# Runs every 5 minutes in the agentic cluster
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-forwarder-script
+  namespace: ai-platform
+data:
+  forward.py: |
+    #!/usr/bin/env python3
+    """Poll TrueNAS and PBS for alerts, forward to Keep."""
+    import json
+    import os
+    import sys
+    import hashlib
+    import time
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+    from urllib.parse import urlencode
+    import ssl
+
+    # Disable SSL verification for self-signed certs
+    CTX = ssl.create_default_context()
+    CTX.check_hostname = False
+    CTX.verify_mode = ssl.CERT_NONE
+
+    KEEP_URL = os.environ.get("KEEP_URL", "http://keep-api.keep:8080")
+    KEEP_API_KEY = os.environ.get("KEEP_API_KEY", "")
+
+    TRUENAS_HDD_URL = os.environ.get("TRUENAS_HDD_URL", "")
+    TRUENAS_HDD_KEY = os.environ.get("TRUENAS_HDD_API_KEY", "")
+    TRUENAS_MEDIA_URL = os.environ.get("TRUENAS_MEDIA_URL", "")
+    TRUENAS_MEDIA_KEY = os.environ.get("TRUENAS_MEDIA_API_KEY", "")
+
+    PBS_HOST = os.environ.get("PBS_HOST", "")
+    PBS_USER = os.environ.get("PBS_USERNAME", "")
+    PBS_PASS = os.environ.get("PBS_PASSWORD", "")
+
+    def http_request(url, headers=None, data=None, method="GET"):
+        """Simple HTTP request helper using stdlib only."""
+        if headers is None:
+            headers = {}
+        req = Request(url, headers=headers, method=method)
+        if data:
+            req.data = json.dumps(data).encode("utf-8")
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urlopen(req, context=CTX, timeout=15) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            print(f"  HTTP {e.code} from {url}: {body[:200]}", file=sys.stderr)
+            return None
+        except (URLError, Exception) as e:
+            print(f"  Error calling {url}: {e}", file=sys.stderr)
+            return None
+
+    def send_to_keep(alert_data):
+        """POST an alert to Keep's webhook endpoint."""
+        source = alert_data.get("source", ["unknown"])[0]
+        url = f"{KEEP_URL}/alerts/event/{source}"
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-KEY": KEEP_API_KEY,
+        }
+        result = http_request(url, headers=headers, data=alert_data, method="POST")
+        name = alert_data.get("name", "unknown")[:60]
+        if result is not None:
+            print(f"  -> Sent to Keep: {name}")
+        else:
+            print(f"  -> FAILED to send: {name}", file=sys.stderr)
+
+    def fingerprint(parts):
+        """Create a stable fingerprint from parts."""
+        raw = "|".join(str(p) for p in parts)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    # ── TrueNAS Alert Polling ──────────────────────────────────────
+
+    def poll_truenas(instance_name, base_url, api_key):
+        """Poll TrueNAS SCALE for active alerts."""
+        if not base_url or not api_key:
+            print(f"  Skipping TrueNAS {instance_name}: missing config")
+            return
+
+        print(f"Polling TrueNAS {instance_name} ({base_url})...")
+        url = f"{base_url}/api/v2.0/alert/list"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        alerts = http_request(url, headers=headers)
+
+        if alerts is None:
+            print(f"  Could not reach TrueNAS {instance_name}")
+            return
+
+        severity_map = {
+            "CRITICAL": "critical",
+            "ERROR": "critical",
+            "WARNING": "warning",
+            "NOTICE": "info",
+            "INFO": "info",
+        }
+
+        active = [a for a in alerts if not a.get("dismissed", False)]
+        print(f"  Found {len(active)} active alerts (of {len(alerts)} total)")
+
+        for alert in active:
+            level = alert.get("level", "WARNING")
+            keep_severity = severity_map.get(level, "warning")
+            alert_id = alert.get("id", alert.get("uuid", "unknown"))
+            formatted = alert.get("formatted", alert.get("text", "Unknown alert"))
+
+            send_to_keep({
+                "name": f"TrueNAS {instance_name}: {formatted[:80]}",
+                "description": formatted,
+                "source": ["truenas"],
+                "severity": keep_severity,
+                "status": "firing",
+                "fingerprint": fingerprint(["truenas", instance_name, alert_id]),
+                "labels": {
+                    "instance": instance_name,
+                    "class": alert.get("klass", "unknown"),
+                    "level": level,
+                    "service": f"truenas-{instance_name}",
+                    "namespace": "infrastructure",
+                },
+            })
+
+    # ── PBS Task Polling ───────────────────────────────────────────
+
+    def get_pbs_ticket():
+        """Authenticate to PBS and get a ticket."""
+        if not PBS_HOST or not PBS_USER or not PBS_PASS:
+            return None, None
+
+        url = f"https://{PBS_HOST}:8007/api2/json/access/ticket"
+        data = json.dumps({
+            "username": PBS_USER,
+            "password": PBS_PASS,
+        }).encode("utf-8")
+        req = Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+
+        try:
+            with urlopen(req, context=CTX, timeout=15) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                ticket = result.get("data", {}).get("ticket")
+                csrf = result.get("data", {}).get("CSRFPreventionToken")
+                return ticket, csrf
+        except Exception as e:
+            print(f"  PBS auth failed: {e}", file=sys.stderr)
+            return None, None
+
+    def poll_pbs():
+        """Poll PBS for failed backup/verify tasks in last 24h."""
+        if not PBS_HOST:
+            print("  Skipping PBS: missing config")
+            return
+
+        print(f"Polling PBS ({PBS_HOST})...")
+        ticket, csrf = get_pbs_ticket()
+        if not ticket:
+            print("  Could not authenticate to PBS")
+            return
+
+        # Get tasks from last 24 hours
+        since = int(time.time()) - 86400
+        url = f"https://{PBS_HOST}:8007/api2/json/nodes/localhost/tasks?since={since}&typefilter=backup,verify,prune,garbage_collection"
+        headers = {"Cookie": f"PBSAuthCookie={ticket}"}
+        result = http_request(url, headers=headers)
+
+        if result is None or "data" not in result:
+            print("  Could not fetch PBS tasks")
+            return
+
+        tasks = result["data"]
+        failed = [t for t in tasks if t.get("status", "").lower() not in ("ok", "")]
+        print(f"  Found {len(failed)} failed tasks (of {len(tasks)} total in last 24h)")
+
+        for task in failed:
+            upid = task.get("upid", "unknown")
+            task_type = task.get("type", "unknown")
+            status = task.get("status", "unknown")
+            start = task.get("starttime", 0)
+            worker_id = task.get("worker_id", "")
+
+            start_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(start)) if start else "unknown"
+
+            send_to_keep({
+                "name": f"PBS {task_type} failed: {worker_id or status}",
+                "description": f"PBS {task_type} task failed at {start_str}. Status: {status}. Worker: {worker_id}",
+                "source": ["pbs"],
+                "severity": "critical",
+                "status": "firing",
+                "fingerprint": fingerprint(["pbs", upid]),
+                "labels": {
+                    "host": "pihanga",
+                    "type": task_type,
+                    "status": status,
+                    "service": "pbs",
+                    "namespace": "infrastructure",
+                },
+            })
+
+    # ── Main ──────────────────────────────────────────────────────
+
+    def main():
+        print(f"=== Alert Forwarder started at {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+
+        poll_truenas("hdd", TRUENAS_HDD_URL, TRUENAS_HDD_KEY)
+        poll_truenas("media", TRUENAS_MEDIA_URL, TRUENAS_MEDIA_KEY)
+        poll_pbs()
+
+        print(f"=== Alert Forwarder finished at {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+
+    if __name__ == "__main__":
+        main()
+---
+# InfisicalSecret for TrueNAS HDD credentials
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: alert-forwarder-truenas-hdd
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /infrastructure/truenas-hdd
+  managedSecretReference:
+    secretName: alert-forwarder-truenas-hdd
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
+---
+# InfisicalSecret for TrueNAS Media credentials
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: alert-forwarder-truenas-media
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /infrastructure/truenas-media
+  managedSecretReference:
+    secretName: alert-forwarder-truenas-media
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
+---
+# InfisicalSecret for PBS credentials
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: alert-forwarder-pbs
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /infrastructure/pbs-pihanga
+  managedSecretReference:
+    secretName: alert-forwarder-pbs
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
+---
+# InfisicalSecret for Keep API key
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: alert-forwarder-keep
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /observability/keep
+  managedSecretReference:
+    secretName: alert-forwarder-keep
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
+---
+# CronJob - runs every 5 minutes
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: alert-forwarder
+  namespace: ai-platform
+  labels:
+    app.kubernetes.io/name: alert-forwarder
+    app.kubernetes.io/component: alerting
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: forwarder
+              image: python:3.12-slim
+              env:
+                - name: KEEP_URL
+                  value: "http://keep-api.keep:8080"
+                - name: KEEP_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-keep
+                      key: API_KEY
+                # TrueNAS HDD
+                - name: TRUENAS_HDD_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-truenas-hdd
+                      key: HOST
+                - name: TRUENAS_HDD_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-truenas-hdd
+                      key: API_KEY
+                # TrueNAS Media
+                - name: TRUENAS_MEDIA_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-truenas-media
+                      key: HOST
+                - name: TRUENAS_MEDIA_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-truenas-media
+                      key: API_KEY
+                # PBS
+                - name: PBS_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-pbs
+                      key: HOST
+                - name: PBS_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-pbs
+                      key: USERNAME
+                - name: PBS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: alert-forwarder-pbs
+                      key: PASSWORD
+              command:
+                - python3
+                - /scripts/forward.py
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+              resources:
+                requests:
+                  memory: "64Mi"
+                  cpu: "25m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "100m"
+          volumes:
+            - name: script
+              configMap:
+                name: alert-forwarder-script
