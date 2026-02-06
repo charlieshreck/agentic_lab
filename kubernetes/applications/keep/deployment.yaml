@@ -56,6 +56,19 @@ spec:
             # seccompProfile:
             #   type: RuntimeDefault
           imagePullPolicy: Always
+          # Override default startup to use 1 worker (multi-worker breaks workflow queue)
+          command: ["gunicorn"]
+          args:
+            - "keep.api.api:get_app"
+            - "--bind"
+            - "0.0.0.0:8080"
+            - "--workers"
+            - "1"
+            - "-k"
+            - "uvicorn.workers.UvicornWorker"
+            - "-c"
+            - "/venv/lib/python3.13/site-packages/keep/api/config.py"
+            - "--preload"
           ports:
             - name: http
               containerPort: 8080
