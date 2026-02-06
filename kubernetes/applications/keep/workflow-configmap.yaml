@@ -34,4 +34,3 @@ data:
                 severity: "{{ incident.severity }}"
                 alerts_count: "{{ incident.alerts_count }}"
                 creation_time: "{{ incident.creation_time }}"
-                event: "{{ trigger.event }}"
