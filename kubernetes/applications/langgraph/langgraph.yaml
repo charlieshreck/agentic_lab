@@ -4432,7 +4432,7 @@ spec:
               value: "http://matrix-bot:8000"
             # Afferent mobile PWA for alert approvals
             - name: AFFERENT_WEBHOOK_URL
-              value: "http://10.10.0.22:3458/webhook/new-approval"
+              value: "http://10.10.0.22:3456/webhook/new-approval"
             # Model configuration - Gemini only
             - name: GEMINI_MODEL
               value: "gemini/gemini-2.0-pro"

@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keep-workflows
+  namespace: keep
+  labels:
+    app.kubernetes.io/name: keep
+    app.kubernetes.io/component: workflows
+data:
+  # Workflow: Route all critical/warning alerts to LangGraph for AI triage
+  triage-to-langgraph.yaml: |
+    workflow:
+      id: triage-to-langgraph
+      description: Route alerts to LangGraph for AI triage
+      triggers:
+        - type: alert
+          filters:
+            - key: severity
+              value: ["critical", "warning"]
+      actions:
+        - name: Forward to LangGraph
+          provider:
+            type: http
+            config:
+              url: http://langgraph.ai-platform.svc.cluster.local:8000/keep-alert
+              method: POST
+              headers:
+                Content-Type: application/json
+          with:
+            body: |
+              {
+                "fingerprint": "{{ alert.fingerprint }}",
+                "id": "{{ alert.id }}",
+                "name": "{{ alert.name }}",
+                "alertname": "{{ alert.alertname }}",
+                "severity": "{{ alert.severity }}",
+                "status": "{{ alert.status }}",
+                "description": "{{ alert.description }}",
+                "labels": {{ alert.labels | tojson }},
+                "annotations": {{ alert.annotations | tojson if alert.annotations else '{}' }},
+                "source": {{ alert.source | tojson if alert.source else '[]' }},
+                "lastReceived": "{{ alert.lastReceived }}"
+              }

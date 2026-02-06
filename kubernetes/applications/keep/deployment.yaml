@@ -91,9 +91,15 @@ spec:
             # Pusher/websocket disabled
             - name: PUSHER_DISABLED
               value: "true"
+            # Load workflows from configmap on startup
+            - name: KEEP_WORKFLOWS_DIRECTORY
+              value: "/workflows"
           volumeMounts:
             - name: keep-data
               mountPath: /data
+            - name: workflows
+              mountPath: /workflows
+              readOnly: true
           resources:
             requests:
               memory: "512Mi"
@@ -119,3 +125,6 @@ spec:
         - name: keep-data
           persistentVolumeClaim:
             claimName: keep-data
+        - name: workflows
+          configMap:
+            name: keep-workflows
