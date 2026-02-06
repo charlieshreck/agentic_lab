@@ -75,6 +75,9 @@ data:
     MONITORING_MCP_URL = os.environ.get("MONITORING_MCP_URL", "http://monitoring-mcp:8000")
     EXTERNAL_MCP_URL = os.environ.get("EXTERNAL_MCP_URL", "http://external-mcp:8000")
 
+    # Keep API for fetching incident details
+    KEEP_API_URL = os.environ.get("KEEP_API_URL", "http://keep.keep.svc.cluster.local:8080")
+
     # Matrix bot for notifications (replaces Telegram)
     MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
 
@@ -1137,6 +1140,18 @@ data:
         class Config:
             extra = "allow"
 
+    class KeepIncidentWebhook(BaseModel):
+        """Incident webhook payload from Keep workflow trigger."""
+        incident_id: str
+        incident_name: Optional[str] = None
+        status: Optional[str] = None
+        severity: Optional[str] = None
+        alerts_count: Optional[str] = None  # String from template
+        creation_time: Optional[str] = None
+        event: Optional[str] = None  # "created" or "updated"
+        class Config:
+            extra = "allow"
+
     class ApprovalRequest(BaseModel):
         alert_id: str
         solution_index: int
@@ -1360,6 +1375,215 @@ data:
             except Exception as e:
                 logger.error(f"Afferent notification error: {e}")
                 return {"error": str(e)}
+
+    # ============================================================================
+    # INCIDENT PIPELINE - Keep incidents with Coroot enrichment
+    # ============================================================================
+
+    # Track recently processed incidents to deduplicate webhook retries
+    _recent_incidents: dict = {}
+
+    async def _fetch_incident_from_keep(incident_id: str) -> dict:
+        """Fetch full incident details including alerts from Keep API."""
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                # Fetch incident details
+                resp = await client.get(
+                    f"{KEEP_API_URL}/incidents/{incident_id}",
+                    headers={"Authorization": "Bearer keep-internal"}
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"Keep incident fetch failed: HTTP {resp.status_code}")
+                    return {}
+                incident = resp.json()
+
+                # Fetch alerts for this incident
+                alerts_resp = await client.get(
+                    f"{KEEP_API_URL}/incidents/{incident_id}/alerts",
+                    headers={"Authorization": "Bearer keep-internal"}
+                )
+                if alerts_resp.status_code == 200:
+                    alerts_data = alerts_resp.json()
+                    if isinstance(alerts_data, dict):
+                        incident["alerts"] = alerts_data.get("items", [])
+                    elif isinstance(alerts_data, list):
+                        incident["alerts"] = alerts_data
+                else:
+                    incident["alerts"] = []
+
+                return incident
+            except Exception as e:
+                logger.error(f"Failed to fetch incident {incident_id} from Keep: {e}")
+                return {}
+
+    async def _enrich_incident(incident: dict) -> dict:
+        """Enrich incident with Coroot metrics, anomalies, dependencies, and runbooks."""
+        enrichment = {
+            "coroot_metrics": {},
+            "coroot_anomalies": [],
+            "service_dependencies": {},
+            "runbook_matches": [],
+            "affected_services": set(),
+            "affected_namespaces": set(),
+        }
+
+        alerts = incident.get("alerts", [])
+
+        # Collect unique services from alerts
+        for alert in alerts:
+            labels = alert.get("labels", {})
+            ns = labels.get("namespace", alert.get("namespace", ""))
+            app = labels.get("application", alert.get("name", ""))
+            if ns:
+                enrichment["affected_namespaces"].add(ns)
+            if app and ns:
+                enrichment["affected_services"].add(f"{ns}/{app}")
+
+        # Fetch Coroot metrics for each affected service
+        seen_app_ids = set()
+        for alert in alerts:
+            try:
+                coroot_app_id = await _resolve_coroot_app_id(alert)
+                if coroot_app_id and coroot_app_id not in seen_app_ids:
+                    seen_app_ids.add(coroot_app_id)
+                    metrics = await call_coroot_mcp("coroot_get_service_metrics", app_id=coroot_app_id)
+                    if metrics:
+                        svc_name = coroot_app_id.split(":")[-1] if ":" in coroot_app_id else coroot_app_id
+                        enrichment["coroot_metrics"][svc_name] = {
+                            "app_id": coroot_app_id,
+                            "data": metrics
+                        }
+                    # Fetch dependencies for this service
+                    deps = await call_coroot_mcp("coroot_get_service_dependencies", app_id=coroot_app_id)
+                    if deps:
+                        svc_name = coroot_app_id.split(":")[-1] if ":" in coroot_app_id else coroot_app_id
+                        enrichment["service_dependencies"][svc_name] = deps
+            except Exception as e:
+                logger.warning(f"Coroot enrichment failed for alert: {e}")
+
+        # Fetch recent anomalies (once for all)
+        try:
+            anomalies = await call_coroot_mcp("coroot_get_recent_anomalies", hours=24)
+            if anomalies:
+                enrichment["coroot_anomalies"] = anomalies if isinstance(anomalies, list) else [anomalies]
+        except Exception as e:
+            logger.warning(f"Coroot anomalies fetch failed: {e}")
+
+        # Search for matching runbooks
+        for alert in alerts[:5]:  # Limit to avoid excessive lookups
+            alert_name = alert.get("name", alert.get("alertname", ""))
+            if alert_name:
+                try:
+                    results = await call_knowledge_mcp(
+                        f"api/call",
+                        "POST",
+                        {"tool_name": "search_runbooks", "arguments": {"query": alert_name}}
+                    )
+                    if results and not results.get("error"):
+                        enrichment["runbook_matches"].append({
+                            "alert": alert_name,
+                            "results": results
+                        })
+                except Exception:
+                    pass
+
+        # Convert sets to lists for JSON serialization
+        enrichment["affected_services"] = list(enrichment["affected_services"])
+        enrichment["affected_namespaces"] = list(enrichment["affected_namespaces"])
+        return enrichment
+
+    async def notify_afferent_incident(incident: dict, enrichment: dict) -> dict:
+        """Send enriched incident to Afferent mobile PWA."""
+        if not AFFERENT_WEBHOOK_URL:
+            return {"skipped": True, "reason": "AFFERENT_WEBHOOK_URL not configured"}
+
+        # Build alert summaries
+        alerts_summary = []
+        for alert in incident.get("alerts", [])[:20]:
+            source = alert.get("source", [])
+            source_str = source[0] if isinstance(source, list) and source else str(source)
+            alerts_summary.append({
+                "name": alert.get("name", alert.get("alertname", "unknown")),
+                "severity": alert.get("severity", "warning"),
+                "status": alert.get("status", "unknown"),
+                "source": source_str,
+                "description": (alert.get("description", "") or "")[:200],
+                "namespace": alert.get("labels", {}).get("namespace", alert.get("namespace", "")),
+            })
+
+        # Determine overall severity from alerts
+        severity_order = {"critical": 4, "error": 3, "warning": 2, "info": 1}
+        max_severity = "info"
+        for a in alerts_summary:
+            if severity_order.get(a["severity"], 0) > severity_order.get(max_severity, 0):
+                max_severity = a["severity"]
+
+        payload = {
+            "type": "incident",
+            "incident_id": incident.get("id", ""),
+            "incident_name": incident.get("user_generated_name") or incident.get("ai_generated_name") or "Unnamed Incident",
+            "status": incident.get("status", "firing"),
+            "severity": incident.get("severity") or max_severity,
+            "alerts_count": len(incident.get("alerts", [])),
+            "alerts": alerts_summary,
+            "affected_services": enrichment.get("affected_services", []),
+            "affected_namespaces": enrichment.get("affected_namespaces", []),
+            "timestamps": {
+                "started": incident.get("creation_time", ""),
+                "last_seen": incident.get("last_seen_time", ""),
+            },
+            "coroot_metrics": enrichment.get("coroot_metrics", {}),
+            "coroot_anomalies": enrichment.get("coroot_anomalies", []),
+            "service_dependencies": enrichment.get("service_dependencies", {}),
+            "runbook_matches": enrichment.get("runbook_matches", []),
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(AFFERENT_WEBHOOK_URL, json=payload)
+                if response.status_code < 300:
+                    logger.info(f"Afferent notified for incident {incident.get('id')}")
+                    return {"success": True}
+                else:
+                    logger.warning(f"Afferent incident notification failed: {response.status_code}")
+                    return {"error": f"HTTP {response.status_code}"}
+            except Exception as e:
+                logger.error(f"Afferent incident notification error: {e}")
+                return {"error": str(e)}
+
+    async def _process_incident_background(incident_id: str, event: str):
+        """Background task to process an incident through enrichment pipeline."""
+        try:
+            logger.info(f"Processing incident {incident_id} (event={event})")
+
+            # Fetch full incident from Keep
+            incident = await _fetch_incident_from_keep(incident_id)
+            if not incident:
+                logger.warning(f"Could not fetch incident {incident_id} from Keep")
+                return
+
+            alerts_count = len(incident.get("alerts", []))
+            logger.info(f"Incident {incident_id}: {alerts_count} alerts, severity={incident.get('severity')}")
+
+            # Skip resolved incidents
+            if incident.get("status") == "resolved":
+                logger.info(f"Incident {incident_id} is resolved, skipping enrichment")
+                return
+
+            # Enrich with Coroot + runbooks
+            enrichment = await _enrich_incident(incident)
+            logger.info(
+                f"Incident {incident_id} enriched: "
+                f"{len(enrichment.get('coroot_metrics', {}))} services with metrics, "
+                f"{len(enrichment.get('runbook_matches', []))} runbook matches"
+            )
+
+            # Send to Afferent
+            result = await notify_afferent_incident(incident, enrichment)
+            logger.info(f"Incident {incident_id} -> Afferent: {result}")
+
+        except Exception as e:
+            logger.error(f"Incident processing failed for {incident_id}: {e}")
 
     # ============================================================================
     # A2A ORCHESTRATOR - Gemini-powered parallel specialist agents
@@ -3794,6 +4018,55 @@ data:
             "message": "Keep alert queued for processing"
         }
 
+    @app.post("/keep-incident", status_code=202)
+    async def process_keep_incident(request: Request):
+        """Receive incident from Keep workflow and process with enrichment.
+
+        Keep correlation rules group alerts into incidents, then the
+        forward-incidents workflow sends a webhook here. We fetch full
+        incident details from Keep API, enrich with Coroot metrics,
+        and send to Afferent for mobile triage.
+        """
+        body = await request.body()
+        logger.info("Keep incident webhook: %s", body.decode('utf-8', errors='replace')[:1000])
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            logger.warning("Keep incident: invalid JSON body")
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+
+        incident_id = payload.get("incident_id", "")
+        if not incident_id:
+            raise HTTPException(status_code=400, detail="Missing incident_id")
+
+        event = payload.get("event", "unknown")
+
+        # Deduplicate - skip if we processed this incident recently (within 60s)
+        now = datetime.utcnow()
+        last_seen = _recent_incidents.get(incident_id)
+        if last_seen and (now - last_seen).total_seconds() < 60:
+            logger.info(f"Incident {incident_id} deduplicated (processed {(now - last_seen).total_seconds():.0f}s ago)")
+            return {"incident_id": incident_id, "status": "deduplicated"}
+
+        _recent_incidents[incident_id] = now
+
+        # Clean old entries (keep last 100)
+        if len(_recent_incidents) > 100:
+            sorted_items = sorted(_recent_incidents.items(), key=lambda x: x[1])
+            _recent_incidents.clear()
+            for k, v in sorted_items[-50:]:
+                _recent_incidents[k] = v
+
+        # Process in background
+        asyncio.create_task(_process_incident_background(incident_id, event))
+        logger.info(f"Incident {incident_id} (event={event}) accepted for processing")
+        return {
+            "incident_id": incident_id,
+            "status": "accepted",
+            "message": "Incident queued for enrichment and notification"
+        }
+
     @app.post("/approve")
     async def approve_action(request: ApprovalRequest):
         # Get from Redis-backed storage
@@ -4606,6 +4879,9 @@ spec:
             # Matrix bot (replaces Telegram)
             - name: MATRIX_BOT_URL
               value: "http://matrix-bot:8000"
+            # Keep API for incident details
+            - name: KEEP_API_URL
+              value: "http://keep.keep.svc.cluster.local:8080"
             # Afferent mobile PWA for alert approvals
             - name: AFFERENT_WEBHOOK_URL
               value: "http://10.10.0.22:3456/webhook/new-approval"

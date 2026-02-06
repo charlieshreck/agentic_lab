@@ -7,17 +7,31 @@ metadata:
     app.kubernetes.io/name: keep
     app.kubernetes.io/component: workflows
 data:
-  # Note: Alert forwarding to LangGraph is handled by the Keep webhook provider
-  # configured in Keep's database. This configmap is kept for documentation
-  # but the workflow is disabled to avoid duplicate/conflicting requests.
-  #
-  # The webhook provider sends alerts to: http://langgraph.ai-platform.svc.cluster.local:8000/keep-alert
-  # LangGraph processes them and notifies Afferent PWA for mobile alert triage.
-  placeholder.yaml: |
-    # Placeholder - actual workflow is configured via Keep webhook provider
+  # Incident pipeline: Keep correlates alerts into incidents via correlation rules,
+  # then forwards incidents to LangGraph for Coroot enrichment and mobile triage.
+  # LangGraph fetches full incident details (including alerts) from Keep API.
+  forward-incidents.yaml: |
     workflow:
-      id: placeholder
-      description: Placeholder workflow (not used)
-      disabled: true
-      triggers: []
-      actions: []
+      id: forward-incidents-to-langgraph
+      description: Forward incidents to LangGraph for enrichment and mobile triage
+      triggers:
+        - type: incident
+          events:
+            - created
+            - updated
+      actions:
+        - name: notify-langgraph
+          provider:
+            type: webhook
+            config: "{{ providers.langgraph }}"
+            with:
+              url: "http://langgraph.ai-platform.svc.cluster.local:8000/keep-incident"
+              method: POST
+              body:
+                incident_id: "{{ incident.id }}"
+                incident_name: "{{ incident.user_generated_name }}"
+                status: "{{ incident.status }}"
+                severity: "{{ incident.severity }}"
+                alerts_count: "{{ incident.alerts_count }}"
+                creation_time: "{{ incident.creation_time }}"
+                event: "{{ trigger.event }}"
