@@ -156,6 +156,70 @@ def _get_evidence(finding) -> str:
     return str(evidence)
 
 
+async def gemini_query(
+    system_prompt: str,
+    question: str,
+    evidence: str,
+    messages: list = None,
+    model: str = None
+) -> str:
+    """Answer a free-form question using Gemini with evidence context.
+
+    Unlike gemini_analyze() which returns structured JSON, this returns
+    natural language suitable for chat responses.
+    """
+    if not OPENROUTER_API_KEY:
+        return "Gemini unavailable (no API key). Evidence gathered:\n" + evidence[:500]
+
+    model = model or SPECIALIST_MODEL
+
+    llm_messages = [{"role": "system", "content": system_prompt}]
+
+    # Add conversation history if provided
+    if messages:
+        for msg in messages:
+            llm_messages.append(msg)
+
+    # Build user message with evidence
+    user_content = f"""## Evidence from homelab systems:
+{evidence}
+
+## Question:
+{question}
+"""
+    llm_messages.append({"role": "user", "content": user_content})
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://kernow.io",
+                    "X-Title": "A2A Orchestrator"
+                },
+                json={
+                    "model": model,
+                    "messages": llm_messages,
+                    "max_tokens": 1000,
+                    "temperature": 0.3
+                }
+            )
+
+            if response.status_code == 429:
+                logger.warning("OpenRouter rate limited for query")
+                return "Gemini rate limited. Evidence gathered:\n" + evidence[:500]
+
+            response.raise_for_status()
+            result = response.json()
+            return result.get("choices", [{}])[0].get("message", {}).get("content", "No response from Gemini")
+
+    except Exception as e:
+        logger.error(f"Gemini query failed: {e}")
+        return f"Gemini query failed ({e}). Evidence gathered:\n" + evidence[:500]
+
+
 async def gemini_synthesize(
     findings: list,
     alert: Any,

@@ -36,6 +36,15 @@ from a2a_orchestrator.specialists import (
 )
 from a2a_orchestrator.synthesis import synthesize_findings
 from a2a_orchestrator.fallback import qwen_fallback_assess
+from a2a_orchestrator.llm import gemini_query
+from a2a_orchestrator.mcp_client import (
+    truenas_get_alerts, truenas_list_pools, truenas_get_all_alerts,
+    proxmox_list_vms, proxmox_list_containers,
+    gatus_get_failing,
+    kubectl_get_pods, kubectl_get_events,
+    query_metrics, coroot_get_anomalies,
+    call_mcp_tool,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -258,6 +267,212 @@ async def investigate(request: InvestigateRequest):
             fallback_used=True,
             latency_ms=latency_ms
         )
+
+
+# =============================================================================
+# Query Endpoint - Free-form questions with MCP evidence
+# =============================================================================
+
+QUERY_SYSTEM_PROMPT = """You are the Kernow homelab assistant. You answer questions about the homelab using REAL data from monitoring systems.
+
+CRITICAL RULES:
+- Answer ONLY based on the evidence data provided below. This is real data from the actual systems.
+- If evidence is empty or shows errors, say "I couldn't retrieve data from X" — do NOT make up data.
+- NEVER fabricate pod names, IP addresses, metrics, log lines, or any other data.
+- Be definitive and concise. Report findings, not suggestions for the user to check.
+- If the evidence clearly answers the question, state the answer directly.
+- If the evidence is insufficient, say what you found and what data is missing.
+"""
+
+
+class QueryRequest(BaseModel):
+    """Free-form query request."""
+    question: str
+    context: dict = {}
+    messages: list = []  # Conversation history
+    conversation_id: Optional[str] = None
+
+
+class QueryResponse(BaseModel):
+    """Query response with evidence trail."""
+    response: str
+    evidence_sources: List[str] = []
+    tools_called: List[str] = []
+    model_used: str = "gemini"
+
+
+async def gather_query_evidence(question: str, context: dict = None) -> tuple[str, list]:
+    """Gather MCP evidence relevant to the question.
+
+    Returns (evidence_text, tools_called)
+    """
+    q = question.lower()
+    ctx = str(context or {}).lower()
+    combined = q + " " + ctx
+    evidence_parts = []
+    tools_called = []
+    errors = []
+
+    # TrueNAS / storage queries
+    if any(kw in combined for kw in ["truenas", "zfs", "pool", "scrub", "disk", "storage", "nas", "dataset", "smart"]):
+        for inst in ["hdd", "media"]:
+            try:
+                result = await truenas_get_alerts(inst)
+                tools_called.append(f"truenas_get_alerts({inst})")
+                if result.get("status") == "success":
+                    evidence_parts.append(f"TrueNAS {inst} alerts:\n{str(result.get('output', ''))[:800]}")
+            except Exception as e:
+                errors.append(f"TrueNAS {inst} alerts failed: {e}")
+
+            try:
+                result = await truenas_list_pools(inst)
+                tools_called.append(f"truenas_list_pools({inst})")
+                if result.get("status") == "success":
+                    evidence_parts.append(f"TrueNAS {inst} pools:\n{str(result.get('output', ''))[:800]}")
+            except Exception as e:
+                errors.append(f"TrueNAS {inst} pools failed: {e}")
+
+    # Proxmox / VM queries
+    if any(kw in combined for kw in ["proxmox", "vm", "virtual", "container", "lxc", "qemu", "hypervisor", "node"]):
+        try:
+            result = await proxmox_list_vms()
+            tools_called.append("proxmox_list_vms")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Proxmox VMs:\n{str(result.get('output', ''))[:800]}")
+        except Exception as e:
+            errors.append(f"Proxmox VMs failed: {e}")
+
+        try:
+            result = await proxmox_list_containers()
+            tools_called.append("proxmox_list_containers")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Proxmox containers:\n{str(result.get('output', ''))[:800]}")
+        except Exception as e:
+            errors.append(f"Proxmox containers failed: {e}")
+
+    # Kubernetes queries
+    if any(kw in combined for kw in ["pod", "kubernetes", "k8s", "deployment", "cluster", "namespace", "service"]):
+        ns = "ai-platform"  # Default to ai-platform
+        # Try to detect namespace from context
+        for candidate in ["ai-platform", "keep", "monitoring", "default", "argocd"]:
+            if candidate in combined:
+                ns = candidate
+                break
+
+        try:
+            result = await kubectl_get_pods(namespace=ns)
+            tools_called.append(f"kubectl_get_pods({ns})")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Pods in {ns}:\n{str(result.get('output', ''))[:800]}")
+        except Exception as e:
+            errors.append(f"Pods failed: {e}")
+
+        try:
+            result = await kubectl_get_events(namespace=ns)
+            tools_called.append(f"kubectl_get_events({ns})")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Events in {ns}:\n{str(result.get('output', ''))[:800]}")
+        except Exception as e:
+            errors.append(f"Events failed: {e}")
+
+    # Endpoint health / Gatus
+    if any(kw in combined for kw in ["gatus", "health", "endpoint", "down", "failing", "unreachable"]):
+        try:
+            result = await gatus_get_failing()
+            tools_called.append("gatus_get_failing_endpoints")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Failing endpoints:\n{str(result.get('output', ''))[:800]}")
+        except Exception as e:
+            errors.append(f"Gatus failed: {e}")
+
+    # Metrics / anomalies
+    if any(kw in combined for kw in ["metric", "anomaly", "latency", "error rate", "performance", "coroot"]):
+        try:
+            result = await coroot_get_anomalies()
+            tools_called.append("coroot_get_recent_anomalies")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Recent anomalies:\n{str(result.get('output', ''))[:800]}")
+        except Exception as e:
+            errors.append(f"Coroot failed: {e}")
+
+    # Alert-related queries — always check alerts if the question mentions them
+    if any(kw in combined for kw in ["alert", "incident", "firing", "warning", "critical"]):
+        try:
+            result = await call_mcp_tool("observability", "list_alerts")
+            tools_called.append("list_alerts")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Active alerts:\n{str(result.get('output', ''))[:800]}")
+        except Exception as e:
+            errors.append(f"Alerts failed: {e}")
+
+    # If nothing matched keywords, do a broad sweep
+    if not evidence_parts and not errors:
+        try:
+            result = await truenas_get_all_alerts()
+            tools_called.append("truenas_get_all_alerts")
+            if result.get("status") == "success":
+                evidence_parts.append(f"All TrueNAS alerts:\n{str(result.get('output', ''))[:600]}")
+        except:
+            pass
+
+        try:
+            result = await gatus_get_failing()
+            tools_called.append("gatus_get_failing_endpoints")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Failing endpoints:\n{str(result.get('output', ''))[:600]}")
+        except:
+            pass
+
+        try:
+            result = await call_mcp_tool("observability", "list_alerts")
+            tools_called.append("list_alerts")
+            if result.get("status") == "success":
+                evidence_parts.append(f"Active alerts:\n{str(result.get('output', ''))[:600]}")
+        except:
+            pass
+
+    # Add errors to evidence
+    if errors:
+        evidence_parts.append("Data fetch errors:\n" + "\n".join(f"- {e}" for e in errors))
+
+    evidence_text = "\n\n".join(evidence_parts) if evidence_parts else "No data could be retrieved from homelab systems."
+    return evidence_text, tools_called
+
+
+@app.post("/v1/query", response_model=QueryResponse)
+async def query(request: QueryRequest):
+    """Answer a free-form question using MCP evidence and Gemini.
+
+    This endpoint is designed for Afferent chat: gather real data from
+    MCPs, then use Gemini to analyze and respond.
+    """
+    start_time = datetime.now()
+    logger.info(f"Query: {request.question[:100]}")
+
+    # Gather evidence from MCPs
+    evidence, tools_called = await gather_query_evidence(
+        request.question, request.context
+    )
+
+    logger.info(f"Gathered evidence from {len(tools_called)} tools")
+
+    # Send to Gemini with evidence
+    response_text = await gemini_query(
+        system_prompt=QUERY_SYSTEM_PROMPT,
+        question=request.question,
+        evidence=evidence,
+        messages=request.messages or None
+    )
+
+    latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+    logger.info(f"Query answered in {latency_ms}ms using {len(tools_called)} tools")
+
+    return QueryResponse(
+        response=response_text,
+        evidence_sources=[t for t in tools_called],
+        tools_called=tools_called,
+        model_used="gemini"
+    )
 
 
 # =============================================================================
