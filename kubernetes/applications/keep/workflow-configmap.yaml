@@ -7,30 +7,17 @@ metadata:
     app.kubernetes.io/name: keep
     app.kubernetes.io/component: workflows
 data:
-  # Workflow: Route all alerts to LangGraph for AI triage
-  triage-to-langgraph.yaml: |
+  # Note: Alert forwarding to LangGraph is handled by the Keep webhook provider
+  # configured in Keep's database. This configmap is kept for documentation
+  # but the workflow is disabled to avoid duplicate/conflicting requests.
+  #
+  # The webhook provider sends alerts to: http://langgraph.ai-platform.svc.cluster.local:8000/keep-alert
+  # LangGraph processes them and notifies Afferent PWA for mobile alert triage.
+  placeholder.yaml: |
+    # Placeholder - actual workflow is configured via Keep webhook provider
     workflow:
-      id: triage-to-langgraph
-      description: Route alerts to LangGraph for AI triage
-      triggers:
-        - type: alert
-      actions:
-        - name: Forward to LangGraph
-          provider:
-            type: http
-            with:
-              method: POST
-              url: "http://langgraph.ai-platform.svc.cluster.local:8000/keep-alert"
-              headers:
-                Content-Type: "application/json"
-              body:
-                fingerprint: "{{ alert.fingerprint }}"
-                id: "{{ alert.id }}"
-                name: "{{ alert.name }}"
-                alertname: "{{ alert.name }}"
-                severity: "{{ alert.severity }}"
-                status: "{{ alert.status }}"
-                description: "{{ alert.description }}"
-                labels: {{ alert.labels }}
-                source: {{ alert.source }}
-                lastReceived: "{{ alert.lastReceived }}"
+      id: placeholder
+      description: Placeholder workflow (not used)
+      disabled: true
+      triggers: []
+      actions: []
