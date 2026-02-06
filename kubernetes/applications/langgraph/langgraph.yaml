@@ -1504,16 +1504,36 @@ data:
             if severity_order.get(a["severity"], 0) > severity_order.get(max_severity, 0):
                 max_severity = a["severity"]
 
+        # Build description from Keep's summaries
+        description = (
+            incident.get("user_summary")
+            or incident.get("generated_summary")
+            or incident.get("description")
+            or ""
+        )
+
+        # Collect services from Keep + enrichment
+        keep_services = incident.get("services", [])
+        enriched_services = enrichment.get("affected_services", [])
+        all_services = list(set(keep_services + enriched_services))
+
+        # Collect alert sources
+        alert_sources = incident.get("alert_sources", [])
+
         payload = {
             "type": "incident",
             "incident_id": incident.get("id", ""),
             "incident_name": incident.get("user_generated_name") or incident.get("ai_generated_name") or "Unnamed Incident",
+            "description": description,
             "status": incident.get("status", "firing"),
             "severity": incident.get("severity") or max_severity,
             "alerts_count": len(incident.get("alerts", [])),
             "alerts": alerts_summary,
-            "affected_services": enrichment.get("affected_services", []),
+            "alert_sources": alert_sources,
+            "affected_services": all_services,
             "affected_namespaces": enrichment.get("affected_namespaces", []),
+            "incident_type": incident.get("incident_type", ""),
+            "rule_name": incident.get("rule_name", ""),
             "timestamps": {
                 "started": incident.get("creation_time", ""),
                 "last_seen": incident.get("last_seen_time", ""),
