@@ -11,7 +11,7 @@ data:
   # Note: Names use underscores to be valid env var names
   KNOWLEDGE_MCP_URL: "http://knowledge-mcp:8000"
   INFRASTRUCTURE_MCP_URL: "http://infrastructure-mcp:8000"
-  COROOT_MCP_URL: "http://coroot-mcp:8000"
+  COROOT_MCP_URL: "http://observability-mcp:8000"
   PROXMOX_MCP_URL: "http://proxmox-mcp:8000"
   OPNSENSE_MCP_URL: "http://opnsense-mcp:8000"
   ADGUARD_MCP_URL: "http://adguard-mcp:8000"
@@ -26,6 +26,11 @@ data:
   PLEX_MCP_URL: "http://plex-mcp:8000"
   VIKUNJA_MCP_URL: "http://vikunja-mcp:8000"
   TASMOTA_MCP_URL: "http://tasmota-mcp:8000"
-  MONITORING_MCP_URL: "http://monitoring-mcp:8000"
-  KEEP_MCP_URL: "http://keep-mcp:8000"
+  MONITORING_MCP_URL: "http://observability-mcp:8000"
+  KEEP_MCP_URL: "http://observability-mcp:8000"
+  # Consolidated domain MCP URLs
+  OBSERVABILITY_MCP_URL: "http://observability-mcp:8000"
+  EXTERNAL_MCP_URL: "http://external-mcp:8000"
+  MEDIA_MCP_URL: "http://media-mcp:8000"
+  HOME_MCP_URL: "http://home-mcp:8000"
   INFISICAL_MCP_URL: "http://infisical-mcp:8000"
