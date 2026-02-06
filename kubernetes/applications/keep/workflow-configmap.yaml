@@ -31,6 +31,6 @@ data:
                 severity: "{{ alert.severity }}"
                 status: "{{ alert.status }}"
                 description: "{{ alert.description }}"
-                labels: "{{ alert.labels }}"
-                source: "{{ alert.source }}"
+                labels: {{ alert.labels }}
+                source: {{ alert.source }}
                 lastReceived: "{{ alert.lastReceived }}"
