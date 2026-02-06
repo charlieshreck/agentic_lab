@@ -1212,15 +1212,32 @@ data:
                 "rollback": sol.get("rollback", "Manual intervention required")
             }
 
+        # Get source - could be list or string from Keep
+        source = alert.get("source")
+        if isinstance(source, list):
+            source_str = source[0] if source else "unknown"
+        else:
+            source_str = source or "unknown"
+
         payload = {
             "id": alert.get("id"),
             "alert_fingerprint": alert.get("id"),
-            "alert_name": alert.get("alertname", "Unknown Alert"),
+            "alert_name": alert.get("alertname", alert.get("name", "Unknown Alert")),
+            "description": alert.get("description", ""),
             "service": alert.get("namespace", "unknown"),
             "severity": alert.get("severity", "warning"),
-            "source": "LangGraph",
+            "source": source_str,
+            "alert_source": source_str,  # Original source (coroot, prometheus, etc.)
             "labels": alert.get("labels", {}),
-            "plan": plan
+            "annotations": alert.get("annotations", {}),
+            "plan": plan,
+            # Include assessment context for better understanding
+            "assessment": {
+                "confidence": assessment.get("confidence", 0),
+                "similar_runbook": assessment.get("similar_runbook"),
+                "similarity_score": assessment.get("similarity_score", 0),
+                "recommendation": assessment.get("recommendation", "")
+            }
         }
 
         async with httpx.AsyncClient(timeout=10.0) as client:
