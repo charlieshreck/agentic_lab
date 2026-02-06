@@ -165,6 +165,51 @@ TOOL_CATALOG: Dict[str, ToolSpec] = {
         risk_level="low",
         description="Query metrics at a point in time"
     ),
+
+    # === TrueNAS Operations ===
+    "truenas_get_alerts": ToolSpec(
+        name="truenas_get_alerts",
+        mcp="infrastructure",
+        required_args=[],
+        optional_args=["instance"],
+        risk_level="low",
+        description="Get active alerts from TrueNAS (instance: hdd or media)"
+    ),
+    "truenas_list_pools": ToolSpec(
+        name="truenas_list_pools",
+        mcp="infrastructure",
+        required_args=[],
+        optional_args=["instance"],
+        risk_level="low",
+        description="List ZFS pools with health status"
+    ),
+
+    # === Proxmox Operations ===
+    "proxmox_list_vms": ToolSpec(
+        name="proxmox_list_vms",
+        mcp="infrastructure",
+        required_args=[],
+        optional_args=["node"],
+        risk_level="low",
+        description="List Proxmox VMs with status"
+    ),
+    "proxmox_list_containers": ToolSpec(
+        name="proxmox_list_containers",
+        mcp="infrastructure",
+        required_args=[],
+        optional_args=["node"],
+        risk_level="low",
+        description="List Proxmox LXC containers with status"
+    ),
+
+    # === Gatus Operations ===
+    "gatus_get_failing_endpoints": ToolSpec(
+        name="gatus_get_failing_endpoints",
+        mcp="observability",
+        required_args=[],
+        risk_level="low",
+        description="Get failing endpoint health checks from Gatus"
+    ),
 }
 
 

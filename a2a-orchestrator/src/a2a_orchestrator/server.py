@@ -32,6 +32,7 @@ from a2a_orchestrator.specialists import (
     security_investigate,
     sre_investigate,
     database_investigate,
+    infrastructure_investigate,
 )
 from a2a_orchestrator.synthesis import synthesize_findings
 from a2a_orchestrator.fallback import qwen_fallback_assess
@@ -86,6 +87,7 @@ class InvestigateRequest(BaseModel):
 # =============================================================================
 
 SPECIALISTS = {
+    "infrastructure": infrastructure_investigate,
     "devops": devops_investigate,
     "network": network_investigate,
     "security": security_investigate,
@@ -96,6 +98,7 @@ SPECIALISTS = {
 # Domain weights for synthesis
 DOMAIN_AUTHORITY = {
     "security": 1.0,
+    "infrastructure": 0.95,
     "devops": 0.9,
     "sre": 0.8,
     "network": 0.7,

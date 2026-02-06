@@ -15,6 +15,12 @@ from a2a_orchestrator.mcp_client import (
     adguard_get_rewrites,
     search_runbooks,
     search_entities,
+    truenas_get_alerts,
+    truenas_list_pools,
+    truenas_get_all_alerts,
+    proxmox_list_vms,
+    proxmox_list_containers,
+    gatus_get_failing,
     call_mcp_tool,
 )
 from a2a_orchestrator.llm import gemini_analyze
@@ -409,6 +415,138 @@ async def database_investigate(alert) -> Finding:
         logger.error(f"Database investigation failed: {e}")
         return Finding(
             agent="database",
+            status="ERROR",
+            issue=str(e)[:200],
+            tools_used=tools_used
+        )
+
+
+# =============================================================================
+# Infrastructure Specialist - TrueNAS, Proxmox, PBS, Gatus, Beszel
+# =============================================================================
+
+INFRA_PROMPT = """You are an Infrastructure specialist investigating a hardware, storage, or backup alert.
+
+Analyze the provided TrueNAS alerts, pool status, Proxmox VM/container status, or endpoint health data.
+
+Your job is to determine:
+1. What is the ACTUAL root cause based on the evidence?
+2. Is this a real issue, a stale alert, or a false positive?
+3. What specific action resolves it?
+
+CRITICAL RULES:
+- Base your analysis ONLY on the evidence data provided. The evidence IS the investigation.
+- If the evidence shows pool X doesn't exist but an alert references pool X, conclude the alert is stale.
+- If a scrub task references a removed pool, say so — don't suggest the user "check scrub tasks".
+- NEVER list things for the user to check. YOU are doing the checking. Report findings, not suggestions.
+- Be definitive: "The alert is stale because..." not "You might want to verify..."
+
+Output JSON with: status (PASS/WARN/FAIL), issue, recommendation
+"""
+
+
+async def infrastructure_investigate(alert) -> Finding:
+    """Infrastructure specialist: TrueNAS, Proxmox, PBS, Gatus, Beszel."""
+    start = datetime.now()
+    tools_used = []
+
+    try:
+        evidence_parts = []
+        alert_name_lower = alert.name.lower()
+        alert_desc_lower = (alert.description or "").lower()
+        source = getattr(alert.labels, "source", None) or ""
+        source_lower = source.lower() if source else ""
+
+        # Detect alert source and route to appropriate tools
+        is_truenas = any(x in alert_name_lower + alert_desc_lower + source_lower
+                         for x in ["truenas", "zfs", "pool", "scrub", "smart", "disk"])
+        is_proxmox = any(x in alert_name_lower + alert_desc_lower + source_lower
+                         for x in ["proxmox", "vm", "container", "lxc", "qemu"])
+        is_gatus = "gatus" in alert_name_lower + source_lower
+        is_beszel = "beszel" in alert_name_lower + source_lower
+
+        # --- TrueNAS investigation ---
+        if is_truenas:
+            # Determine which instance (default to both)
+            instances = []
+            if "hdd" in alert_name_lower + alert_desc_lower:
+                instances = ["hdd"]
+            elif "media" in alert_name_lower + alert_desc_lower:
+                instances = ["media"]
+            else:
+                instances = ["hdd", "media"]
+
+            for inst in instances:
+                # Get alerts
+                alerts_result = await truenas_get_alerts(inst)
+                tools_used.append(f"truenas_get_alerts({inst})")
+                if alerts_result.get("status") == "success":
+                    evidence_parts.append(f"TrueNAS {inst} alerts:\n{str(alerts_result.get('output', ''))[:600]}")
+
+                # Get pool status
+                pools_result = await truenas_list_pools(inst)
+                tools_used.append(f"truenas_list_pools({inst})")
+                if pools_result.get("status") == "success":
+                    evidence_parts.append(f"TrueNAS {inst} pools:\n{str(pools_result.get('output', ''))[:600]}")
+
+        # --- Proxmox investigation ---
+        elif is_proxmox:
+            vms_result = await proxmox_list_vms()
+            tools_used.append("proxmox_list_vms")
+            if vms_result.get("status") == "success":
+                evidence_parts.append(f"Proxmox VMs:\n{str(vms_result.get('output', ''))[:600]}")
+
+            containers_result = await proxmox_list_containers()
+            tools_used.append("proxmox_list_containers")
+            if containers_result.get("status") == "success":
+                evidence_parts.append(f"Proxmox containers:\n{str(containers_result.get('output', ''))[:600]}")
+
+        # --- Gatus investigation ---
+        elif is_gatus:
+            failing_result = await gatus_get_failing()
+            tools_used.append("gatus_get_failing_endpoints")
+            if failing_result.get("status") == "success":
+                evidence_parts.append(f"Failing endpoints:\n{str(failing_result.get('output', ''))[:600]}")
+
+        # --- Generic infrastructure (PBS, Beszel, unknown source) ---
+        else:
+            # Try TrueNAS alerts across all instances as a catch-all
+            all_alerts = await truenas_get_all_alerts()
+            tools_used.append("truenas_get_all_alerts")
+            if all_alerts.get("status") == "success":
+                evidence_parts.append(f"All TrueNAS alerts:\n{str(all_alerts.get('output', ''))[:600]}")
+
+            # Check Gatus for endpoint failures
+            failing_result = await gatus_get_failing()
+            tools_used.append("gatus_get_failing_endpoints")
+            if failing_result.get("status") == "success":
+                evidence_parts.append(f"Failing endpoints:\n{str(failing_result.get('output', ''))[:600]}")
+
+        evidence = "\n\n".join(evidence_parts) if evidence_parts else "No infrastructure data available"
+
+        # Analyze with Gemini
+        analysis = await gemini_analyze(
+            system_prompt=INFRA_PROMPT,
+            alert=alert,
+            evidence=evidence
+        )
+
+        latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+
+        return Finding(
+            agent="infrastructure",
+            status=analysis.get("status", "WARN"),
+            issue=analysis.get("issue", f"Alert: {alert.name}"),
+            evidence=evidence[:1000],
+            recommendation=analysis.get("recommendation"),
+            tools_used=tools_used,
+            latency_ms=latency_ms
+        )
+
+    except Exception as e:
+        logger.error(f"Infrastructure investigation failed: {e}")
+        return Finding(
+            agent="infrastructure",
             status="ERROR",
             issue=str(e)[:200],
             tools_used=tools_used

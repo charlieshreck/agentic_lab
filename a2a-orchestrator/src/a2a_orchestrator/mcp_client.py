@@ -144,3 +144,39 @@ async def search_runbooks(query: str) -> dict:
 async def search_entities(query: str) -> dict:
     """Search entities from knowledge-mcp."""
     return await call_mcp_tool("knowledge", "search_entities", {"query": query})
+
+
+# Infrastructure tools (TrueNAS, Proxmox, Gatus)
+
+async def truenas_get_alerts(instance: str = "hdd") -> dict:
+    """Get alerts from a TrueNAS instance."""
+    return await call_mcp_tool("infrastructure", "truenas_get_alerts", {
+        "instance": instance, "response_format": "json"
+    })
+
+
+async def truenas_list_pools(instance: str = "hdd") -> dict:
+    """List ZFS pools from a TrueNAS instance."""
+    return await call_mcp_tool("infrastructure", "truenas_list_pools", {
+        "instance": instance, "response_format": "json"
+    })
+
+
+async def truenas_get_all_alerts() -> dict:
+    """Get alerts from all TrueNAS instances."""
+    return await call_mcp_tool("infrastructure", "truenas_get_all_alerts")
+
+
+async def proxmox_list_vms() -> dict:
+    """List VMs from Proxmox."""
+    return await call_mcp_tool("infrastructure", "proxmox_list_vms")
+
+
+async def proxmox_list_containers() -> dict:
+    """List containers from Proxmox."""
+    return await call_mcp_tool("infrastructure", "proxmox_list_containers")
+
+
+async def gatus_get_failing() -> dict:
+    """Get failing endpoints from Gatus."""
+    return await call_mcp_tool("observability", "gatus_get_failing_endpoints")
