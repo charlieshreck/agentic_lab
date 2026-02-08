@@ -17,3 +17,4 @@ spec:
   dnsNames:
     - kernow.io
     - "*.kernow.io"
+    - "*.agentic.kernow.io"

@@ -6,31 +6,12 @@ namespace: ai-platform
 resources:
   - configmap.yaml
   - infisical-secrets.yaml
-  # NOTE: infrastructure-mcp and knowledge-mcp are now managed by domain-mcps app
-  # from the kernow-mcp-servers repo (canonical source for domain MCPs)
-  - home-assistant-mcp.yaml
-  - arr-suite-mcp.yaml
-  # New MCP servers
-  - proxmox-mcp.yaml
-  - opnsense-mcp.yaml
-  - adguard-mcp.yaml
-  - cloudflare-mcp.yaml
-  - unifi-mcp.yaml
-  - truenas-mcp.yaml
-  - homepage-mcp.yaml
-  - infisical-mcp.yaml
+  # NOTE: All individual MCP servers have been consolidated into domain MCPs
+  # deployed from mcp-servers repo via the domain-mcps ArgoCD app.
+  # Legacy MCPs (arr-suite, plex, home-assistant, tasmota, unifi, adguard,
+  # homepage, proxmox, truenas, cloudflare, opnsense, infisical, vikunja,
+  # outline) have been removed. ArgoCD prune=true will clean up live resources.
   # Web search (SearXNG backend - still needed by external-mcp)
   - searxng.yaml
-  # NOTE: web-search-mcp, browser-automation-mcp, github-mcp, wikipedia-mcp, reddit-mcp
-  # are now consolidated into external-mcp (deployed from mcp-servers repo)
-  # Task management
-  - vikunja-mcp.yaml
-  # Media management
-  - plex-mcp.yaml
-  # Knowledge graph - consolidated into knowledge-mcp
-  # IoT / Smart home
-  - tasmota-mcp.yaml
-  # Documentation
-  - outline-mcp.yaml
   # Knowledge reconciliation
   - knowledge-reconcile-cronjob.yaml
