@@ -19,6 +19,10 @@ spec:
             value: "true"
           - name: crds.keep
             value: "true"
+          - name: dns01RecursiveNameservers
+            value: "1.1.1.1:53,8.8.8.8:53"
+          - name: dns01RecursiveNameserversOnly
+            value: "true"
     # Git repository for additional resources (ClusterIssuer, secrets, etc.)
     - repoURL: https://github.com/charlieshreck/agentic_lab.git
       targetRevision: main
