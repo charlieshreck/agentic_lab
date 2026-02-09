@@ -66,6 +66,52 @@ data:
     GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini/gemini-2.0-flash")
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "embeddings")
 
+    # ============================================================================
+    # ALERT FILTERING & SUPPRESSION
+    # ============================================================================
+
+    # Minimum severity per source (alerts below this are dropped at ingest)
+    # Levels: info=0, warning=1, critical=2
+    SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
+    MIN_SEVERITY_PER_SOURCE = {
+        "coroot": "warning",     # Drop info-level Coroot alerts (deployment events)
+        "pulse": "warning",      # Drop info-level Pulse alerts
+        "beszel": "warning",     # Drop info-level Beszel alerts
+    }
+
+    # Alert suppression: keyword pairs that must ALL appear in alert_name+description
+    # Each entry is a list of keywords — all must match (case-insensitive)
+    SUPPRESSED_ALERT_KEYWORDS = {
+        "coroot": [],            # Coroot info already filtered by severity above
+        "pulse": [
+            ["memory", "plex"],          # Proxmox reports allocated, not actual VM usage
+            ["memory", "haos"],          # Home Assistant OS runs hot by design
+        ],
+        "beszel": [
+            ["memory", "plex"],          # Same — Beszel sees Proxmox allocation
+            ["memory", "haos"],
+        ],
+    }
+
+    def should_suppress_alert(source: str, alert_name: str, severity: str, description: str = "") -> str:
+        """Check if alert should be suppressed. Returns reason or empty string."""
+        # Check minimum severity
+        min_sev = MIN_SEVERITY_PER_SOURCE.get(source)
+        if min_sev:
+            alert_level = SEVERITY_ORDER.get(severity.lower(), 1)
+            min_level = SEVERITY_ORDER.get(min_sev.lower(), 1)
+            if alert_level < min_level:
+                return f"severity {severity} below minimum {min_sev} for {source}"
+
+        # Check suppressed keyword patterns
+        keyword_sets = SUPPRESSED_ALERT_KEYWORDS.get(source, [])
+        combined = f"{alert_name} {description}".lower()
+        for keywords in keyword_sets:
+            if all(kw.lower() in combined for kw in keywords):
+                return f"matches suppression keywords: {keywords}"
+
+        return ""
+
     # Runbook matching thresholds
     RUNBOOK_EXACT_THRESHOLD = float(os.environ.get("RUNBOOK_EXACT_THRESHOLD", "0.95"))
     RUNBOOK_SIMILAR_THRESHOLD = float(os.environ.get("RUNBOOK_SIMILAR_THRESHOLD", "0.80"))
@@ -1777,13 +1823,33 @@ data:
                 "raw_payload": body,
             }
 
+        # Apply severity filtering and suppression before processing
         if isinstance(normalized, list):
             results = []
             for item in normalized:
-                result = await _process_single_ingest(item)
-                results.append(result)
+                reason = should_suppress_alert(
+                    item.get("source", source),
+                    item.get("alert_name", ""),
+                    item.get("severity", "warning"),
+                    item.get("description", ""),
+                )
+                if reason:
+                    logger.info(f"Suppressed: {item.get('alert_name')} — {reason}")
+                    results.append({"alert_name": item.get("alert_name"), "status": "suppressed", "reason": reason})
+                else:
+                    result = await _process_single_ingest(item)
+                    results.append(result)
             return {"status": "accepted", "count": len(results), "incidents": results}
         else:
+            reason = should_suppress_alert(
+                normalized.get("source", source),
+                normalized.get("alert_name", ""),
+                normalized.get("severity", "warning"),
+                normalized.get("description", ""),
+            )
+            if reason:
+                logger.info(f"Suppressed: {normalized.get('alert_name')} — {reason}")
+                return {"status": "suppressed", "count": 0, "reason": reason}
             result = await _process_single_ingest(normalized)
             return {"status": "accepted", "count": 1, "incidents": [result]}
 
