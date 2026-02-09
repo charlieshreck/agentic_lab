@@ -802,7 +802,7 @@ data:
                                     "id": hit.get("id"),
                                     "score": hit.get("score"),
                                     "runbook": runbook,
-                                    "name": payload.get("name", "Unknown"),
+                                    "name": payload.get("title", payload.get("name", "Unknown")),
                                     "description": payload.get("description", "")[:200],
                                     "version": 2
                                 })
@@ -812,8 +812,8 @@ data:
                             results.append({
                                 "id": hit.get("id"),
                                 "score": hit.get("score"),
-                                "name": payload.get("name", "Unknown"),
-                                "description": payload.get("description", ""),
+                                "name": payload.get("title", payload.get("name", "Unknown")),
+                                "description": payload.get("description", payload.get("trigger_pattern", "")),
                                 "steps": payload.get("steps", []),
                                 "fix_command": payload.get("fix_command", ""),
                                 "version": 1
