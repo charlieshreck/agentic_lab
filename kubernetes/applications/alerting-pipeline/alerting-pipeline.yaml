@@ -8,12 +8,13 @@ data:
   main.py: |
     #!/usr/bin/env python3
     """
-    Alerting Pipeline - Polls MCP servers and raises AI alerts.
+    Alerting Pipeline - Polls MCP servers for health data and forwards
+    issues to LangGraph for AI-assisted triage and incident management.
 
-    This service periodically checks infrastructure health via MCP servers
-    and raises alerts to the Matrix bot when issues are detected.
+    Output: All alerts go to LangGraph /ingest → Afferent → Claude screens.
     """
     import os
+    import json
     import logging
     import asyncio
     from datetime import datetime
@@ -28,11 +29,8 @@ data:
     logger = logging.getLogger(__name__)
 
     # Service URLs
-    MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
     LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
-    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
-    QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-    LOCAL_MODEL = os.environ.get("LOCAL_MODEL", "local/qwen2.5:7b")
+    A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
 
     # Consolidated domain MCP endpoints
     MCP_SERVERS = {
@@ -41,12 +39,8 @@ data:
         "media": os.environ.get("MEDIA_MCP_URL", "http://media-mcp:8000"),
     }
 
-    # Runbook cache (in-memory for quick lookups)
-    runbook_cache: Dict[str, dict] = {}
-
     # Poll intervals in seconds
     POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "300"))  # 5 minutes default
-    CRITICAL_POLL_INTERVAL = int(os.environ.get("CRITICAL_POLL_INTERVAL", "60"))  # 1 minute for critical checks
 
     # Track raised alerts to avoid duplicates
     raised_alerts: Dict[str, datetime] = {}
@@ -63,9 +57,9 @@ data:
         description_template: str
         fix_template: Optional[str] = None
 
-    # Define alert rules (updated for consolidated domain MCPs)
+    # Define alert rules
     ALERT_RULES = [
-        # UniFi alerts (now via home-mcp)
+        # UniFi alerts (via home-mcp)
         AlertRule(
             name="UniFi Device Offline",
             source="home",
@@ -83,7 +77,7 @@ data:
             description_template="Access point '{ap_name}' has {client_count} clients connected (threshold: 50)",
             fix_template=None
         ),
-        # TrueNAS alerts (now via infrastructure-mcp)
+        # TrueNAS alerts (via infrastructure-mcp)
         AlertRule(
             name="TrueNAS Pool Degraded",
             source="infrastructure",
@@ -101,7 +95,7 @@ data:
             description_template="Pool '{pool_name}' is at {usage_percent}% capacity",
             fix_template="Review and clean up data or expand storage"
         ),
-        # Proxmox alerts (now via infrastructure-mcp)
+        # Proxmox alerts (via infrastructure-mcp)
         AlertRule(
             name="Proxmox VM Not Running",
             source="infrastructure",
@@ -119,7 +113,7 @@ data:
             description_template="Node '{node_name}' CPU usage at {cpu_percent}%",
             fix_template=None
         ),
-        # OPNsense alerts (now via infrastructure-mcp)
+        # OPNsense alerts (via infrastructure-mcp)
         AlertRule(
             name="OPNsense Service Down",
             source="infrastructure",
@@ -128,7 +122,7 @@ data:
             description_template="Service '{service_name}' is not running on OPNsense",
             fix_template="SSH to OPNsense and run: service {service_name} restart"
         ),
-        # AdGuard alerts (now via home-mcp)
+        # AdGuard alerts (via home-mcp)
         AlertRule(
             name="AdGuard High Block Rate",
             source="home",
@@ -138,7 +132,7 @@ data:
             description_template="AdGuard blocking {block_percent}% of queries - may indicate malware activity",
             fix_template="Review blocked domains in AdGuard admin panel"
         ),
-        # Functional health alerts (Gemini Phase 1.5 — "Silent Killers")
+        # Functional health alerts ("Silent Killers")
         AlertRule(
             name="Media Import Stalled",
             source="media",
@@ -169,179 +163,13 @@ data:
         ),
     ]
 
-    CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
-
     # ============================================================================
-    # LLM Functions (via LiteLLM/Gemini)
+    # LangGraph Forwarding (sole output path)
     # ============================================================================
-
-    async def query_llm(prompt: str, system_prompt: str = None) -> dict:
-        """Query LLM via LiteLLM proxy (routes to Gemini)."""
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            try:
-                response = await client.post(
-                    f"{LITELLM_URL}/v1/chat/completions",
-                    json={
-                        "model": LOCAL_MODEL,
-                        "messages": messages,
-                        "temperature": 0.3,
-                        "max_tokens": 1000
-                    }
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    return {"result": content}
-                return {"error": f"HTTP {response.status_code}: {response.text[:200]}"}
-            except Exception as e:
-                return {"error": str(e)}
-
-    async def get_embedding(text: str) -> List[float]:
-        """Get embedding vector via LiteLLM (Gemini text-embedding-004)."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.post(
-                    f"{LITELLM_URL}/v1/embeddings",
-                    json={
-                        "model": "embeddings",
-                        "input": text
-                    }
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    return data.get("data", [{}])[0].get("embedding", [])
-                return []
-            except Exception as e:
-                logger.error(f"Embedding error: {e}")
-                return []
-
-    # ============================================================================
-    # Qdrant Runbook Functions
-    # ============================================================================
-
-    async def search_runbooks(query: str, limit: int = 3) -> List[dict]:
-        """Search Qdrant for relevant runbooks based on query."""
-        embedding = await get_embedding(query)
-        if not embedding:
-            return []
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                response = await client.post(
-                    f"{QDRANT_URL}/collections/runbooks/points/search",
-                    json={
-                        "vector": embedding,
-                        "limit": limit,
-                        "with_payload": True,
-                        "score_threshold": 0.7  # Only return good matches
-                    }
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    return [
-                        {
-                            "id": hit.get("id"),
-                            "score": hit.get("score"),
-                            "name": hit.get("payload", {}).get("name", "Unknown"),
-                            "description": hit.get("payload", {}).get("description", ""),
-                            "steps": hit.get("payload", {}).get("steps", []),
-                            "fix_command": hit.get("payload", {}).get("fix_command", ""),
-                            "source": hit.get("payload", {}).get("source", "unknown")
-                        }
-                        for hit in data.get("result", [])
-                    ]
-                return []
-            except Exception as e:
-                logger.error(f"Runbook search error: {e}")
-                return []
-
-    async def store_runbook(name: str, description: str, steps: List[str], fix_command: str = None, source: str = "claude") -> bool:
-        """Store a new runbook in Qdrant for future local handling."""
-        # Generate embedding for the description
-        embedding = await get_embedding(f"{name} {description}")
-        if not embedding:
-            logger.error("Failed to generate embedding for runbook")
-            return False
-
-        import uuid as uuid_mod
-        point_id = str(uuid_mod.uuid4())
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                response = await client.put(
-                    f"{QDRANT_URL}/collections/runbooks/points",
-                    json={
-                        "points": [{
-                            "id": point_id,
-                            "vector": embedding,
-                            "payload": {
-                                "name": name,
-                                "description": description,
-                                "steps": steps,
-                                "fix_command": fix_command,
-                                "source": source,
-                                "created_at": datetime.utcnow().isoformat()
-                            }
-                        }]
-                    }
-                )
-                if response.status_code == 200:
-                    logger.info(f"Stored runbook: {name}")
-                    return True
-                logger.error(f"Failed to store runbook: {response.text}")
-                return False
-            except Exception as e:
-                logger.error(f"Runbook store error: {e}")
-                return False
-
-    # ============================================================================
-    # Claude Agent Functions (for escalation)
-    # ============================================================================
-
-    async def query_via_claude_agent(query: str, timeout: int = 120) -> dict:
-        """Query infrastructure via Claude Agent which can access MCP tools."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                # Submit task
-                response = await client.post(
-                    f"{CLAUDE_AGENT_URL}/agent/run",
-                    json={
-                        "prompt": query,
-                        "context": {"source": "alerting_pipeline"},
-                        "max_turns": 3,
-                        "working_directory": "/workspace",
-                        "async_mode": True,
-                        "timeout": timeout
-                    }
-                )
-                result = response.json()
-                if not result.get("success") or not result.get("task_id"):
-                    return {"error": result.get("error", "Failed to queue task")}
-
-                task_id = result.get("task_id")
-
-                # Poll for completion
-                for _ in range(timeout // 5):
-                    await asyncio.sleep(5)
-                    status_resp = await client.get(f"{CLAUDE_AGENT_URL}/task/{task_id}")
-                    status = status_resp.json()
-                    if status.get("status") == "completed":
-                        return {"result": status.get("result", "")}
-                    elif status.get("status") == "failed":
-                        return {"error": status.get("error", "Unknown error")}
-
-                return {"error": "Query timed out"}
-            except Exception as e:
-                return {"error": str(e)}
 
     async def forward_to_langgraph(alertname: str, severity: str, description: str,
                                     source: str, namespace: str = "ai-platform"):
-        """Forward alert to LangGraph /ingest endpoint."""
+        """Forward alert to LangGraph /ingest endpoint for AI-assisted triage."""
         alert_key = f"{source}:{alertname}"
         if alert_key in raised_alerts:
             elapsed = (datetime.utcnow() - raised_alerts[alert_key]).total_seconds()
@@ -349,7 +177,7 @@ data:
                 logger.debug(f"Alert '{alertname}' still in cooldown ({elapsed:.0f}s)")
                 return None
 
-        logger.info(f"Forwarding to LangGraph /ingest: {alertname} ({severity})")
+        logger.info(f"Forwarding to LangGraph: {alertname} ({severity})")
         async with httpx.AsyncClient(timeout=60.0) as client:
             try:
                 response = await client.post(
@@ -376,126 +204,45 @@ data:
                 logger.error(f"Error forwarding to LangGraph: {e}")
                 return None
 
-    async def raise_alert(name: str, severity: str, description: str,
-                          source: str, suggested_fix: str = None, context: str = None):
-        """Raise an alert via the Matrix bot service."""
-        # Check cooldown
-        alert_key = f"{source}:{name}"
-        if alert_key in raised_alerts:
-            elapsed = (datetime.utcnow() - raised_alerts[alert_key]).total_seconds()
-            if elapsed < ALERT_COOLDOWN_SECONDS:
-                logger.debug(f"Alert '{name}' still in cooldown ({elapsed:.0f}s)")
-                return
-
-        logger.info(f"Raising alert: {name} ({severity})")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.post(
-                    f"{MATRIX_BOT_URL}/alert",
-                    json={
-                        "title": name,
-                        "severity": severity,
-                        "message": description,
-                        "suggested_fix": suggested_fix,
-                        "source": source,
-                        "context": context
-                    }
-                )
-                if response.status_code == 200:
-                    raised_alerts[alert_key] = datetime.utcnow()
-                    logger.info(f"Alert raised: {response.json()}")
-                else:
-                    logger.error(f"Failed to raise alert: {response.text}")
-            except Exception as e:
-                logger.error(f"Error raising alert: {e}")
-
-    async def check_service_connectivity(name: str, url: str) -> bool:
-        """Check if a service is reachable."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                # Try common health endpoints
-                for endpoint in ["/health", "/healthz", "/", "/sse"]:
-                    try:
-                        response = await client.get(f"{url}{endpoint}")
-                        if response.status_code < 500:
-                            return True
-                    except:
-                        continue
-                return False
-            except Exception:
-                return False
-
-    async def analyze_issue(issue_description: str) -> dict:
-        """Use LLM to analyze an issue and determine severity/category."""
-        system_prompt = (
-            "You are a homelab infrastructure analyst. Analyze the issue and respond in JSON format with these fields: "
-            "severity (critical/warning/info), category (network/storage/compute/service), summary (brief description), "
-            "needs_escalation (true/false), reason (why escalation is needed or not). "
-            "Only set needs_escalation to true if the issue is complex or requires investigation."
-        )
-
-        result = await query_llm(issue_description, system_prompt)
-        if "error" in result:
-            return {"needs_escalation": True, "reason": "LLM unavailable"}
-
-        try:
-            import json
-            # Try to parse JSON from response
-            response = result.get("result", "{}")
-            # Handle markdown code blocks
-            if "```json" in response:
-                response = response.split("```json")[1].split("```")[0]
-            elif "```" in response:
-                response = response.split("```")[1].split("```")[0]
-            return json.loads(response.strip())
-        except:
-            return {"needs_escalation": True, "reason": "Could not parse local analysis"}
-
-    async def handle_issue_with_runbook(issue: str, runbook: dict) -> bool:
-        """Handle a known issue using an existing runbook."""
-        logger.info(f"Handling issue with runbook: {runbook.get('name')}")
-
-        # Notify user that we're using an existing runbook
-        await raise_alert(
-            name=f"Known Issue: {runbook.get('name', 'Unknown')}",
-            severity="info",
-            description=f"Detected known issue. Applying existing runbook.\n\nIssue: {issue[:200]}",
-            source="gemini-llm",
-            suggested_fix=runbook.get("fix_command") or "\n".join(runbook.get("steps", [])),
-            context=f"Runbook match score: {runbook.get('score', 0):.2f}"
-        )
-        return True
-
-    async def escalate_to_claude(issue: str, source: str) -> dict:
-        """Escalate unknown issue to Claude Agent for investigation and runbook creation."""
-        logger.info(f"Escalating to Claude Agent: {issue[:100]}...")
-
-        escalation_prompt = (
-            f"Investigate this infrastructure issue and create a runbook for future handling.\n\n"
-            f"Issue: {issue}\n"
-            f"Source: {source}\n\n"
-            f"Please: 1) Analyze the issue, 2) Provide a diagnosis, 3) Suggest specific fix steps, "
-            f"4) Format your response so it can be saved as a runbook.\n\n"
-            f"End your response with a JSON block containing: runbook_name, runbook_description, "
-            f"runbook_steps (array), and fix_command (optional)."
-        )
-
-        result = await query_via_claude_agent(escalation_prompt, timeout=300)
-        return result
+    # ============================================================================
+    # MCP Tool Calls (via REST bridge /api/call)
+    # ============================================================================
 
     async def call_mcp_tool(mcp_url: str, tool_name: str, params: dict = None) -> dict:
-        """Call a tool on a consolidated MCP server."""
+        """Call a tool on a consolidated MCP server via REST bridge (/api/call)."""
+        headers = {"Content-Type": "application/json"}
+        if A2A_API_TOKEN:
+            headers["Authorization"] = f"Bearer {A2A_API_TOKEN}"
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 resp = await client.post(
-                    f"{mcp_url}/call_tool",
-                    json={"tool_name": tool_name, "arguments": params or {}}
+                    f"{mcp_url}/api/call",
+                    json={"tool": tool_name, "arguments": params or {}},
+                    headers=headers,
                 )
                 if resp.status_code == 200:
-                    return resp.json()
+                    result = resp.json()
+                    if result.get("status") == "success":
+                        output = result.get("output")
+                        if isinstance(output, dict):
+                            return output
+                        if isinstance(output, str):
+                            try:
+                                return json.loads(output)
+                            except (json.JSONDecodeError, ValueError):
+                                return {"text": output}
+                        if isinstance(output, list):
+                            return {"items": output}
+                        return {"result": output}
+                else:
+                    logger.warning(f"MCP tool call {tool_name} returned HTTP {resp.status_code}")
             except Exception as e:
                 logger.error(f"MCP tool call error ({tool_name}): {e}")
         return {}
+
+    # ============================================================================
+    # Health Check Polling
+    # ============================================================================
 
     async def run_threshold_checks():
         """Evaluate ALERT_RULES against live data from consolidated MCPs."""
@@ -513,12 +260,11 @@ data:
                         if isinstance(devices, list):
                             for device in devices:
                                 if isinstance(device, dict) and device.get("state", "") not in ("connected", "1"):
-                                    await raise_alert(
-                                        name=rule.name,
+                                    await forward_to_langgraph(
+                                        alertname=rule.name,
                                         severity=rule.severity,
                                         description=f"UniFi device '{device.get('name', 'unknown')}' is offline.",
-                                        source=rule.source,
-                                        suggested_fix=rule.fix_template
+                                        source="alerting-pipeline"
                                     )
 
                 elif rule.check_type == "pool_health" and rule.source == "infrastructure":
@@ -528,12 +274,11 @@ data:
                         if isinstance(pools, list):
                             for pool in pools:
                                 if isinstance(pool, dict) and pool.get("status", "").upper() not in ("ONLINE", "HEALTHY"):
-                                    await raise_alert(
-                                        name=rule.name,
+                                    await forward_to_langgraph(
+                                        alertname=rule.name,
                                         severity=rule.severity,
                                         description=f"ZFS pool '{pool.get('name', 'unknown')}' status: {pool.get('status', 'unknown')}",
-                                        source=rule.source,
-                                        suggested_fix=rule.fix_template
+                                        source="alerting-pipeline"
                                     )
 
                 elif rule.check_type == "vm_status" and rule.source == "infrastructure":
@@ -543,12 +288,11 @@ data:
                         if isinstance(vms, list):
                             for vm in vms:
                                 if isinstance(vm, dict) and vm.get("status", "") != "running":
-                                    await raise_alert(
-                                        name=rule.name,
+                                    await forward_to_langgraph(
+                                        alertname=rule.name,
                                         severity=rule.severity,
                                         description=f"VM '{vm.get('name', 'unknown')}' (ID: {vm.get('vmid', '?')}) status: {vm.get('status', 'unknown')}",
-                                        source=rule.source,
-                                        suggested_fix=rule.fix_template
+                                        source="alerting-pipeline"
                                     )
 
                 elif rule.check_type == "service_status" and rule.source == "infrastructure":
@@ -558,19 +302,18 @@ data:
                         if isinstance(services, list):
                             for svc in services:
                                 if isinstance(svc, dict) and not svc.get("running", True):
-                                    await raise_alert(
-                                        name=rule.name,
+                                    await forward_to_langgraph(
+                                        alertname=rule.name,
                                         severity=rule.severity,
                                         description=f"Service '{svc.get('name', 'unknown')}' is not running on OPNsense",
-                                        source=rule.source,
-                                        suggested_fix=rule.fix_template
+                                        source="alerting-pipeline"
                                     )
 
             except Exception as e:
                 logger.error(f"Threshold check error for {rule.name}: {e}")
 
     async def run_functional_checks():
-        """Gemini Phase 1.5: Detect 'Silent Killers' — services that are up but broken."""
+        """Detect 'Silent Killers' — services that are up but broken."""
         logger.info("Running functional health checks...")
 
         # 1. Media Import Stall — downloads finish but import stalls
@@ -588,11 +331,11 @@ data:
                 stalled = [i for i in (sonarr_records + radarr_records)
                            if isinstance(i, dict) and i.get("status", "").lower() in ("warning", "stalled")]
                 if stalled:
-                    await raise_alert(
-                        name="MediaImportStalled",
+                    await forward_to_langgraph(
+                        alertname="MediaImportStalled",
                         severity="warning",
                         description=f"{len(stalled)} items stuck in download queue (stalled imports detected).",
-                        source="media-pipeline"
+                        source="alerting-pipeline"
                     )
         except Exception as e:
             logger.error(f"Media import check error: {e}")
@@ -604,11 +347,11 @@ data:
                 ts_status = await call_mcp_tool(infra_url, "get_tailscale_status") or {}
                 status_val = ts_status.get("status", ts_status.get("result", ""))
                 if isinstance(status_val, str) and status_val.lower() not in ("running", "healthy", ""):
-                    await raise_alert(
-                        name="TailscaleDown",
+                    await forward_to_langgraph(
+                        alertname="TailscaleDown",
                         severity="critical",
                         description="Tailscale service on OPNsense is NOT running. External VPN access is offline.",
-                        source="network-inspector"
+                        source="alerting-pipeline"
                     )
         except Exception as e:
             logger.error(f"Tailscale check error: {e}")
@@ -622,11 +365,11 @@ data:
                 if isinstance(tunnels, list):
                     for tunnel in tunnels:
                         if isinstance(tunnel, dict) and tunnel.get("status", "").lower() not in ("healthy", "active", ""):
-                            await raise_alert(
-                                name="CloudflareTunnelDown",
+                            await forward_to_langgraph(
+                                alertname="CloudflareTunnelDown",
                                 severity="critical",
                                 description=f"Cloudflare tunnel '{tunnel.get('name', 'unknown')}' status: {tunnel.get('status')}. External access may be broken.",
-                                source="network-inspector"
+                                source="alerting-pipeline"
                             )
         except Exception as e:
             logger.error(f"Cloudflare tunnel check error: {e}")
@@ -644,12 +387,11 @@ data:
                     canary_jobs = [j for j in job_list if isinstance(j, dict) and "mount-canary" in j.get("name", "")]
                     failed_canaries = [j for j in canary_jobs if j.get("failed", 0) > 0]
                     if failed_canaries:
-                        await raise_alert(
-                            name="StaleStorageMount",
+                        await forward_to_langgraph(
+                            alertname="StaleStorageMount",
                             severity="critical",
                             description="NFS mount canary FAILED — storage mounts may be disconnected. *arr databases at risk.",
-                            source="storage-inspector",
-                            suggested_fix="Check NFS mounts on TrueNAS HDD (10.10.0.50) and Media (10.10.0.60)."
+                            source="alerting-pipeline"
                         )
         except Exception as e:
             logger.error(f"NFS canary check error: {e}")
@@ -666,125 +408,49 @@ data:
                 if isinstance(job_list, list):
                     failed_backups = [j for j in job_list if isinstance(j, dict) and j.get("failed", 0) > 0]
                     if failed_backups:
-                        await raise_alert(
-                            name="VeleroBackupFailed",
+                        await forward_to_langgraph(
+                            alertname="VeleroBackupFailed",
                             severity="warning",
                             description=f"{len(failed_backups)} Velero backup job(s) failed.",
-                            source="backup-inspector"
+                            source="alerting-pipeline"
                         )
         except Exception as e:
             logger.error(f"Velero backup check error: {e}")
 
-    async def run_deep_health_check():
-        """Run health check and forward issues to LangGraph for orchestrated handling."""
-        logger.info("Running health check (forwarding to LangGraph)...")
-
-        # Use Claude Agent to gather status from MCP servers, then forward issues to LangGraph
-        health_queries = [
-            ("Network", "network", "Check UniFi network - list any offline devices or issues"),
-            ("Storage", "storage", "Check TrueNAS pools - report degraded or low space"),
-            ("Compute", "compute", "Check Proxmox nodes - report offline or high resource usage"),
-        ]
-
-        for source, category, query in health_queries:
-            try:
-                # Step 1: Get current status via Claude Agent (has MCP access)
-                status_result = await query_via_claude_agent(
-                    f"Briefly check {source} status. Just list any issues found, nothing else.",
-                    timeout=120
-                )
-
-                if "error" in status_result:
-                    logger.warning(f"{source} status check failed: {status_result['error']}")
-                    continue
-
-                status_text = status_result.get("result", "")
-
-                # Step 2: Check if there are any issues
-                alert_keywords = ["offline", "degraded", "critical", "error", "failed", "down", "unreachable", "warning"]
-                if not any(kw in status_text.lower() for kw in alert_keywords):
-                    logger.info(f"{source}: No issues detected")
-                    continue
-
-                # Step 3: Determine severity based on keywords
-                severity = "warning"
-                critical_keywords = ["offline", "degraded", "critical", "failed", "down"]
-                if any(kw in status_text.lower() for kw in critical_keywords):
-                    severity = "critical"
-
-                # Step 4: Forward to LangGraph /ingest for orchestrated handling
-                logger.info(f"{source}: Issue detected, forwarding to LangGraph...")
-                result = await forward_to_langgraph(
-                    alertname=f"{source} Health Issue",
-                    severity=severity,
-                    description=status_text,
-                    source=source.lower(),
-                    namespace=category
-                )
-
-                if result:
-                    logger.info(f"{source}: LangGraph handling - status: {result.get('status')}, solutions: {result.get('solutions_count', 0)}")
-                else:
-                    # Fallback to direct Telegram alert if LangGraph fails
-                    logger.warning(f"{source}: LangGraph unavailable, sending direct alert")
-                    await raise_alert(
-                        name=f"{source} Health Issue",
-                        severity=severity,
-                        description=status_text,
-                        source=source.lower()
-                    )
-
-            except Exception as e:
-                logger.error(f"Health check error for {source}: {e}")
-
     async def check_mcp_service_health():
-        """Check if MCP services are reachable (basic connectivity check)."""
+        """Check if MCP services are reachable."""
         for name, url in MCP_SERVERS.items():
             try:
-                is_healthy = await check_service_connectivity(name, url)
-                if not is_healthy:
-                    await raise_alert(
-                        name=f"MCP Service Unreachable: {name}",
-                        severity="warning",
-                        description=f"MCP server '{name}' at {url} is not responding",
-                        source="alerting-pipeline",
-                        suggested_fix=f"Check pod status: kubectl get pods -n ai-platform | grep {name}"
-                    )
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    for endpoint in ["/health", "/healthz", "/"]:
+                        try:
+                            response = await client.get(f"{url}{endpoint}")
+                            if response.status_code < 500:
+                                break
+                        except:
+                            continue
+                    else:
+                        await forward_to_langgraph(
+                            alertname=f"MCP Service Unreachable: {name}",
+                            severity="warning",
+                            description=f"MCP server '{name}' at {url} is not responding",
+                            source="alerting-pipeline"
+                        )
             except Exception as e:
                 logger.error(f"Error checking {name}: {e}")
 
-    # Deep check interval (every 30 minutes by default)
-    DEEP_CHECK_INTERVAL = int(os.environ.get("DEEP_CHECK_INTERVAL", "1800"))
-    last_deep_check = 0
-
-    async def run_health_checks():
-        """Run health checks - basic connectivity checks."""
-        logger.info("Running basic health checks...")
-        await check_mcp_service_health()
-        logger.info("Basic health checks complete")
+    # ============================================================================
+    # Polling Loop
+    # ============================================================================
 
     async def polling_loop():
         """Main polling loop."""
-        global last_deep_check
-        import time
-
-        logger.info(f"Starting polling loop (interval: {POLL_INTERVAL}s, deep check: {DEEP_CHECK_INTERVAL}s)")
+        logger.info(f"Starting polling loop (interval: {POLL_INTERVAL}s)")
         while True:
             try:
-                # Always run basic connectivity checks
-                await run_health_checks()
-
-                # Run threshold checks using ALERT_RULES against consolidated MCPs
+                await check_mcp_service_health()
                 await run_threshold_checks()
-
-                # Run functional health checks (Gemini Phase 1.5 - "Silent Killers")
                 await run_functional_checks()
-
-                # Run deep health check less frequently (uses Claude Agent - expensive)
-                current_time = time.time()
-                if current_time - last_deep_check >= DEEP_CHECK_INTERVAL:
-                    await run_deep_health_check()
-                    last_deep_check = current_time
             except Exception as e:
                 logger.error(f"Polling error: {e}")
             await asyncio.sleep(POLL_INTERVAL)
@@ -793,6 +459,10 @@ data:
     async def startup():
         asyncio.create_task(polling_loop())
         logger.info("Alerting pipeline started")
+
+    # ============================================================================
+    # API Endpoints
+    # ============================================================================
 
     @app.get("/health")
     async def health():
@@ -805,7 +475,9 @@ data:
     @app.post("/check")
     async def trigger_check():
         """Manually trigger a health check."""
-        await run_health_checks()
+        await check_mcp_service_health()
+        await run_threshold_checks()
+        await run_functional_checks()
         return {"status": "checks_complete"}
 
     @app.get("/raised")
@@ -820,7 +492,7 @@ data:
 
     @app.post("/alert")
     async def receive_alertmanager_webhook(request: Request):
-        """Receive alerts from Prometheus AlertManager webhook."""
+        """Receive alerts from Prometheus AlertManager webhook and forward to LangGraph."""
         try:
             payload = await request.json()
         except Exception as e:
@@ -834,7 +506,7 @@ data:
         elif isinstance(payload, list):
             alerts = payload
         elif isinstance(payload, dict):
-            alerts = [payload]  # Single alert as dict
+            alerts = [payload]
         else:
             logger.error(f"Unexpected payload type: {type(payload)}")
             return {"status": "error", "message": "Invalid payload format"}
@@ -850,14 +522,11 @@ data:
             alertname = labels.get("alertname", "Unknown")
             severity = labels.get("severity", "warning")
             namespace = labels.get("namespace", "unknown")
-            cluster = labels.get("cluster", "unknown")
 
             description = annotations.get("description") or annotations.get("summary") or alertname
 
-            # Skip resolved alerts for now
             if status == "resolved":
                 logger.info(f"Alert resolved: {alertname}")
-                # Remove from raised_alerts if present
                 alert_key = f"alertmanager:{alertname}:{namespace}"
                 raised_alerts.pop(alert_key, None)
                 continue
@@ -870,9 +539,8 @@ data:
                     logger.debug(f"Alert '{alertname}' in cooldown ({elapsed:.0f}s)")
                     continue
 
-            logger.info(f"Processing alert: {alertname} ({severity}) from {cluster}/{namespace}")
+            logger.info(f"Processing alert: {alertname} ({severity}) in {namespace}")
 
-            # Forward to LangGraph /ingest for AI-assisted triage
             try:
                 await forward_to_langgraph(
                     alertname=alertname,
@@ -885,19 +553,6 @@ data:
                 processed += 1
             except Exception as e:
                 logger.error(f"Failed to forward alert {alertname}: {e}")
-                # Fallback: send directly to Matrix bot
-                try:
-                    await raise_alert(
-                        name=alertname,
-                        severity=severity,
-                        description=f"[{cluster}/{namespace}] {description}",
-                        source="alertmanager",
-                        suggested_fix=annotations.get("runbook_url")
-                    )
-                    raised_alerts[alert_key] = datetime.utcnow()
-                    processed += 1
-                except Exception as e2:
-                    logger.error(f"Fallback alert also failed: {e2}")
 
         return {"status": "ok", "processed": processed, "total": len(alerts)}
 
@@ -950,8 +605,6 @@ spec:
           env:
             - name: PORT
               value: "8000"
-            - name: MATRIX_BOT_URL
-              value: "http://matrix-bot:8000"
             - name: LANGGRAPH_URL
               value: "http://langgraph:8000"
             - name: INFRASTRUCTURE_MCP_URL
@@ -960,18 +613,13 @@ spec:
               value: "http://home-mcp:8000"
             - name: MEDIA_MCP_URL
               value: "http://media-mcp:8000"
-            - name: CLAUDE_AGENT_URL
-              value: "http://claude-agent:8000"
-            - name: LITELLM_URL
-              value: "http://litellm:4000"
-            - name: QDRANT_URL
-              value: "http://qdrant:6333"
-            - name: LOCAL_MODEL
-              value: "local/qwen2.5:7b"
+            - name: A2A_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-api-token
+                  key: TOKEN
             - name: POLL_INTERVAL
               value: "300"  # 5 minutes
-            - name: DEEP_CHECK_INTERVAL
-              value: "1800"  # 30 minutes
           volumeMounts:
             - name: code
               mountPath: /code
