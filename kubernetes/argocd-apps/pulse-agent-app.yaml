@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: pulse-agent
+  name: pulse-agent-agentic
   namespace: argocd
 spec:
   project: default
