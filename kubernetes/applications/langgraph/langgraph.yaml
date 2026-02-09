@@ -999,25 +999,27 @@ data:
             try:
                 anomalies = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_recent_anomalies",
                                                  {"params": {"hours": 6}})
-                if anomalies and not isinstance(anomalies, dict):
-                    data["anomalies"] = anomalies[:10] if isinstance(anomalies, list) else anomalies
-                elif isinstance(anomalies, dict) and anomalies.get("anomalies"):
-                    data["anomalies"] = anomalies["anomalies"][:10]
+                if anomalies:
+                    # Text response like "No anomalies" is wrapped as {"text": "..."}
+                    if isinstance(anomalies, dict) and anomalies.get("text"):
+                        pass  # skip text-only results
+                    elif anomalies:
+                        data["anomalies"] = anomalies
             except:
                 pass
             if service or namespace:
+                svc_id = f"{namespace}:{service}" if namespace and service else (service or namespace)
                 try:
-                    svc_id = f"{namespace}:{service}" if namespace and service else (service or namespace)
                     deps = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_dependencies",
                                                 {"params": {"service_id": svc_id}})
-                    if deps and not isinstance(deps, str):
+                    if deps and not (isinstance(deps, dict) and deps.get("text")):
                         data["service_dependencies"] = deps
                 except:
                     pass
                 try:
                     metrics = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_metrics",
                                                    {"params": {"service_id": svc_id, "period": "1h"}})
-                    if metrics:
+                    if metrics and not (isinstance(metrics, dict) and metrics.get("text")):
                         data["service_metrics"] = metrics
                 except:
                     pass
@@ -1030,24 +1032,26 @@ data:
             entity_id = service or pod or host or namespace
             if not entity_id:
                 return data
+            def _valid(r):
+                return r and not (isinstance(r, dict) and r.get("text") and len(r) == 1)
             try:
                 impact = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_impact_analysis",
                                               {"entity_type": "Service", "entity_id": entity_id})
-                if impact and not isinstance(impact, str):
+                if _valid(impact):
                     data["impact_analysis"] = impact
             except:
                 pass
             try:
                 deps = await call_mcp_tool(KNOWLEDGE_MCP_URL, "find_dependencies",
                                             {"service_name": entity_id, "depth": 2})
-                if deps and not isinstance(deps, str):
+                if _valid(deps):
                     data["dependency_chain"] = deps
             except:
                 pass
             try:
                 ctx = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_entity_context",
                                            {"entity_id": entity_id})
-                if ctx and not isinstance(ctx, str):
+                if _valid(ctx):
                     data["entity_context"] = ctx
             except:
                 pass
@@ -1059,9 +1063,11 @@ data:
             try:
                 query = f"{service} {host} {pod} {namespace}".strip() or alert_name
                 result = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_entities", {"query": query})
-                if result and not isinstance(result, str):
-                    items = result if isinstance(result, list) else result.get("results", [])
-                    return items[:5]
+                if result and not (isinstance(result, dict) and result.get("text")):
+                    if isinstance(result, list):
+                        return result[:5]
+                    items = result.get("items") or result.get("results") or result.get("result") or []
+                    return items[:5] if isinstance(items, list) else []
             except:
                 pass
             return []
@@ -1072,37 +1078,58 @@ data:
             try:
                 result = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_documentation",
                                               {"query": f"{alert_name} {service} troubleshooting"})
-                if result and not isinstance(result, str):
-                    items = result if isinstance(result, list) else result.get("results", [])
-                    return [{"title": d.get("title", ""), "excerpt": d.get("text", d.get("content", ""))[:300]}
-                            for d in items[:3]]
+                if result and not (isinstance(result, dict) and result.get("text")):
+                    if isinstance(result, list):
+                        items = result
+                    else:
+                        items = result.get("items") or result.get("results") or result.get("result") or []
+                    if isinstance(items, list):
+                        return [{"title": d.get("title", ""), "excerpt": d.get("text", d.get("content", ""))[:300]}
+                                for d in items[:3] if isinstance(d, dict)]
             except:
                 pass
             return []
         tasks["docs"] = _docs()
 
         # 6. Live metrics (VictoriaMetrics) — pod restarts, memory, CPU
+        def _extract_metric_value(result):
+            """Extract scalar value from PromQL instant query result."""
+            if isinstance(result, dict):
+                vec = result.get("data", {}).get("result", [])
+                if isinstance(vec, list) and vec:
+                    val = vec[0].get("value", [None, None])
+                    if isinstance(val, list) and len(val) >= 2:
+                        return val[1]
+                # Also handle text-only responses
+                if result.get("text"):
+                    return None
+            return None
+
         async def _metrics():
             data = {}
             try:
                 if pod and namespace:
                     restarts = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
                         {"query": f'kube_pod_container_status_restarts_total{{pod="{pod}",namespace="{namespace}"}}'})
-                    if restarts:
-                        data["pod_restarts"] = restarts
+                    val = _extract_metric_value(restarts)
+                    if val is not None:
+                        data["pod_restarts"] = val
                     mem = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
                         {"query": f'container_memory_working_set_bytes{{pod="{pod}",namespace="{namespace}",container!=""}}'})
-                    if mem:
-                        data["memory_usage"] = mem
+                    val = _extract_metric_value(mem)
+                    if val is not None:
+                        data["memory_usage_bytes"] = val
                 elif host:
                     cpu = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
                         {"query": f'100 - (avg by(instance) (rate(node_cpu_seconds_total{{mode="idle",instance=~"{host}.*"}}[5m])) * 100)'})
-                    if cpu:
-                        data["host_cpu_percent"] = cpu
+                    val = _extract_metric_value(cpu)
+                    if val is not None:
+                        data["host_cpu_percent"] = val
                     disk = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
                         {"query": f'node_filesystem_avail_bytes{{instance=~"{host}.*",mountpoint="/"}} / node_filesystem_size_bytes{{instance=~"{host}.*",mountpoint="/"}} * 100'})
-                    if disk:
-                        data["host_disk_free_percent"] = disk
+                    val = _extract_metric_value(disk)
+                    if val is not None:
+                        data["host_disk_free_percent"] = val
             except:
                 pass
             return data
