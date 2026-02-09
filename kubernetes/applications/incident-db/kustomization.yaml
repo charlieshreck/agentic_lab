@@ -7,3 +7,4 @@ resources:
   - schema-configmap.yaml
   - init-job.yaml
   - nodeport-service.yaml
+  - infisical-secret.yaml

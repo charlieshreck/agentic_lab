@@ -341,7 +341,7 @@ data:
 
     async def forward_to_langgraph(alertname: str, severity: str, description: str,
                                     source: str, namespace: str = "ai-platform"):
-        """Forward alert to LangGraph for orchestrated handling."""
+        """Forward alert to LangGraph /ingest endpoint."""
         alert_key = f"{source}:{alertname}"
         if alert_key in raised_alerts:
             elapsed = (datetime.utcnow() - raised_alerts[alert_key]).total_seconds()
@@ -349,19 +349,16 @@ data:
                 logger.debug(f"Alert '{alertname}' still in cooldown ({elapsed:.0f}s)")
                 return None
 
-        logger.info(f"Forwarding to LangGraph: {alertname} ({severity})")
+        logger.info(f"Forwarding to LangGraph /ingest: {alertname} ({severity})")
         async with httpx.AsyncClient(timeout=60.0) as client:
             try:
                 response = await client.post(
-                    f"{LANGGRAPH_URL}/alert",
+                    f"{LANGGRAPH_URL}/ingest?source={source}",
                     json={
-                        "id": f"alert-{source}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-                        "alertname": alertname,
+                        "alert_name": alertname,
                         "severity": severity,
                         "description": description,
-                        "namespace": namespace,
-                        "labels": {"source": source},
-                        "annotations": {}
+                        "labels": {"source": source, "namespace": namespace},
                     }
                 )
                 if 200 <= response.status_code < 300:
@@ -370,10 +367,10 @@ data:
                         result = response.json()
                     except Exception:
                         result = {"status": "accepted", "code": response.status_code}
-                    logger.info(f"LangGraph processing (HTTP {response.status_code}): {result}")
+                    logger.info(f"LangGraph ingest (HTTP {response.status_code}): {result}")
                     return result
                 else:
-                    logger.error(f"LangGraph error (HTTP {response.status_code}): {response.text}")
+                    logger.error(f"LangGraph ingest error (HTTP {response.status_code}): {response.text}")
                     return None
             except Exception as e:
                 logger.error(f"Error forwarding to LangGraph: {e}")
@@ -715,8 +712,7 @@ data:
                 if any(kw in status_text.lower() for kw in critical_keywords):
                     severity = "critical"
 
-                # Step 4: Forward to LangGraph for orchestrated handling
-                # LangGraph will: assess → search runbooks → generate solutions → request approval
+                # Step 4: Forward to LangGraph /ingest for orchestrated handling
                 logger.info(f"{source}: Issue detected, forwarding to LangGraph...")
                 result = await forward_to_langgraph(
                     alertname=f"{source} Health Issue",
@@ -876,13 +872,13 @@ data:
 
             logger.info(f"Processing alert: {alertname} ({severity}) from {cluster}/{namespace}")
 
-            # Forward to LangGraph for AI-assisted triage
+            # Forward to LangGraph /ingest for AI-assisted triage
             try:
                 await forward_to_langgraph(
                     alertname=alertname,
                     severity=severity,
                     description=description,
-                    source=f"alertmanager:{cluster}",
+                    source="alertmanager",
                     namespace=namespace
                 )
                 raised_alerts[alert_key] = datetime.utcnow()

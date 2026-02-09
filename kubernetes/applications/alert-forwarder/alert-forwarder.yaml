@@ -1,6 +1,6 @@
 ---
 # Alert Forwarder CronJob
-# Polls TrueNAS and PBS APIs for alerts/failures and forwards to Keep
+# Polls TrueNAS and PBS APIs for alerts/failures and forwards to LangGraph /ingest
 # Runs every 5 minutes in the agentic cluster
 apiVersion: v1
 kind: ConfigMap
@@ -10,7 +10,7 @@ metadata:
 data:
   forward.py: |
     #!/usr/bin/env python3
-    """Poll TrueNAS and PBS for alerts, forward to Keep."""
+    """Poll TrueNAS and PBS for alerts, forward to LangGraph /ingest."""
     import json
     import os
     import sys
@@ -26,8 +26,7 @@ data:
     CTX.check_hostname = False
     CTX.verify_mode = ssl.CERT_NONE
 
-    KEEP_URL = os.environ.get("KEEP_URL", "http://keep-api.keep:8080")
-    KEEP_API_KEY = os.environ.get("KEEP_API_KEY", "")
+    LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
 
     TRUENAS_HDD_URL = os.environ.get("TRUENAS_HDD_URL", "")
     TRUENAS_HDD_KEY = os.environ.get("TRUENAS_HDD_API_KEY", "")
@@ -57,17 +56,14 @@ data:
             print(f"  Error calling {url}: {e}", file=sys.stderr)
             return None
 
-    def send_to_keep(alert_data):
-        """POST an alert to Keep's event endpoint."""
-        url = f"{KEEP_URL}/alerts/event"
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-KEY": KEEP_API_KEY,
-        }
+    def send_to_langgraph(alert_data, source="manual"):
+        """POST an alert to LangGraph /ingest endpoint."""
+        url = f"{LANGGRAPH_URL}/ingest?source={source}"
+        headers = {"Content-Type": "application/json"}
         result = http_request(url, headers=headers, data=alert_data, method="POST")
-        name = alert_data.get("name", "unknown")[:60]
+        name = alert_data.get("alert_name", alert_data.get("name", "unknown"))[:60]
         if result is not None:
-            print(f"  -> Sent to Keep: {name}")
+            print(f"  -> Sent to LangGraph: {name}")
         else:
             print(f"  -> FAILED to send: {name}", file=sys.stderr)
 
@@ -110,12 +106,10 @@ data:
             alert_id = alert.get("id", alert.get("uuid", "unknown"))
             formatted = alert.get("formatted", alert.get("text", "Unknown alert"))
 
-            send_to_keep({
-                "name": f"TrueNAS {instance_name}: {formatted[:80]}",
+            send_to_langgraph({
+                "alert_name": f"TrueNAS {instance_name}: {formatted[:80]}",
                 "description": formatted,
-                "source": ["truenas"],
                 "severity": keep_severity,
-                "status": "firing",
                 "fingerprint": fingerprint(["truenas", instance_name, alert_id]),
                 "labels": {
                     "instance": instance_name,
@@ -124,7 +118,7 @@ data:
                     "service": f"truenas-{instance_name}",
                     "namespace": "infrastructure",
                 },
-            })
+            }, source="truenas")
 
     # ── PBS Task Polling ───────────────────────────────────────────
 
@@ -186,12 +180,10 @@ data:
 
             start_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(start)) if start else "unknown"
 
-            send_to_keep({
-                "name": f"PBS {task_type} failed: {worker_id or status}",
+            send_to_langgraph({
+                "alert_name": f"PBS {task_type} failed: {worker_id or status}",
                 "description": f"PBS {task_type} task failed at {start_str}. Status: {status}. Worker: {worker_id}",
-                "source": ["pbs"],
                 "severity": "critical",
-                "status": "firing",
                 "fingerprint": fingerprint(["pbs", upid]),
                 "labels": {
                     "host": "pihanga",
@@ -200,7 +192,7 @@ data:
                     "service": "pbs",
                     "namespace": "infrastructure",
                 },
-            })
+            }, source="pbs")
 
     # ── Main ──────────────────────────────────────────────────────
 
@@ -285,29 +277,6 @@ spec:
     secretType: Opaque
     creationPolicy: Owner
 ---
-# InfisicalSecret for Keep API key
-apiVersion: secrets.infisical.com/v1alpha1
-kind: InfisicalSecret
-metadata:
-  name: alert-forwarder-keep
-  namespace: ai-platform
-spec:
-  hostAPI: https://app.infisical.com/api
-  authentication:
-    universalAuth:
-      credentialsRef:
-        secretName: universal-auth-credentials
-        secretNamespace: infisical-operator-system
-      secretsScope:
-        projectSlug: prod-homelab-y-nij
-        envSlug: prod
-        secretsPath: /observability/keep
-  managedSecretReference:
-    secretName: alert-forwarder-keep
-    secretNamespace: ai-platform
-    secretType: Opaque
-    creationPolicy: Owner
----
 # CronJob - runs every 5 minutes
 apiVersion: batch/v1
 kind: CronJob
@@ -332,13 +301,8 @@ spec:
             - name: forwarder
               image: python:3.12-slim
               env:
-                - name: KEEP_URL
-                  value: "http://keep.keep:8080"
-                - name: KEEP_API_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: alert-forwarder-keep
-                      key: API_KEY
+                - name: LANGGRAPH_URL
+                  value: "http://langgraph.ai-platform:8000"
                 # TrueNAS HDD
                 - name: TRUENAS_HDD_URL
                   valueFrom:
