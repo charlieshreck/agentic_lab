@@ -98,9 +98,7 @@ spec:
               value: "true"
             - name: PULSE_KUBE_INCLUDE_ALL_DEPLOYMENTS
               value: "true"
-            - name: LOG_LEVEL
-              value: "debug"
-            - name: PULSE_REPORT_IP
+- name: PULSE_REPORT_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
