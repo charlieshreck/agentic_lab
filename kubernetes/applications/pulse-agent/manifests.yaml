@@ -30,6 +30,31 @@ roleRef:
   name: pulse-agent-read
   apiGroup: rbac.authorization.k8s.io
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulse-agent-kubeconfig
+  namespace: ai-platform
+data:
+  kubeconfig: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - cluster:
+          certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          server: https://kubernetes.default.svc
+        name: agentic-cluster
+    contexts:
+      - context:
+          cluster: agentic-cluster
+          user: pulse-agent
+        name: agentic-cluster
+    current-context: agentic-cluster
+    users:
+      - name: pulse-agent
+        user:
+          tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -55,7 +80,7 @@ spec:
             - --enable-kubernetes
           env:
             - name: PULSE_URL
-              value: "https://pulse.kernow.io"
+              value: "http://pulse.kernow.io"
             - name: PULSE_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -63,16 +88,26 @@ spec:
                   key: AGENT_TOKEN_AGENTIC
             - name: PULSE_AGENT_ID
               value: "agentic-cluster"
+            - name: PULSE_KUBECONFIG
+              value: "/etc/pulse/kubeconfig"
+            - name: PULSE_KUBE_CONTEXT
+              value: "agentic-cluster"
             - name: PULSE_ENABLE_HOST
               value: "false"
             - name: PULSE_KUBE_INCLUDE_ALL_PODS
               value: "true"
             - name: PULSE_KUBE_INCLUDE_ALL_DEPLOYMENTS
               value: "true"
+            - name: LOG_LEVEL
+              value: "debug"
             - name: PULSE_REPORT_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /etc/pulse
+              readOnly: true
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -83,5 +118,9 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
+      volumes:
+        - name: kubeconfig
+          configMap:
+            name: pulse-agent-kubeconfig
       tolerations:
         - operator: Exists
