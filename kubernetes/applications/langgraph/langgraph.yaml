@@ -268,10 +268,13 @@ data:
             "raw_payload": body,
         }
 
-    def normalize_alertmanager(body: dict) -> list:
-        """Normalize AlertManager webhook. Returns list (AM sends arrays)."""
+    def normalize_alertmanager(body) -> list:
+        """Normalize AlertManager webhook. Returns list (AM sends arrays or dicts)."""
         results = []
-        alerts = body.get("alerts", [body])
+        if isinstance(body, list):
+            alerts = body
+        else:
+            alerts = body.get("alerts", [body])
         for alert in alerts:
             labels = alert.get("labels", {})
             annotations = alert.get("annotations", {})
@@ -1711,18 +1714,23 @@ data:
         source = request.query_params.get("source", "").lower()
 
         if not source:
-            if body.get("incident_id") or body.get("fingerprint"):
-                source = "keep"
-            elif body.get("alerts") and isinstance(body.get("alerts"), list):
+            if isinstance(body, dict):
+                if body.get("incident_id") or body.get("fingerprint"):
+                    source = "keep"
+                elif body.get("alerts") and isinstance(body.get("alerts"), list):
+                    source = "alertmanager"
+                elif body.get("endpoint_name"):
+                    source = "gatus"
+                elif body.get("source"):
+                    source = body["source"]
+                else:
+                    source = "manual"
+            elif isinstance(body, list):
                 source = "alertmanager"
-            elif body.get("endpoint_name"):
-                source = "gatus"
-            elif body.get("source"):
-                source = body["source"]
             else:
                 source = "manual"
 
-        logger.info(f"Ingest: source={source}, keys={list(body.keys())[:10]}")
+        logger.info(f"Ingest: source={source}, body_type={type(body).__name__}")
 
         normalizer = SOURCE_NORMALIZERS.get(source)
         if normalizer:
