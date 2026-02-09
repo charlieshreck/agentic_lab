@@ -516,27 +516,31 @@ data:
     # ============================================================================
 
     async def call_mcp_tool(mcp_url: str, tool_name: str, arguments: dict = None) -> dict:
-        """Generic MCP tool caller using JSON-RPC protocol."""
+        """Call MCP tool via REST bridge (/api/call). Returns parsed output or empty dict."""
+        headers = {"Content-Type": "application/json"}
+        if A2A_API_TOKEN:
+            headers["Authorization"] = f"Bearer {A2A_API_TOKEN}"
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 response = await client.post(
-                    mcp_url + "/mcp",
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": tool_name, "arguments": arguments or {}},
-                    },
+                    f"{mcp_url}/api/call",
+                    json={"tool": tool_name, "arguments": arguments or {}},
+                    headers=headers,
                 )
                 if response.status_code == 200:
                     result = response.json()
-                    content = result.get("result", {}).get("content", [])
-                    if content:
-                        text_val = content[0].get("text", "{}")
-                        try:
-                            return json.loads(text_val)
-                        except (json.JSONDecodeError, ValueError):
-                            return {"text": text_val}
+                    if result.get("status") == "success":
+                        output = result.get("output")
+                        if isinstance(output, dict):
+                            return output
+                        if isinstance(output, str):
+                            try:
+                                return json.loads(output)
+                            except (json.JSONDecodeError, ValueError):
+                                return {"text": output}
+                        if isinstance(output, list):
+                            return {"items": output}
+                        return {"result": output}
                 return {}
             except Exception as e:
                 logger.warning(f"MCP tool call failed ({tool_name}): {e}")
