@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: incident-db-init
+  namespace: ai-platform
+  labels:
+    app: incident-db
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: incident-db
+        component: init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: init
+        image: postgres:16-alpine
+        command: ["/bin/sh", "/sql/init.sh"]
+        env:
+        - name: PGHOST
+          value: postgresql.ai-platform.svc.cluster.local
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-credentials
+              key: USERNAME
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-credentials
+              key: PASSWORD
+        volumeMounts:
+        - name: schema
+          mountPath: /sql
+          readOnly: true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      volumes:
+      - name: schema
+        configMap:
+          name: incident-db-schema
+          defaultMode: 0755
