@@ -112,6 +112,9 @@ data:
 
         return ""
 
+    # Maximum concurrent open incidents (rejects new if at limit)
+    MAX_CONCURRENT_INCIDENTS = int(os.environ.get("MAX_CONCURRENT_INCIDENTS", "3"))
+
     # Runbook matching thresholds
     RUNBOOK_EXACT_THRESHOLD = float(os.environ.get("RUNBOOK_EXACT_THRESHOLD", "0.95"))
     RUNBOOK_SIMILAR_THRESHOLD = float(os.environ.get("RUNBOOK_SIMILAR_THRESHOLD", "0.80"))
@@ -1871,6 +1874,24 @@ data:
             _recent_ingests.clear()
             for k, v in sorted_items[-100:]:
                 _recent_ingests[k] = v
+
+        # Enforce max concurrent incidents
+        try:
+            conn = await asyncpg.connect(INCIDENT_DB_URL)
+            try:
+                open_count = await conn.fetchval(
+                    "SELECT count(*) FROM incidents WHERE status NOT IN ('resolved', 'closed', 'false_positive')"
+                )
+                if open_count >= MAX_CONCURRENT_INCIDENTS:
+                    logger.warning(
+                        f"Rejected: {normalized['alert_name']} — {open_count} open incidents "
+                        f"(max {MAX_CONCURRENT_INCIDENTS})"
+                    )
+                    return {"fingerprint": fingerprint, "status": "rejected", "reason": f"at capacity ({open_count}/{MAX_CONCURRENT_INCIDENTS} open)"}
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.error(f"DB check for concurrent incidents failed: {e}")
 
         initial_state = {
             "incident_id": 0,
