@@ -7,5 +7,6 @@ resources:
   - langgraph.yaml
   - seed-runbooks.yaml  # ConfigMap with runbook definitions (reference data)
   - ingress.yaml
+  - infisical-secret.yaml
   # Runbooks are seeded in Qdrant via knowledge-mcp or manual ingestion
   # The ConfigMap provides the canonical runbook definitions

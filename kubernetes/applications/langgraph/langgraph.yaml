@@ -13,6 +13,9 @@ data:
     Universal incident broker: receives alerts from any source, normalizes them,
     writes to PostgreSQL, checks FP patterns, assesses severity, creates Claude
     screen sessions, and notifies Afferent PWA.
+
+    Preserved subsystems: validation workflow, skill router, query endpoint,
+    runbook CRUD, MCP REST bridge, temporal patterns.
     """
     import os
     import logging
@@ -54,8 +57,10 @@ data:
         "postgresql://langgraph:password@postgresql.ai-platform.svc.cluster.local:5432/incident_management"
     )
 
-    # Afferent PWA webhook
-    AFFERENT_WEBHOOK_URL = os.environ.get("AFFERENT_WEBHOOK_URL", "")
+    # Afferent PWA
+    AFFERENT_URL = os.environ.get("AFFERENT_URL", "http://10.10.0.22:3456")
+    AFFERENT_AUTH_TOKEN = os.environ.get("AFFERENT_AUTH_TOKEN", "")
+    AFFERENT_WEBHOOK_URL = os.environ.get("AFFERENT_WEBHOOK_URL", f"{AFFERENT_URL}/webhook/ingest")
 
     # LLM models via LiteLLM
     GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini/gemini-2.0-flash")
@@ -64,6 +69,16 @@ data:
     # Runbook matching thresholds
     RUNBOOK_EXACT_THRESHOLD = float(os.environ.get("RUNBOOK_EXACT_THRESHOLD", "0.95"))
     RUNBOOK_SIMILAR_THRESHOLD = float(os.environ.get("RUNBOOK_SIMILAR_THRESHOLD", "0.80"))
+    AUTO_APPROVE_MIN_SUCCESSES = int(os.environ.get("AUTO_APPROVE_MIN_SUCCESSES", "5"))
+
+    # Temporal pattern detection
+    TEMPORAL_WINDOW_HOURS = int(os.environ.get("TEMPORAL_WINDOW_HOURS", "24"))
+    RECURRING_ALERT_THRESHOLD = int(os.environ.get("RECURRING_ALERT_THRESHOLD", "3"))
+
+    # Skill router
+    SKILL_ROUTER_ENABLED = os.environ.get("SKILL_ROUTER_ENABLED", "false").lower() == "true"
+    SKILL_COLLISION_THRESHOLD = float(os.environ.get("SKILL_COLLISION_THRESHOLD", "0.2"))
+    MAX_MCPS_PER_REQUEST = int(os.environ.get("MAX_MCPS_PER_REQUEST", "8"))
 
     # A2A API token for MCP REST bridge
     A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
@@ -179,7 +194,6 @@ data:
                   AND (suppress_until IS NULL OR suppress_until > NOW())
             """, alert_name, source)
             if row:
-                # Bump occurrence count
                 await conn.execute("""
                     UPDATE fp_patterns SET occurrences = occurrences + 1
                     WHERE id = $1
@@ -212,7 +226,7 @@ data:
 
     class IngestPayload(BaseModel):
         """Universal ingest payload. Source normalizers convert vendor formats."""
-        source: str  # keep, alertmanager, gatus, coroot, pulse, pbs, beszel, manual
+        source: str
         alert_name: str
         severity: str = "warning"
         description: str = ""
@@ -224,7 +238,6 @@ data:
 
     def normalize_keep(body: dict) -> dict:
         """Normalize Keep alert/incident webhook payload."""
-        # Keep sends both alerts and incidents
         if body.get("incident_id"):
             return {
                 "source": "keep",
@@ -364,10 +377,9 @@ data:
 
     async def notify_afferent_ingest(incident_row: dict, extra: dict = None):
         """POST incident to Afferent /webhook/ingest."""
-        if not AFFERENT_WEBHOOK_URL:
+        if not AFFERENT_URL:
             return
-        base_url = AFFERENT_WEBHOOK_URL.rsplit("/", 1)[0]  # strip old path
-        url = f"{base_url}/webhook/ingest"
+        url = f"{AFFERENT_URL}/webhook/ingest"
         payload = {
             "id": incident_row.get("id"),
             "external_id": incident_row.get("external_id"),
@@ -391,10 +403,9 @@ data:
 
     async def notify_afferent_update(incident_id: int, status: str, note: str = None):
         """POST status update to Afferent /webhook/incident-update."""
-        if not AFFERENT_WEBHOOK_URL:
+        if not AFFERENT_URL:
             return
-        base_url = AFFERENT_WEBHOOK_URL.rsplit("/", 1)[0]
-        url = f"{base_url}/webhook/incident-update"
+        url = f"{AFFERENT_URL}/webhook/incident-update"
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 await client.post(url, json={
@@ -409,13 +420,28 @@ data:
     # LLM CALLS
     # ============================================================================
 
-    async def call_llm(prompt: str, model: str = None) -> str:
+    async def call_llm(prompt: str, model: str = None, system: str = None) -> str:
         """Call LLM via LiteLLM proxy."""
         model = model or GEMINI_MODEL
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system or SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                resp = await client.post(
+                    LITELLM_URL + "/v1/chat/completions",
+                    json={"model": model, "messages": messages},
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                logger.error(f"LLM call failed: {e}")
+                return f"Error: {e}"
+
+    async def call_llm_messages(messages: list, model: str = None) -> str:
+        """Call LLM with full message list via LiteLLM proxy."""
+        model = model or GEMINI_MODEL
         async with httpx.AsyncClient(timeout=120.0) as client:
             try:
                 resp = await client.post(
@@ -445,7 +471,8 @@ data:
                 logger.error(f"Embedding error: {e}")
                 return []
 
-    SYSTEM_PROMPT = """You are the KAO (Kernow Autonomous Operations) incident assessment engine.
+    SYSTEM_PROMPT = dedent("""\
+    You are the KAO (Kernow Autonomous Operations) incident assessment engine.
 
     Your job: Given an alert/incident, determine severity, assess if it matches known
     false positive patterns, and recommend next steps.
@@ -457,10 +484,29 @@ data:
       "severity": "critical|warning|info",
       "confidence": 0.0-1.0,
       "assessment": "brief description",
-      "recommended_model": "sonnet|opus",
+      "recommended_model": "haiku|sonnet|opus",
       "is_false_positive": false,
       "fp_reason": null
-    }"""
+    }""")
+
+    QUERY_SYSTEM_PROMPT = dedent("""\
+    You are the AI assistant for Charlie's Kernow Homelab Platform.
+
+    You have access to real-time data from 6 domain MCP servers:
+    - infrastructure-mcp: Kubernetes, Proxmox, TrueNAS, Cloudflare, OPNsense, Caddy, Infisical
+    - observability-mcp: Keep alerts, Coroot metrics, VictoriaMetrics, AlertManager, Grafana, Gatus
+    - knowledge-mcp: Qdrant vectors, Neo4j graph, Outline wiki, Vikunja tasks
+    - home-mcp: Home Assistant, Tasmota (26 devices), UniFi network, AdGuard DNS
+    - media-mcp: Plex, Sonarr, Radarr, Prowlarr, Overseerr, Tautulli, Transmission, SABnzbd
+    - external-mcp: SearXNG web search, GitHub, Reddit, Wikipedia, Playwright browser
+
+    Network architecture:
+    - Production cluster: 10.10.0.0/24 (Talos, ArgoCD)
+    - Agentic AI cluster: 10.20.0.0/24 (Talos, AI workloads)
+    - Monitoring cluster: 10.30.0.0/24 (K3s, Coroot, VictoriaMetrics)
+
+    Answer questions accurately using the provided context data. If data is unavailable,
+    say so rather than guessing.""")
 
     # ============================================================================
     # MCP TOOL HELPERS
@@ -497,6 +543,7 @@ data:
         "infrastructure": INFRASTRUCTURE_MCP_URL,
         "observability": OBSERVABILITY_MCP_URL,
         "knowledge": KNOWLEDGE_MCP_URL,
+        "external": EXTERNAL_MCP_URL,
     }
 
     TOOL_CATALOG = {
@@ -537,439 +584,62 @@ data:
                 logger.error(f"REST bridge call failed: {tool_name} - {e}")
                 return {"success": False, "tool": tool_name, "error": str(e)}
 
-    # ============================================================================
-    # ENRICHMENT - Coroot metrics, runbook search
-    # ============================================================================
-
-    async def enrich_incident(alert_name: str, labels: dict, raw_payload: dict) -> dict:
-        """Enrich incident with Coroot metrics and runbook matches."""
-        enrichment = {}
-
-        # Search for matching runbooks
-        try:
-            embedding = await get_embedding(f"{alert_name} {json.dumps(labels)}")
-            if embedding:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.post(
-                        QDRANT_URL + "/collections/runbooks/points/search",
-                        json={"vector": embedding, "limit": 3, "with_payload": True, "score_threshold": 0.5},
-                    )
-                    if resp.status_code == 200:
-                        hits = resp.json().get("result", [])
-                        enrichment["runbook_matches"] = [
-                            {
-                                "id": h.get("id"),
-                                "score": h.get("score"),
-                                "name": h.get("payload", {}).get("name"),
-                                "description": h.get("payload", {}).get("description", "")[:200],
-                            }
-                            for h in hits
-                        ]
-        except Exception as e:
-            logger.warning(f"Runbook search failed: {e}")
-
-        # Fetch Coroot anomalies if source hints at it
-        source_url = raw_payload.get("url", "") or ""
-        if "coroot" in source_url or labels.get("namespace"):
-            try:
-                anomalies = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_recent_anomalies",
-                                                 {"params": {"hours": 24}})
-                if anomalies:
-                    enrichment["coroot_anomalies"] = anomalies
-            except Exception as e:
-                logger.warning(f"Coroot anomaly fetch failed: {e}")
-
-        return enrichment
-
-    # ============================================================================
-    # INCIDENT GRAPH STATE
-    # ============================================================================
-
-    class IncidentState(TypedDict):
-        incident_id: int
-        external_id: str
-        alert_name: str
-        severity: str
-        source: str
-        description: str
-        fingerprint: str
-        labels: dict
-        raw_payload: dict
-        enrichment: dict
-        # FP check
-        fp_match: dict
-        # Assessment
-        assessment: dict
-        recommended_model: str
-        # Screen session
-        screen_session: str
-        # Outcome
-        status: str
-
-    # ============================================================================
-    # GRAPH NODES
-    # ============================================================================
-
-    async def ingest_incident(state: IncidentState) -> dict:
-        """Node 1: Write incident to PostgreSQL, enrich, notify Afferent."""
-        alert_name = state["alert_name"]
-        labels = state.get("labels", {})
-        raw_payload = state.get("raw_payload", {})
-
-        # Generate external_id from fingerprint or hash
-        fingerprint = state.get("fingerprint") or hashlib.md5(
-            f"{state['source']}:{alert_name}:{json.dumps(labels, sort_keys=True)}".encode()
-        ).hexdigest()
-
-        # Enrich with Coroot + runbook search
-        enrichment = await enrich_incident(alert_name, labels, raw_payload)
-
-        # Insert into PostgreSQL
-        row = await pg_insert_incident({
-            "external_id": fingerprint,
-            "status": "detected",
-            "severity": state.get("severity", "warning"),
-            "source": state["source"],
-            "alert_name": alert_name,
-            "description": state.get("description", ""),
-            "fingerprint": fingerprint,
-            "enrichment": enrichment,
-            "raw_payload": raw_payload,
-            "labels": labels,
-        })
-
-        incident_id = row.get("id", 0)
-        logger.info(f"Incident {incident_id} ingested: {alert_name} [{state['source']}]")
-
-        # Record initial transition
-        await pg_insert_transition(incident_id, None, "detected", "langgraph", f"Ingested from {state['source']}")
-
-        # Notify Afferent
-        await notify_afferent_ingest(row, extra={
-            "enrichment": enrichment,
-            "labels": labels,
-            "raw_payload": raw_payload,
-        })
-
-        return {
-            "incident_id": incident_id,
-            "external_id": fingerprint,
-            "fingerprint": fingerprint,
-            "enrichment": enrichment,
-            "status": "detected",
-        }
-
-    async def check_fp_patterns(state: IncidentState) -> dict:
-        """Node 2: Check if alert matches a known false positive pattern."""
-        alert_name = state["alert_name"]
-        source = state["source"]
-
-        fp = await pg_check_fp_pattern(alert_name, source)
-        if fp:
-            logger.info(f"FP pattern match: {alert_name} from {source} (occurrences: {fp.get('occurrences')})")
-            # Auto-suppress: mark as false_positive
-            incident_id = state["incident_id"]
-            await pg_update_incident(incident_id, status="false_positive",
-                                      resolution_type="false_positive",
-                                      resolution_summary=f"Auto-suppressed: {fp.get('reason', 'Known FP pattern')}")
-            await pg_insert_transition(incident_id, "detected", "false_positive", "langgraph",
-                                        f"Auto-suppressed FP (pattern: {fp.get('id')})")
-            await notify_afferent_update(incident_id, "false_positive",
-                                          f"Auto-suppressed: {fp.get('reason')}")
-            return {"fp_match": fp, "status": "false_positive"}
-
-        return {"fp_match": {}, "status": "detected"}
-
-    async def assess_incident(state: IncidentState) -> dict:
-        """Node 3: Use LLM to assess severity and recommend model."""
-        # Skip if already suppressed as FP
-        if state.get("status") == "false_positive":
-            return {"assessment": {"skipped": True}, "recommended_model": "none"}
-
-        alert_name = state["alert_name"]
-        description = state.get("description", "")
-        severity = state.get("severity", "warning")
-        enrichment = state.get("enrichment", {})
-
-        prompt = f"""Assess this incident:
-    Alert: {alert_name}
-    Severity: {severity}
-    Source: {state['source']}
-    Description: {description}
-    Labels: {json.dumps(state.get('labels', {}))}
-    Runbook matches: {json.dumps(enrichment.get('runbook_matches', []))}
-
-    Respond with JSON only."""
-
-        try:
-            result = await call_llm(prompt)
-            # Try to parse JSON from response
-            assessment = {}
-            try:
-                if "```json" in result:
-                    json_str = result.split("```json")[1].split("```")[0]
-                    assessment = json.loads(json_str.strip())
-                elif result.strip().startswith("{"):
-                    assessment = json.loads(result.strip())
+    async def capture_pre_state(pre_capture: list, arguments: dict) -> dict:
+        """Capture pre-execution state for rollback."""
+        captured = {}
+        for capture in pre_capture:
+            capture_tool = capture.get("tool")
+            capture_key = capture.get("key")
+            extract_path = capture.get("extract")
+            if not capture_tool or not capture_key:
+                continue
+            capture_args = {}
+            spec = TOOL_CATALOG.get(capture_tool, {})
+            for req_arg in spec.get("required", []):
+                if req_arg in arguments:
+                    capture_args[req_arg] = arguments[req_arg]
+            mcp_domain = spec.get("mcp", "infrastructure")
+            mcp_url = MCP_DOMAIN_URLS.get(mcp_domain, INFRASTRUCTURE_MCP_URL)
+            result = await call_mcp_rest(mcp_url, capture_tool, capture_args)
+            if result.get("success"):
+                output = result.get("output", {})
+                if isinstance(output, str):
+                    try:
+                        output = json.loads(output)
+                    except:
+                        pass
+                if isinstance(output, dict) and extract_path:
+                    value = output
+                    for part in extract_path.split("."):
+                        if isinstance(value, dict):
+                            value = value.get(part)
+                        elif isinstance(value, list) and part.isdigit():
+                            value = value[int(part)]
+                        else:
+                            value = None
+                            break
+                    captured[capture_key] = value
                 else:
-                    assessment = {"assessment": result[:500], "confidence": 0.5, "recommended_model": "sonnet"}
-            except json.JSONDecodeError:
-                assessment = {"assessment": result[:500], "confidence": 0.5, "recommended_model": "sonnet"}
+                    captured[capture_key] = output
+                logger.info(f"Captured state: {capture_key}={captured[capture_key]}")
+        return captured
 
-            recommended_model = assessment.get("recommended_model", "sonnet")
-            # Override: critical -> opus
-            if severity == "critical" or assessment.get("severity") == "critical":
-                recommended_model = "opus"
-
-            # Check if LLM thinks it's a false positive
-            if assessment.get("is_false_positive"):
-                incident_id = state["incident_id"]
-                reason = assessment.get("fp_reason", "LLM assessed as false positive")
-                await pg_record_fp_pattern(alert_name, state["source"], reason)
-                await pg_update_incident(incident_id, status="false_positive",
-                                          resolution_type="false_positive",
-                                          resolution_summary=reason)
-                await pg_insert_transition(incident_id, "detected", "false_positive", "langgraph",
-                                            f"LLM FP assessment: {reason}")
-                await notify_afferent_update(incident_id, "false_positive", reason)
-                return {"assessment": assessment, "recommended_model": "none", "status": "false_positive"}
-
-            # Update incident to investigating
-            incident_id = state["incident_id"]
-            await pg_update_incident(incident_id, status="investigating",
-                                      enrichment={**state.get("enrichment", {}), "assessment": assessment})
-            await pg_insert_transition(incident_id, "detected", "investigating", "langgraph",
-                                        f"Assessment: confidence={assessment.get('confidence', 0)}, model={recommended_model}")
-            await notify_afferent_update(incident_id, "investigating",
-                                          f"Assessment complete. Model: {recommended_model}")
-
-            return {
-                "assessment": assessment,
-                "recommended_model": recommended_model,
-                "status": "investigating",
-            }
-
-        except Exception as e:
-            logger.error(f"Assessment failed: {e}")
-            return {
-                "assessment": {"error": str(e)},
-                "recommended_model": "sonnet",
-                "status": "investigating",
-            }
-
-    async def create_screen(state: IncidentState) -> dict:
-        """Node 4: Create a Claude screen session for the incident (via Afferent)."""
-        # Skip if FP
-        if state.get("status") == "false_positive":
-            return {"screen_session": "", "status": "false_positive"}
-
-        incident_id = state["incident_id"]
-        recommended_model = state.get("recommended_model", "sonnet")
-
-        # Update incident with model selection
-        await pg_update_incident(incident_id, status="awaiting_review", model_used=recommended_model)
-        await pg_insert_transition(incident_id, "investigating", "awaiting_review", "langgraph",
-                                    f"Awaiting human review. Recommended model: {recommended_model}")
-        await notify_afferent_update(incident_id, "awaiting_review",
-                                      f"Ready for review. Recommended: {recommended_model}")
-
-        return {"status": "awaiting_review", "screen_session": ""}
-
-    async def record_outcome(state: IncidentState) -> dict:
-        """Node 5: Record outcome to knowledge-mcp."""
-        incident_id = state.get("incident_id", 0)
-        status = state.get("status", "detected")
-
-        # Log event to knowledge base
-        try:
-            await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
-                "event_type": "incident.processed",
-                "description": f"Incident {incident_id}: {state.get('alert_name')} -> {status}",
-                "source_agent": "langgraph",
-                "metadata": {
-                    "incident_id": incident_id,
-                    "alert_name": state.get("alert_name"),
-                    "source": state.get("source"),
-                    "severity": state.get("severity"),
-                    "status": status,
-                    "recommended_model": state.get("recommended_model"),
-                    "fp_match": bool(state.get("fp_match")),
-                },
-            })
-        except Exception as e:
-            logger.warning(f"Failed to log event: {e}")
-
-        return {}
-
-    # ============================================================================
-    # GRAPH DEFINITION
-    # ============================================================================
-
-    def should_continue_after_fp(state: IncidentState) -> str:
-        """After FP check, either stop (FP) or continue to assessment."""
-        if state.get("status") == "false_positive":
-            return "record_outcome"
-        return "assess_incident"
-
-    def should_continue_after_assess(state: IncidentState) -> str:
-        """After assessment, either stop (FP) or create screen."""
-        if state.get("status") == "false_positive":
-            return "record_outcome"
-        return "create_screen"
-
-    def create_workflow():
-        workflow = StateGraph(IncidentState)
-
-        workflow.add_node("ingest_incident", ingest_incident)
-        workflow.add_node("check_fp_patterns", check_fp_patterns)
-        workflow.add_node("assess_incident", assess_incident)
-        workflow.add_node("create_screen", create_screen)
-        workflow.add_node("record_outcome", record_outcome)
-
-        workflow.set_entry_point("ingest_incident")
-        workflow.add_edge("ingest_incident", "check_fp_patterns")
-        workflow.add_conditional_edges(
-            "check_fp_patterns",
-            should_continue_after_fp,
-            {"assess_incident": "assess_incident", "record_outcome": "record_outcome"},
-        )
-        workflow.add_conditional_edges(
-            "assess_incident",
-            should_continue_after_assess,
-            {"create_screen": "create_screen", "record_outcome": "record_outcome"},
-        )
-        workflow.add_edge("create_screen", "record_outcome")
-        workflow.add_edge("record_outcome", END)
-
-        return workflow.compile()
-
-    graph = create_workflow()
-
-    # ============================================================================
-    # INGEST ENDPOINT
-    # ============================================================================
-
-    # Deduplicate recent ingests
-    _recent_ingests: dict = {}
-
-    @app.post("/ingest", status_code=202)
-    async def ingest(request: Request):
-        """Universal ingest endpoint. Accepts any alert source.
-
-        Query param ?source=keep|alertmanager|gatus|coroot|pulse|pbs|beszel|manual
-        Body: raw vendor payload (or IngestPayload for source=manual)
-        """
-        body = await request.json()
-        source = request.query_params.get("source", "").lower()
-
-        # Auto-detect source if not specified
-        if not source:
-            if body.get("incident_id") or body.get("fingerprint"):
-                source = "keep"
-            elif body.get("alerts") and isinstance(body.get("alerts"), list):
-                source = "alertmanager"
-            elif body.get("endpoint_name"):
-                source = "gatus"
-            elif body.get("source"):
-                source = body["source"]
+    def substitute_captured(template: dict, captured: dict) -> dict:
+        """Substitute {captured.key} placeholders in rollback args."""
+        result = {}
+        for key, value in template.items():
+            if isinstance(value, str):
+                def replacer(m):
+                    cap_key = m.group(1)
+                    return str(captured.get(cap_key, m.group(0)))
+                result[key] = re.sub(r'\{captured\.(\w+)\}', replacer, value)
             else:
-                source = "manual"
-
-        logger.info(f"Ingest: source={source}, keys={list(body.keys())[:10]}")
-
-        # Normalize
-        normalizer = SOURCE_NORMALIZERS.get(source)
-        if normalizer:
-            normalized = normalizer(body)
-        else:
-            # Manual / unknown: expect IngestPayload format
-            normalized = {
-                "source": source or "manual",
-                "alert_name": body.get("alert_name") or body.get("name") or "Unknown",
-                "severity": body.get("severity", "warning"),
-                "description": body.get("description", ""),
-                "fingerprint": body.get("fingerprint"),
-                "labels": body.get("labels", {}),
-                "raw_payload": body,
-            }
-
-        # AlertManager returns a list
-        if isinstance(normalized, list):
-            results = []
-            for item in normalized:
-                result = await _process_single_ingest(item)
-                results.append(result)
-            return {"status": "accepted", "count": len(results), "incidents": results}
-        else:
-            result = await _process_single_ingest(normalized)
-            return {"status": "accepted", "count": 1, "incidents": [result]}
-
-    async def _process_single_ingest(normalized: dict) -> dict:
-        """Process a single normalized ingest payload through the graph."""
-        fingerprint = normalized.get("fingerprint") or hashlib.md5(
-            f"{normalized['source']}:{normalized['alert_name']}".encode()
-        ).hexdigest()
-
-        # Deduplicate: skip if processed within last 60 seconds
-        now = datetime.utcnow()
-        last_seen = _recent_ingests.get(fingerprint)
-        if last_seen and (now - last_seen).total_seconds() < 60:
-            logger.info(f"Deduplicated: {normalized['alert_name']} ({fingerprint[:12]})")
-            return {"fingerprint": fingerprint, "status": "deduplicated"}
-        _recent_ingests[fingerprint] = now
-
-        # Prune old entries
-        if len(_recent_ingests) > 200:
-            sorted_items = sorted(_recent_ingests.items(), key=lambda x: x[1])
-            _recent_ingests.clear()
-            for k, v in sorted_items[-100:]:
-                _recent_ingests[k] = v
-
-        # Build initial state
-        initial_state = {
-            "incident_id": 0,
-            "external_id": fingerprint,
-            "alert_name": normalized.get("alert_name", "Unknown"),
-            "severity": normalized.get("severity", "warning"),
-            "source": normalized.get("source", "unknown"),
-            "description": normalized.get("description", ""),
-            "fingerprint": fingerprint,
-            "labels": normalized.get("labels", {}),
-            "raw_payload": normalized.get("raw_payload", {}),
-            "enrichment": {},
-            "fp_match": {},
-            "assessment": {},
-            "recommended_model": "",
-            "screen_session": "",
-            "status": "detected",
-        }
-
-        # Process through graph in background
-        asyncio.create_task(_run_graph(initial_state))
-
-        return {
-            "fingerprint": fingerprint,
-            "alert_name": normalized.get("alert_name"),
-            "source": normalized.get("source"),
-            "status": "accepted",
-        }
-
-    async def _run_graph(initial_state: dict):
-        """Run graph in background."""
-        try:
-            result = await graph.ainvoke(initial_state)
-            logger.info(
-                f"Incident {result.get('incident_id')} processed: "
-                f"{result.get('alert_name')} -> {result.get('status')}"
-            )
-        except Exception as e:
-            logger.error(f"Graph execution failed for {initial_state.get('alert_name')}: {e}")
+                result[key] = value
+        return result
 
     # ============================================================================
-    # RUNBOOK ENDPOINTS (preserved from existing)
+    # RUNBOOK MODELS & UTILITIES
     # ============================================================================
-
-    # -- Runbook Pydantic models --
 
     class ExtractField(BaseModel):
         field: str
@@ -1084,6 +754,69 @@ data:
         validation_command: str = "echo 'OK'"
         escalate_if: List[str] = Field(default_factory=lambda: ["confidence < 0.7"])
 
+    def classify_runbook_match(score: float) -> str:
+        """Classify runbook match into EXACT, SIMILAR, or NO_MATCH."""
+        if score >= RUNBOOK_EXACT_THRESHOLD:
+            return "EXACT"
+        elif score >= RUNBOOK_SIMILAR_THRESHOLD:
+            return "SIMILAR"
+        else:
+            return "NO_MATCH"
+
+    def select_model(severity: str, match_type: str, confidence: float) -> str:
+        """Select Claude model based on severity and runbook match."""
+        if severity == "critical" and match_type == "NO_MATCH":
+            return "sonnet"
+        if match_type == "EXACT" and confidence >= 0.95:
+            return "haiku"
+        if match_type == "SIMILAR" and confidence >= 0.80:
+            return "haiku"
+        return "haiku"
+
+    async def search_runbooks_qdrant(query: str, limit: int = 3) -> list:
+        """Search Qdrant for relevant diagnostic runbooks."""
+        embedding = await get_embedding(query)
+        if not embedding:
+            return []
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.post(
+                    QDRANT_URL + "/collections/runbooks/points/search",
+                    json={"vector": embedding, "limit": limit, "with_payload": True, "score_threshold": 0.5}
+                )
+                if response.status_code == 200:
+                    results = []
+                    for hit in response.json().get("result", []):
+                        payload = hit.get("payload", {})
+                        if "diagnosis" in payload or "triggers" in payload:
+                            try:
+                                runbook = Runbook(**payload)
+                                results.append({
+                                    "id": hit.get("id"),
+                                    "score": hit.get("score"),
+                                    "runbook": runbook,
+                                    "name": payload.get("name", "Unknown"),
+                                    "description": payload.get("description", "")[:200],
+                                    "version": 2
+                                })
+                            except Exception as e:
+                                logger.warning(f"Failed to parse runbook: {e}")
+                        else:
+                            results.append({
+                                "id": hit.get("id"),
+                                "score": hit.get("score"),
+                                "name": payload.get("name", "Unknown"),
+                                "description": payload.get("description", ""),
+                                "steps": payload.get("steps", []),
+                                "fix_command": payload.get("fix_command", ""),
+                                "version": 1
+                            })
+                    return results
+                return []
+            except Exception as e:
+                logger.error("Runbook search error: %s", e)
+                return []
+
     async def store_runbook_qdrant(runbook: Runbook) -> bool:
         """Store runbook in Qdrant."""
         text = f"{runbook.name} {runbook.description} {' '.join(runbook.triggers.keywords)}"
@@ -1101,6 +834,1140 @@ data:
             except Exception as e:
                 logger.error(f"Runbook store error: {e}")
                 return False
+
+    async def update_runbook_stats(runbook_id: str, success: bool, escalated: bool = False):
+        """Update runbook success/failure statistics."""
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                response = await client.get(QDRANT_URL + f"/collections/runbooks/points/{runbook_id}")
+                if response.status_code != 200:
+                    return False
+                payload = response.json().get("result", {}).get("payload", {})
+                metadata = payload.get("metadata", {})
+                if success:
+                    metadata["success_count"] = metadata.get("success_count", 0) + 1
+                else:
+                    metadata["failure_count"] = metadata.get("failure_count", 0) + 1
+                if escalated:
+                    metadata["escalation_count"] = metadata.get("escalation_count", 0) + 1
+                if (metadata.get("success_count", 0) >= AUTO_APPROVE_MIN_SUCCESSES and
+                    metadata.get("failure_count", 0) == 0):
+                    metadata["auto_approve_eligible"] = True
+                    logger.info(f"Runbook {runbook_id} now eligible for auto-approve!")
+                metadata["updated_at"] = datetime.utcnow().isoformat()
+                payload["metadata"] = metadata
+                embedding = await get_embedding(f"{payload.get('name', '')} {payload.get('description', '')}")
+                if embedding:
+                    await client.put(
+                        QDRANT_URL + "/collections/runbooks/points",
+                        json={"points": [{"id": runbook_id, "vector": embedding, "payload": payload}]}
+                    )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update runbook stats: {e}")
+                return False
+
+    def parse_runbook_from_claude(response: str, alert: dict) -> Optional[Runbook]:
+        """Parse a runbook definition from Claude's response."""
+        try:
+            if "```json" in response:
+                json_str = response.split("```json")[-1].split("```")[0]
+            elif "```" in response:
+                json_str = response.split("```")[-2] if response.count("```") >= 2 else response.split("```")[1]
+                json_str = json_str.split("```")[0]
+            else:
+                return None
+            data = json.loads(json_str.strip())
+            runbook = Runbook(
+                name=data.get("runbook_name", f"Alert: {alert.get('alertname', 'Unknown')}"),
+                description=data.get("runbook_description", alert.get("description", "")),
+                triggers=TriggerConfig(
+                    alert_patterns=data.get("triggers", {}).get("alert_patterns", [alert.get("alertname", "")]),
+                    keywords=data.get("triggers", {}).get("keywords", [])
+                ),
+                diagnosis=DiagnosisConfig(
+                    description="Verify the issue",
+                    checks=[
+                        DiagnosisCheck(
+                            name=c.get("name", "Check"),
+                            command=c.get("command", "echo 'no command'"),
+                            look_for=[LookForPattern(pattern=p, confirms="issue") for p in c.get("look_for", [])]
+                        )
+                        for c in data.get("diagnosis_checks", [])
+                    ],
+                    confidence_rules=[ConfidenceRule(condition="true", confidence=0.8, diagnosis="likely_match")]
+                ),
+                decision=DecisionRules(escalate_if=["confidence < 0.7"], handle_locally_if=["confidence >= 0.7"]),
+                fix=FixConfig(
+                    description=data.get("runbook_description", "Apply fix"),
+                    steps=[
+                        FixStep(name=s.get("name", "Step"), action="command", command=s.get("command", "echo 'no command'"))
+                        for s in data.get("fix_steps", [])
+                    ],
+                    validation=[
+                        ValidationCheck(name=v.get("name", "Validate"), command=v.get("command", "echo 'ok'"), expected=v.get("expected"))
+                        for v in data.get("validation", [])
+                    ]
+                ),
+                metadata=RunbookMetadata(created_by="claude", tags=["auto-generated"])
+            )
+            return runbook
+        except Exception as e:
+            logger.warning(f"Failed to parse runbook from Claude: {e}")
+            return None
+
+    # ============================================================================
+    # TEMPORAL PATTERN DETECTION
+    # ============================================================================
+
+    async def check_temporal_patterns(alert_fingerprint: str, alert_name: str) -> dict:
+        """Check for recurring alerts with the same fingerprint in the temporal window."""
+        pattern_info = {
+            "is_recurring": False,
+            "occurrence_count": 1,
+            "first_seen": datetime.utcnow().isoformat(),
+            "escalation_priority": "normal"
+        }
+        try:
+            events = await call_mcp_tool(KNOWLEDGE_MCP_URL, "list_recent_events", {
+                "hours": TEMPORAL_WINDOW_HOURS,
+                "event_type": "alert",
+                "limit": 50
+            })
+            if isinstance(events, list):
+                matching = [
+                    e for e in events
+                    if e.get("metadata", {}).get("alert_fingerprint") == alert_fingerprint
+                    or e.get("metadata", {}).get("alert_name") == alert_name
+                ]
+                if len(matching) >= RECURRING_ALERT_THRESHOLD:
+                    pattern_info["is_recurring"] = True
+                    pattern_info["occurrence_count"] = len(matching) + 1
+                    pattern_info["escalation_priority"] = "high" if len(matching) >= 5 else "medium"
+                    timestamps = [e.get("timestamp") for e in matching if e.get("timestamp")]
+                    if timestamps:
+                        pattern_info["first_seen"] = min(timestamps)
+                    logger.warning(
+                        f"[TEMPORAL] Recurring alert: {alert_name} "
+                        f"({pattern_info['occurrence_count']} times in {TEMPORAL_WINDOW_HOURS}h)"
+                    )
+        except Exception as e:
+            logger.warning(f"[TEMPORAL] Failed to check patterns: {e}")
+        return pattern_info
+
+    # ============================================================================
+    # ENRICHMENT
+    # ============================================================================
+
+    async def enrich_incident(alert_name: str, labels: dict, raw_payload: dict) -> dict:
+        """Deep enrichment: runbooks, Coroot, Neo4j, entities, metrics, docs, temporal."""
+        enrichment = {}
+        namespace = labels.get("namespace", "")
+        service = labels.get("service", "") or labels.get("job", "")
+        pod = labels.get("pod", "")
+        cluster = labels.get("cluster", "")
+        host = labels.get("instance", "") or labels.get("host", "")
+
+        # Run enrichment tasks concurrently for speed
+        tasks = {}
+
+        # 1. Runbook search (Qdrant)
+        async def _runbooks():
+            try:
+                query = f"{alert_name} {service} {namespace} {' '.join(labels.values())}"
+                matches = await search_runbooks_qdrant(query.strip(), limit=3)
+                if matches:
+                    return [{"id": h.get("id"), "score": h.get("score"),
+                             "name": h.get("name"), "description": h.get("description", "")[:300],
+                             "steps": h.get("steps", [])[:5]}
+                            for h in matches]
+            except Exception as e:
+                logger.warning(f"Runbook search failed: {e}")
+            return []
+        tasks["runbooks"] = _runbooks()
+
+        # 2. Coroot anomalies + service metrics
+        async def _coroot():
+            data = {}
+            try:
+                anomalies = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_recent_anomalies",
+                                                 {"params": {"hours": 6}})
+                if anomalies and not isinstance(anomalies, dict):
+                    data["anomalies"] = anomalies[:10] if isinstance(anomalies, list) else anomalies
+                elif isinstance(anomalies, dict) and anomalies.get("anomalies"):
+                    data["anomalies"] = anomalies["anomalies"][:10]
+            except:
+                pass
+            if service or namespace:
+                try:
+                    svc_id = f"{namespace}:{service}" if namespace and service else (service or namespace)
+                    deps = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_dependencies",
+                                                {"params": {"service_id": svc_id}})
+                    if deps and not isinstance(deps, str):
+                        data["service_dependencies"] = deps
+                except:
+                    pass
+                try:
+                    metrics = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_metrics",
+                                                   {"params": {"service_id": svc_id, "period": "1h"}})
+                    if metrics:
+                        data["service_metrics"] = metrics
+                except:
+                    pass
+            return data
+        tasks["coroot"] = _coroot()
+
+        # 3. Neo4j — impact analysis + dependencies
+        async def _neo4j():
+            data = {}
+            entity_id = service or pod or host or namespace
+            if not entity_id:
+                return data
+            try:
+                impact = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_impact_analysis",
+                                              {"entity_type": "Service", "entity_id": entity_id})
+                if impact and not isinstance(impact, str):
+                    data["impact_analysis"] = impact
+            except:
+                pass
+            try:
+                deps = await call_mcp_tool(KNOWLEDGE_MCP_URL, "find_dependencies",
+                                            {"service_name": entity_id, "depth": 2})
+                if deps and not isinstance(deps, str):
+                    data["dependency_chain"] = deps
+            except:
+                pass
+            try:
+                ctx = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_entity_context",
+                                           {"entity_id": entity_id})
+                if ctx and not isinstance(ctx, str):
+                    data["entity_context"] = ctx
+            except:
+                pass
+            return data
+        tasks["neo4j"] = _neo4j()
+
+        # 4. Entity search (Qdrant entities collection)
+        async def _entities():
+            try:
+                query = f"{service} {host} {pod} {namespace}".strip() or alert_name
+                result = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_entities", {"query": query})
+                if result and not isinstance(result, str):
+                    items = result if isinstance(result, list) else result.get("results", [])
+                    return items[:5]
+            except:
+                pass
+            return []
+        tasks["entities"] = _entities()
+
+        # 5. Documentation search (Outline/Qdrant)
+        async def _docs():
+            try:
+                result = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_documentation",
+                                              {"query": f"{alert_name} {service} troubleshooting"})
+                if result and not isinstance(result, str):
+                    items = result if isinstance(result, list) else result.get("results", [])
+                    return [{"title": d.get("title", ""), "excerpt": d.get("text", d.get("content", ""))[:300]}
+                            for d in items[:3]]
+            except:
+                pass
+            return []
+        tasks["docs"] = _docs()
+
+        # 6. Live metrics (VictoriaMetrics) — pod restarts, memory, CPU
+        async def _metrics():
+            data = {}
+            try:
+                if pod and namespace:
+                    restarts = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
+                        {"query": f'kube_pod_container_status_restarts_total{{pod="{pod}",namespace="{namespace}"}}'})
+                    if restarts:
+                        data["pod_restarts"] = restarts
+                    mem = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
+                        {"query": f'container_memory_working_set_bytes{{pod="{pod}",namespace="{namespace}",container!=""}}'})
+                    if mem:
+                        data["memory_usage"] = mem
+                elif host:
+                    cpu = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
+                        {"query": f'100 - (avg by(instance) (rate(node_cpu_seconds_total{{mode="idle",instance=~"{host}.*"}}[5m])) * 100)'})
+                    if cpu:
+                        data["host_cpu_percent"] = cpu
+                    disk = await call_mcp_tool(OBSERVABILITY_MCP_URL, "query_metrics_instant",
+                        {"query": f'node_filesystem_avail_bytes{{instance=~"{host}.*",mountpoint="/"}} / node_filesystem_size_bytes{{instance=~"{host}.*",mountpoint="/"}} * 100'})
+                    if disk:
+                        data["host_disk_free_percent"] = disk
+            except:
+                pass
+            return data
+        tasks["metrics"] = _metrics()
+
+        # 7. Recent similar incidents
+        async def _recent():
+            try:
+                pool = await get_pg_pool()
+                async with pool.acquire() as conn:
+                    recent = await conn.fetch("""
+                        SELECT id, alert_name, status, resolution_type, resolution_summary, model_used,
+                               detected_at, resolved_at
+                        FROM incidents WHERE alert_name = $1 AND id != currval('incidents_id_seq')
+                        ORDER BY detected_at DESC LIMIT 5
+                    """, alert_name)
+                    if recent:
+                        return [dict(r) for r in recent]
+            except:
+                pass
+            return []
+        tasks["recent"] = _recent()
+
+        # 8. Temporal pattern check
+        async def _temporal():
+            fingerprint = raw_payload.get("fingerprint") or hashlib.md5(alert_name.encode()).hexdigest()
+            return await check_temporal_patterns(fingerprint, alert_name)
+        tasks["temporal"] = _temporal()
+
+        # Run all concurrently
+        results = await asyncio.gather(*[tasks[k] for k in tasks], return_exceptions=True)
+        keys = list(tasks.keys())
+
+        for i, key in enumerate(keys):
+            result = results[i]
+            if isinstance(result, Exception):
+                logger.warning(f"Enrichment {key} failed: {result}")
+                continue
+            if key == "runbooks" and result:
+                enrichment["runbook_matches"] = result
+            elif key == "coroot" and result:
+                enrichment.update(result)
+            elif key == "neo4j" and result:
+                enrichment.update(result)
+            elif key == "entities" and result:
+                enrichment["related_entities"] = result
+            elif key == "docs" and result:
+                enrichment["documentation"] = result
+            elif key == "metrics" and result:
+                enrichment["live_metrics"] = result
+            elif key == "recent" and result:
+                enrichment["recent_similar"] = result
+            elif key == "temporal" and isinstance(result, dict) and result.get("is_recurring"):
+                enrichment["temporal_pattern"] = result
+
+        return enrichment
+
+    # ============================================================================
+    # AFFERENT SCREEN SESSION
+    # ============================================================================
+
+    async def create_afferent_screen(incident_id: int, payload_data: dict,
+                                      enrichment: dict, runbook_matches: list,
+                                      model: str) -> Optional[str]:
+        """Create a Claude screen session on Afferent for this incident."""
+        context_prompt = build_incident_prompt(payload_data, enrichment, runbook_matches)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{AFFERENT_URL}/api/incidents/{incident_id}/claude-session",
+                    json={"model": model, "context": context_prompt},
+                    headers={"X-Internal-Token": AFFERENT_AUTH_TOKEN}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("session")
+                else:
+                    logger.error(f"Afferent screen creation returned {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.error(f"Failed to create Afferent screen: {e}")
+        return None
+
+    def build_incident_prompt(payload_data: dict, enrichment: dict, runbook_matches: list) -> str:
+        """Build context prompt for Claude screen session."""
+        parts = [
+            f"## Incident: {payload_data.get('alert_name', 'Unknown')}",
+            f"**Source**: {payload_data.get('source')} | **Severity**: {payload_data.get('severity')}",
+            f"**Description**: {payload_data.get('description', '')}",
+        ]
+        if payload_data.get("labels"):
+            parts.append(f"**Labels**: {json.dumps(payload_data['labels'], indent=2)}")
+        if enrichment.get("coroot_anomalies"):
+            parts.append(f"**Coroot Anomalies**: {json.dumps(enrichment['coroot_anomalies'], indent=2)[:1000]}")
+        if enrichment.get("recent_similar"):
+            parts.append("**Recent Similar Incidents**:")
+            for r in enrichment["recent_similar"]:
+                parts.append(f"  - {r.get('resolution_type', 'unknown')}: {r.get('resolution_summary', 'no summary')}")
+        if enrichment.get("temporal_pattern", {}).get("is_recurring"):
+            tp = enrichment["temporal_pattern"]
+            parts.append(f"**Recurring Alert**: {tp['occurrence_count']} times in {TEMPORAL_WINDOW_HOURS}h (priority: {tp['escalation_priority']})")
+        if runbook_matches:
+            parts.append(f"**Matched Runbook**: {runbook_matches[0].get('name', 'unknown')} (score: {runbook_matches[0].get('score', 0):.2f})")
+        parts.append("\nInvestigate this incident. Use MCP tools to gather data. Report findings with [STATUS:AWAITING_REVIEW] when ready for human review.")
+        return "\n\n".join(parts)
+
+    # ============================================================================
+    # INCIDENT GRAPH STATE
+    # ============================================================================
+
+    class IncidentState(TypedDict):
+        incident_id: int
+        external_id: str
+        alert_name: str
+        severity: str
+        source: str
+        description: str
+        fingerprint: str
+        labels: dict
+        raw_payload: dict
+        enrichment: dict
+        fp_match: dict
+        assessment: dict
+        recommended_model: str
+        screen_session: str
+        status: str
+
+    # ============================================================================
+    # GRAPH NODES
+    # ============================================================================
+
+    async def ingest_incident(state: IncidentState) -> dict:
+        """Node 1: Write incident to PostgreSQL, enrich, notify Afferent."""
+        alert_name = state["alert_name"]
+        labels = state.get("labels", {})
+        raw_payload = state.get("raw_payload", {})
+
+        fingerprint = state.get("fingerprint") or hashlib.md5(
+            f"{state['source']}:{alert_name}:{json.dumps(labels, sort_keys=True)}".encode()
+        ).hexdigest()
+
+        enrichment = await enrich_incident(alert_name, labels, raw_payload)
+
+        row = await pg_insert_incident({
+            "external_id": fingerprint,
+            "status": "detected",
+            "severity": state.get("severity", "warning"),
+            "source": state["source"],
+            "alert_name": alert_name,
+            "description": state.get("description", ""),
+            "fingerprint": fingerprint,
+            "enrichment": enrichment,
+            "raw_payload": raw_payload,
+            "labels": labels,
+        })
+
+        incident_id = row.get("id", 0)
+        logger.info(f"Incident {incident_id} ingested: {alert_name} [{state['source']}]")
+
+        await pg_insert_transition(incident_id, None, "detected", "langgraph", f"Ingested from {state['source']}")
+
+        await notify_afferent_ingest(row, extra={
+            "enrichment": enrichment,
+            "labels": labels,
+            "raw_payload": raw_payload,
+        })
+
+        return {
+            "incident_id": incident_id,
+            "external_id": fingerprint,
+            "fingerprint": fingerprint,
+            "enrichment": enrichment,
+            "status": "detected",
+        }
+
+    async def check_fp_patterns(state: IncidentState) -> dict:
+        """Node 2: Check if alert matches a known false positive pattern."""
+        alert_name = state["alert_name"]
+        source = state["source"]
+
+        fp = await pg_check_fp_pattern(alert_name, source)
+        if fp:
+            logger.info(f"FP pattern match: {alert_name} from {source} (occurrences: {fp.get('occurrences')})")
+            incident_id = state["incident_id"]
+            await pg_update_incident(incident_id, status="false_positive",
+                                      resolution_type="false_positive",
+                                      resolution_summary=f"Auto-suppressed: {fp.get('reason', 'Known FP pattern')}")
+            await pg_insert_transition(incident_id, "detected", "false_positive", "langgraph",
+                                        f"Auto-suppressed FP (pattern: {fp.get('id')})")
+            await notify_afferent_update(incident_id, "false_positive",
+                                          f"Auto-suppressed: {fp.get('reason')}")
+            return {"fp_match": fp, "status": "false_positive"}
+
+        return {"fp_match": {}, "status": "detected"}
+
+    async def assess_incident(state: IncidentState) -> dict:
+        """Node 3: Use LLM to assess severity and recommend model."""
+        if state.get("status") == "false_positive":
+            return {"assessment": {"skipped": True}, "recommended_model": "none"}
+
+        alert_name = state["alert_name"]
+        description = state.get("description", "")
+        severity = state.get("severity", "warning")
+        enrichment = state.get("enrichment", {})
+
+        # Use select_model with runbook match info
+        runbook_matches = enrichment.get("runbook_matches", [])
+        if runbook_matches:
+            top_score = runbook_matches[0].get("score", 0)
+            match_type = classify_runbook_match(top_score)
+        else:
+            top_score = 0
+            match_type = "NO_MATCH"
+
+        prompt = f"""Assess this incident:
+    Alert: {alert_name}
+    Severity: {severity}
+    Source: {state['source']}
+    Description: {description}
+    Labels: {json.dumps(state.get('labels', {}))}
+    Runbook matches: {json.dumps([{"name": r.get("name"), "score": r.get("score")} for r in runbook_matches])}
+
+    Respond with JSON only."""
+
+        try:
+            result = await call_llm(prompt)
+            assessment = {}
+            try:
+                if "```json" in result:
+                    json_str = result.split("```json")[1].split("```")[0]
+                    assessment = json.loads(json_str.strip())
+                elif result.strip().startswith("{"):
+                    assessment = json.loads(result.strip())
+                else:
+                    assessment = {"assessment": result[:500], "confidence": 0.5, "recommended_model": "sonnet"}
+            except json.JSONDecodeError:
+                assessment = {"assessment": result[:500], "confidence": 0.5, "recommended_model": "sonnet"}
+
+            # Use select_model logic
+            recommended_model = select_model(severity, match_type, top_score)
+            if severity == "critical" or assessment.get("severity") == "critical":
+                recommended_model = "sonnet"
+
+            # Check if LLM thinks it's a false positive
+            if assessment.get("is_false_positive"):
+                incident_id = state["incident_id"]
+                reason = assessment.get("fp_reason", "LLM assessed as false positive")
+                await pg_record_fp_pattern(alert_name, state["source"], reason)
+                await pg_update_incident(incident_id, status="false_positive",
+                                          resolution_type="false_positive",
+                                          resolution_summary=reason)
+                await pg_insert_transition(incident_id, "detected", "false_positive", "langgraph",
+                                            f"LLM FP assessment: {reason}")
+                await notify_afferent_update(incident_id, "false_positive", reason)
+                return {"assessment": assessment, "recommended_model": "none", "status": "false_positive"}
+
+            # Update incident to investigating
+            incident_id = state["incident_id"]
+            await pg_update_incident(incident_id, status="investigating",
+                                      enrichment={**enrichment, "assessment": assessment},
+                                      model_used=recommended_model)
+            await pg_insert_transition(incident_id, "detected", "investigating", "langgraph",
+                                        f"Assessment: confidence={assessment.get('confidence', 0)}, model={recommended_model}")
+            await notify_afferent_update(incident_id, "investigating",
+                                          f"Assessment complete. Model: {recommended_model}")
+
+            return {
+                "assessment": assessment,
+                "recommended_model": recommended_model,
+                "status": "investigating",
+            }
+
+        except Exception as e:
+            logger.error(f"Assessment failed: {e}")
+            return {
+                "assessment": {"error": str(e)},
+                "recommended_model": "sonnet",
+                "status": "investigating",
+            }
+
+    async def create_screen(state: IncidentState) -> dict:
+        """Node 4: Create a Claude screen session for the incident (via Afferent)."""
+        if state.get("status") == "false_positive":
+            return {"screen_session": "", "status": "false_positive"}
+
+        incident_id = state["incident_id"]
+        recommended_model = state.get("recommended_model", "sonnet")
+        enrichment = state.get("enrichment", {})
+        runbook_matches = enrichment.get("runbook_matches", [])
+
+        # Try to create screen session via Afferent
+        session = await create_afferent_screen(
+            incident_id,
+            {"alert_name": state["alert_name"], "source": state["source"],
+             "severity": state["severity"], "description": state.get("description", ""),
+             "labels": state.get("labels", {})},
+            enrichment,
+            runbook_matches,
+            recommended_model
+        )
+
+        if session:
+            await pg_update_incident(incident_id, status="investigating", screen_session=session,
+                                      model_used=recommended_model)
+            await notify_afferent_update(incident_id, "investigating",
+                                          f"Screen session created: {session}")
+            return {"status": "investigating", "screen_session": session}
+
+        # Fallback: just set awaiting_review
+        await pg_update_incident(incident_id, status="awaiting_review", model_used=recommended_model)
+        await pg_insert_transition(incident_id, "investigating", "awaiting_review", "langgraph",
+                                    f"Awaiting human review. Recommended model: {recommended_model}")
+        await notify_afferent_update(incident_id, "awaiting_review",
+                                      f"Ready for review. Recommended: {recommended_model}")
+
+        return {"status": "awaiting_review", "screen_session": ""}
+
+    async def record_outcome(state: IncidentState) -> dict:
+        """Node 5: Record outcome to knowledge-mcp."""
+        incident_id = state.get("incident_id", 0)
+        status = state.get("status", "detected")
+
+        try:
+            await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+                "event_type": "incident.processed",
+                "description": f"Incident {incident_id}: {state.get('alert_name')} -> {status}",
+                "source_agent": "langgraph",
+                "metadata": {
+                    "incident_id": incident_id,
+                    "alert_name": state.get("alert_name"),
+                    "source": state.get("source"),
+                    "severity": state.get("severity"),
+                    "status": status,
+                    "recommended_model": state.get("recommended_model"),
+                    "fp_match": bool(state.get("fp_match")),
+                },
+            })
+        except Exception as e:
+            logger.warning(f"Failed to log event: {e}")
+
+        return {}
+
+    # ============================================================================
+    # INCIDENT GRAPH DEFINITION
+    # ============================================================================
+
+    def should_continue_after_fp(state: IncidentState) -> str:
+        if state.get("status") == "false_positive":
+            return "record_outcome"
+        return "assess_incident"
+
+    def should_continue_after_assess(state: IncidentState) -> str:
+        if state.get("status") == "false_positive":
+            return "record_outcome"
+        return "create_screen"
+
+    def create_incident_workflow():
+        workflow = StateGraph(IncidentState)
+        workflow.add_node("ingest_incident", ingest_incident)
+        workflow.add_node("check_fp_patterns", check_fp_patterns)
+        workflow.add_node("assess_incident", assess_incident)
+        workflow.add_node("create_screen", create_screen)
+        workflow.add_node("record_outcome", record_outcome)
+        workflow.set_entry_point("ingest_incident")
+        workflow.add_edge("ingest_incident", "check_fp_patterns")
+        workflow.add_conditional_edges(
+            "check_fp_patterns",
+            should_continue_after_fp,
+            {"assess_incident": "assess_incident", "record_outcome": "record_outcome"},
+        )
+        workflow.add_conditional_edges(
+            "assess_incident",
+            should_continue_after_assess,
+            {"create_screen": "create_screen", "record_outcome": "record_outcome"},
+        )
+        workflow.add_edge("create_screen", "record_outcome")
+        workflow.add_edge("record_outcome", END)
+        return workflow.compile()
+
+    incident_graph = create_incident_workflow()
+
+    # ============================================================================
+    # VALIDATION SUBGRAPH
+    # ============================================================================
+
+    class ValidationState(TypedDict):
+        event_id: str
+        triggered_by: str
+        event: dict
+        runbook: Optional[dict]
+        reported_success: bool
+        ground_truth: dict
+        verdict: str
+        confidence: float
+        actual_success: Optional[bool]
+        signal_count: int
+        validation_recorded: bool
+
+    async def fetch_validation_context(state: ValidationState) -> dict:
+        """Node 1: Fetch event and runbook from knowledge-mcp."""
+        event_id = state["event_id"]
+        logger.info(f"[VALIDATE] Fetching context for event {event_id}")
+
+        event = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_event", {"event_id": event_id})
+        if not event or event.get("error"):
+            logger.error(f"[VALIDATE] Event {event_id} not found: {event}")
+            return {
+                "event": {},
+                "runbook": None,
+                "reported_success": False,
+                "verdict": "uncertain",
+                "confidence": 0.0,
+            }
+
+        metadata = event.get("metadata", {})
+
+        runbook = None
+        runbook_id = metadata.get("runbook_id")
+        if runbook_id:
+            runbook = await call_mcp_tool(KNOWLEDGE_MCP_URL, "get_runbook", {"runbook_id": runbook_id})
+
+        reported_success = metadata.get("success", event.get("resolution") == "completed")
+
+        return {
+            "event": event,
+            "runbook": runbook,
+            "reported_success": bool(reported_success),
+        }
+
+    async def validate_with_llm(state: ValidationState) -> dict:
+        """Node 2: Use LLM to validate incident resolution."""
+        event_id = state["event_id"]
+        event = state.get("event", {})
+        runbook = state.get("runbook")
+        reported_success = state.get("reported_success", False)
+
+        if not event:
+            return {"verdict": "uncertain", "confidence": 0.3, "ground_truth": {}, "signal_count": 0}
+
+        # Gather ground truth signals
+        ground_truth = {}
+        metadata = event.get("metadata", {})
+        alert_name = metadata.get("alert_name", event.get("event_type", "unknown"))
+        namespace = metadata.get("namespace")
+
+        # Check current alert state
+        try:
+            alerts = await call_mcp_tool(OBSERVABILITY_MCP_URL, "list_alerts", {})
+            if isinstance(alerts, list):
+                matching_alerts = [a for a in alerts if a.get("labels", {}).get("alertname") == alert_name]
+                ground_truth["active_alerts"] = len(matching_alerts)
+                ground_truth["alert_still_firing"] = len(matching_alerts) > 0
+        except:
+            pass
+
+        # Check pod health if namespace known
+        if namespace:
+            try:
+                pods = await call_mcp_rest(INFRASTRUCTURE_MCP_URL, "kubectl_get_pods", {"namespace": namespace})
+                if pods.get("success"):
+                    ground_truth["pod_status"] = pods.get("output")
+            except:
+                pass
+
+        signal_count = sum(1 for v in ground_truth.values() if v is not None)
+
+        # Use LLM to compute verdict
+        prompt = f"""Validate this incident resolution:
+
+    Event: {json.dumps(event, default=str)[:2000]}
+    Reported success: {reported_success}
+    Runbook used: {json.dumps(runbook, default=str)[:500] if runbook else 'None'}
+    Ground truth signals: {json.dumps(ground_truth, default=str)}
+
+    Determine: Is the issue truly resolved?
+    Respond with JSON:
+    {{"verdict": "confirmed|false_positive|false_negative|uncertain", "confidence": 0.0-1.0, "reasoning": "..."}}"""
+
+        result_text = await call_llm(prompt)
+        try:
+            if "```json" in result_text:
+                json_str = result_text.split("```json")[1].split("```")[0]
+                result = json.loads(json_str.strip())
+            elif result_text.strip().startswith("{"):
+                result = json.loads(result_text.strip())
+            else:
+                result = {"verdict": "uncertain", "confidence": 0.3}
+        except:
+            result = {"verdict": "uncertain", "confidence": 0.3}
+
+        return {
+            "verdict": result.get("verdict", "uncertain"),
+            "confidence": result.get("confidence", 0.5),
+            "actual_success": result.get("verdict") == "confirmed",
+            "ground_truth": ground_truth,
+            "signal_count": signal_count,
+        }
+
+    async def record_validation(state: ValidationState) -> dict:
+        """Node 3: Record validation result back to knowledge-mcp."""
+        event_id = state["event_id"]
+        verdict = state.get("verdict", "uncertain")
+        confidence = state.get("confidence", 0.0)
+        event = state.get("event", {})
+        runbook_id = event.get("metadata", {}).get("runbook_id")
+
+        validation_payload = {
+            "validated": True,
+            "validated_at": datetime.utcnow().isoformat(),
+            "validated_by": state.get("triggered_by", "langgraph-auto"),
+            "verdict": verdict,
+            "confidence": confidence,
+            "actual_success": state.get("actual_success"),
+            "signal_count": state.get("signal_count", 0),
+            "ground_truth": state.get("ground_truth", {}),
+        }
+
+        await call_mcp_tool(KNOWLEDGE_MCP_URL, "update_event", {
+            "event_id": event_id,
+            "validation": validation_payload,
+            "resolution": "validated" if verdict == "confirmed" else "needs_review",
+        })
+
+        # Block runbook if false positive
+        if verdict == "false_positive" and runbook_id:
+            logger.warning(f"[VALIDATE] FALSE POSITIVE for runbook {runbook_id}, blocking autonomous execution")
+            await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+                "event_type": "autonomy.blocked",
+                "description": f"Runbook {runbook_id} blocked due to false positive in event {event_id}",
+                "source_agent": "validation-workflow",
+                "metadata": {"runbook_id": runbook_id, "event_id": event_id, "verdict": verdict},
+            })
+
+        await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+            "event_type": "validation.completed",
+            "description": f"Validation of event {event_id}: {verdict} (confidence {confidence:.2f})",
+            "source_agent": "validation-workflow",
+            "metadata": {"event_id": event_id, "verdict": verdict, "confidence": confidence},
+        })
+
+        logger.info(f"[VALIDATE] Recorded validation for {event_id}: {verdict}")
+        return {"validation_recorded": True}
+
+    def create_validation_workflow():
+        workflow = StateGraph(ValidationState)
+        workflow.add_node("fetch_context", fetch_validation_context)
+        workflow.add_node("validate_with_llm", validate_with_llm)
+        workflow.add_node("record_validation", record_validation)
+        workflow.set_entry_point("fetch_context")
+        workflow.add_edge("fetch_context", "validate_with_llm")
+        workflow.add_edge("validate_with_llm", "record_validation")
+        workflow.add_edge("record_validation", END)
+        return workflow.compile()
+
+    validation_graph = create_validation_workflow()
+
+    async def _delayed_validation(initial_state: dict, delay_seconds: int = 300):
+        """Run validation after a cooling period."""
+        logger.info(f"[VALIDATE] Scheduled validation for event {initial_state['event_id']} in {delay_seconds}s")
+        await asyncio.sleep(delay_seconds)
+        try:
+            await validation_graph.ainvoke(initial_state)
+            logger.info(f"[VALIDATE] Delayed validation completed for {initial_state['event_id']}")
+        except Exception as e:
+            logger.error(f"[VALIDATE] Delayed validation failed: {e}")
+
+    # ============================================================================
+    # SKILL ROUTER
+    # ============================================================================
+
+    async def get_skill_by_id(skill_id: str) -> Optional[dict]:
+        """Fetch skill from Qdrant by ID."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{QDRANT_URL}/collections/skills/points/scroll",
+                    json={
+                        "filter": {"must": [{"key": "id", "match": {"value": skill_id}}]},
+                        "limit": 1,
+                        "with_payload": True,
+                    },
+                )
+                if response.status_code == 200:
+                    points = response.json().get("result", {}).get("points", [])
+                    if points:
+                        return points[0].get("payload", {})
+        except Exception as e:
+            logger.error(f"Failed to fetch skill {skill_id}: {e}")
+        return None
+
+    async def record_skill_execution(skill_id: str, success: bool):
+        """Record skill execution for learning metrics."""
+        try:
+            skill = await get_skill_by_id(skill_id)
+            if not skill:
+                return
+            success_count = skill.get("success_count", 0) + (1 if success else 0)
+            failure_count = skill.get("failure_count", 0) + (0 if success else 1)
+            total = skill.get("total_executions", 0) + 1
+            logger.info(f"Skill {skill_id}: success={success_count}, failure={failure_count}, total={total}")
+        except Exception as e:
+            logger.warning(f"Failed to record skill execution: {e}")
+
+    # ============================================================================
+    # INGEST ENDPOINT
+    # ============================================================================
+
+    _recent_ingests: dict = {}
+
+    @app.post("/ingest", status_code=202)
+    async def ingest(request: Request):
+        """Universal ingest endpoint. Accepts any alert source."""
+        body = await request.json()
+        source = request.query_params.get("source", "").lower()
+
+        if not source:
+            if body.get("incident_id") or body.get("fingerprint"):
+                source = "keep"
+            elif body.get("alerts") and isinstance(body.get("alerts"), list):
+                source = "alertmanager"
+            elif body.get("endpoint_name"):
+                source = "gatus"
+            elif body.get("source"):
+                source = body["source"]
+            else:
+                source = "manual"
+
+        logger.info(f"Ingest: source={source}, keys={list(body.keys())[:10]}")
+
+        normalizer = SOURCE_NORMALIZERS.get(source)
+        if normalizer:
+            normalized = normalizer(body)
+        else:
+            normalized = {
+                "source": source or "manual",
+                "alert_name": body.get("alert_name") or body.get("name") or "Unknown",
+                "severity": body.get("severity", "warning"),
+                "description": body.get("description", ""),
+                "fingerprint": body.get("fingerprint"),
+                "labels": body.get("labels", {}),
+                "raw_payload": body,
+            }
+
+        if isinstance(normalized, list):
+            results = []
+            for item in normalized:
+                result = await _process_single_ingest(item)
+                results.append(result)
+            return {"status": "accepted", "count": len(results), "incidents": results}
+        else:
+            result = await _process_single_ingest(normalized)
+            return {"status": "accepted", "count": 1, "incidents": [result]}
+
+    async def _process_single_ingest(normalized: dict) -> dict:
+        """Process a single normalized ingest payload through the graph."""
+        fingerprint = normalized.get("fingerprint") or hashlib.md5(
+            f"{normalized['source']}:{normalized['alert_name']}".encode()
+        ).hexdigest()
+
+        now = datetime.utcnow()
+        last_seen = _recent_ingests.get(fingerprint)
+        if last_seen and (now - last_seen).total_seconds() < 60:
+            logger.info(f"Deduplicated: {normalized['alert_name']} ({fingerprint[:12]})")
+            return {"fingerprint": fingerprint, "status": "deduplicated"}
+        _recent_ingests[fingerprint] = now
+
+        if len(_recent_ingests) > 200:
+            sorted_items = sorted(_recent_ingests.items(), key=lambda x: x[1])
+            _recent_ingests.clear()
+            for k, v in sorted_items[-100:]:
+                _recent_ingests[k] = v
+
+        initial_state = {
+            "incident_id": 0,
+            "external_id": fingerprint,
+            "alert_name": normalized.get("alert_name", "Unknown"),
+            "severity": normalized.get("severity", "warning"),
+            "source": normalized.get("source", "unknown"),
+            "description": normalized.get("description", ""),
+            "fingerprint": fingerprint,
+            "labels": normalized.get("labels", {}),
+            "raw_payload": normalized.get("raw_payload", {}),
+            "enrichment": {},
+            "fp_match": {},
+            "assessment": {},
+            "recommended_model": "",
+            "screen_session": "",
+            "status": "detected",
+        }
+
+        asyncio.create_task(_run_graph(initial_state))
+
+        return {
+            "fingerprint": fingerprint,
+            "alert_name": normalized.get("alert_name"),
+            "source": normalized.get("source"),
+            "status": "accepted",
+        }
+
+    async def _run_graph(initial_state: dict):
+        """Run incident graph in background."""
+        try:
+            result = await incident_graph.ainvoke(initial_state)
+            logger.info(
+                f"Incident {result.get('incident_id')} processed: "
+                f"{result.get('alert_name')} -> {result.get('status')}"
+            )
+        except Exception as e:
+            logger.error(f"Graph execution failed for {initial_state.get('alert_name')}: {e}")
+
+    # ============================================================================
+    # QUERY ENDPOINT
+    # ============================================================================
+
+    class QueryRequest(BaseModel):
+        prompt: str
+        context: Optional[dict] = None
+        messages: Optional[List[dict]] = None
+        conversation_id: Optional[str] = None
+
+    async def build_query_context(prompt: str) -> dict:
+        """Build context from MCPs based on query keywords."""
+        context = {}
+        prompt_lower = prompt.lower()
+
+        # Infrastructure context
+        if any(kw in prompt_lower for kw in ["pod", "kubernetes", "k8s", "deployment", "cluster", "container"]):
+            try:
+                pods = await call_mcp_rest(INFRASTRUCTURE_MCP_URL, "kubectl_get_pods", {"namespace": "ai-platform"})
+                if pods.get("success"):
+                    context["cluster_pods"] = pods.get("output")
+            except:
+                pass
+
+        # Observability context
+        if any(kw in prompt_lower for kw in ["metric", "alert", "anomaly", "monitoring", "health"]):
+            try:
+                anomalies = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_recent_anomalies",
+                                                 {"params": {"hours": 24}})
+                if anomalies:
+                    context["coroot_anomalies"] = anomalies
+            except:
+                pass
+
+        # Entity context
+        if any(kw in prompt_lower for kw in ["service", "server", "ip", "host", "device"]):
+            try:
+                entities = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_entities", {"query": prompt[:100]})
+                if entities and not entities.get("error"):
+                    context["entities"] = entities
+            except:
+                pass
+
+        # Runbook context
+        if any(kw in prompt_lower for kw in ["troubleshoot", "fix", "error", "problem", "runbook", "how to"]):
+            try:
+                runbooks = await search_runbooks_qdrant(prompt, limit=5)
+                if runbooks:
+                    context["runbooks"] = [{"name": r.get("name"), "score": r.get("score"),
+                                            "description": r.get("description", "")[:200]} for r in runbooks]
+            except:
+                pass
+
+        return context
+
+    @app.post("/query")
+    async def query_llm_endpoint(request: QueryRequest):
+        """Query endpoint with MCP context enrichment."""
+        context = await build_query_context(request.prompt)
+        if request.context:
+            context.update(request.context)
+
+        messages = [
+            {"role": "system", "content": QUERY_SYSTEM_PROMPT},
+        ]
+        if request.messages:
+            for msg in request.messages:
+                messages.append(msg)
+
+        context_str = json.dumps(context, default=str)[:4000] if context else ""
+        user_content = request.prompt
+        if context_str:
+            user_content = f"Context data:\n{context_str}\n\nQuestion: {request.prompt}"
+        messages.append({"role": "user", "content": user_content})
+
+        result = await call_llm_messages(messages)
+        return {"response": result, "conversation_id": request.conversation_id}
+
+    # ============================================================================
+    # SKILL ENDPOINT
+    # ============================================================================
+
+    class SkillRequest(BaseModel):
+        skill_id: str
+        command: str
+        query: str
+        source: str = "api"
+
+    @app.post("/skill")
+    async def execute_skill(request: SkillRequest):
+        """Execute a skill by ID or command routing."""
+        logger.info(f"Skill request: {request.skill_id} - {request.command} - {request.query}")
+
+        try:
+            skill = await get_skill_by_id(request.skill_id)
+            if not skill:
+                raise HTTPException(status_code=404, detail=f"Skill not found: {request.skill_id}")
+
+            skill_name = skill.get("name", request.skill_id)
+
+            full_prompt = (
+                f"You are handling a {skill_name} request.\n"
+                f"Domain: {skill.get('domain', 'general')}\n"
+                f"Command: {request.command}\n"
+                f"User Query: {request.query}\n\n"
+                f"Based on the skill context, provide a helpful response."
+            )
+
+            result = await call_llm(full_prompt, system=QUERY_SYSTEM_PROMPT)
+
+            try:
+                await record_skill_execution(request.skill_id, success=True)
+            except:
+                pass
+
+            return {
+                "response": result,
+                "skill_id": request.skill_id,
+                "skill_name": skill_name,
+                "command": request.command,
+                "success": True,
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Skill execution error: {e}")
+            try:
+                await record_skill_execution(request.skill_id, success=False)
+            except:
+                pass
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ============================================================================
+    # VALIDATION ENDPOINT
+    # ============================================================================
+
+    class ValidateRequest(BaseModel):
+        event_id: str
+        triggered_by: str = "api"
+
+    @app.post("/validate")
+    async def validate_event(request: ValidateRequest):
+        """Trigger validation for an event."""
+        initial_state = {
+            "event_id": request.event_id,
+            "triggered_by": request.triggered_by,
+            "event": {},
+            "runbook": None,
+            "reported_success": False,
+            "ground_truth": {},
+            "verdict": "pending",
+            "confidence": 0.0,
+            "actual_success": None,
+            "signal_count": 0,
+            "validation_recorded": False,
+        }
+        asyncio.create_task(validation_graph.ainvoke(initial_state))
+        return {"status": "validation_queued", "event_id": request.event_id}
+
+    # ============================================================================
+    # RUNBOOK CRUD ENDPOINTS
+    # ============================================================================
 
     @app.post("/runbook/store")
     async def store_runbook_api(runbook_data: dict):
@@ -1152,11 +2019,8 @@ data:
                     points = resp.json().get("result", {}).get("points", [])
                     return {
                         "runbooks": [
-                            {
-                                "id": p.get("id"),
-                                "name": p.get("payload", {}).get("name"),
-                                "description": p.get("payload", {}).get("description", "")[:200],
-                            }
+                            {"id": p.get("id"), "name": p.get("payload", {}).get("name"),
+                             "description": p.get("payload", {}).get("description", "")[:200]}
                             for p in points
                         ],
                         "count": len(points),
@@ -1302,9 +2166,16 @@ spec:
                 secretKeyRef:
                   name: incident-db-credentials
                   key: DATABASE_URL
-            # Afferent PWA webhook (new endpoints)
+            # Afferent PWA
+            - name: AFFERENT_URL
+              value: "http://10.10.0.22:3456"
             - name: AFFERENT_WEBHOOK_URL
               value: "http://10.10.0.22:3456/webhook/ingest"
+            - name: AFFERENT_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: afferent-auth-token
+                  key: AUTH_TOKEN
             # LLM models
             - name: GEMINI_MODEL
               value: "gemini/gemini-2.0-flash"
@@ -1315,6 +2186,11 @@ spec:
               value: "0.95"
             - name: RUNBOOK_SIMILAR_THRESHOLD
               value: "0.80"
+            # Temporal patterns
+            - name: TEMPORAL_WINDOW_HOURS
+              value: "24"
+            - name: RECURRING_ALERT_THRESHOLD
+              value: "3"
             # GitHub
             - name: GITHUB_OWNER
               value: "charlieshreck"
