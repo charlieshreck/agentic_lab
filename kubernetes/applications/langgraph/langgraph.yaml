@@ -413,6 +413,34 @@ data:
             "raw_payload": body,
         }
 
+    def normalize_ntopng(body: dict) -> dict:
+        """Normalize ntopng webhook/alert payload."""
+        alert_name = body.get("alert_name") or body.get("type") or body.get("name") or "ntopng Alert"
+        severity_map = {"error": "critical", "warning": "warning", "info": "info"}
+        raw_sev = (body.get("severity") or body.get("severity_id") or "warning")
+        if isinstance(raw_sev, int):
+            raw_sev = {1: "info", 2: "warning", 3: "error", 4: "critical"}.get(raw_sev, "warning")
+        severity = severity_map.get(str(raw_sev).lower(), str(raw_sev).lower())
+        cli = body.get("cli_ip") or body.get("client") or ""
+        srv = body.get("srv_ip") or body.get("server") or ""
+        desc = body.get("description") or body.get("message") or ""
+        if cli and srv and not desc:
+            desc = f"{alert_name}: {cli} → {srv}"
+        return {
+            "source": "ntopng",
+            "alert_name": alert_name,
+            "severity": severity,
+            "description": desc,
+            "fingerprint": body.get("fingerprint") or f"ntopng-{alert_name}-{cli}-{srv}",
+            "labels": {
+                "interface": body.get("interface") or body.get("ifname"),
+                "protocol": body.get("l7_proto") or body.get("proto"),
+                "cli_ip": cli,
+                "srv_ip": srv,
+            },
+            "raw_payload": body,
+        }
+
     SOURCE_NORMALIZERS = {
         "keep": normalize_keep,
         "alertmanager": normalize_alertmanager,
@@ -421,6 +449,7 @@ data:
         "pulse": normalize_pulse,
         "pbs": normalize_pbs,
         "beszel": normalize_beszel,
+        "ntopng": normalize_ntopng,
     }
 
     # ============================================================================
