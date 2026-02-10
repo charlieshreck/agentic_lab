@@ -412,41 +412,26 @@ data:
         except Exception as e:
             logger.error(f"NFS canary check error: {e}")
 
-        # 5. ntopng Network Alerts — high-severity flow and host alerts
+        # 5. ntopng Network Alerts — behavioral host detections only
+        # Flow alerts (port scans, protocol mismatches) are too noisy for incidents.
+        # Host alerts represent real behavioral detections: scans, floods, dangerous hosts.
         try:
             obs_url = MCP_SERVERS.get("observability")
             if obs_url:
-                # Check flow alerts on LAN (igc3 — most traffic)
-                flow_result = await call_mcp_tool(obs_url, "ntopng_get_alert_stats", {"interface": "igc3"})
-                alert_text = flow_result.get("text", "")
-                # Parse severity counts from the markdown output
-                # Look for "error" or "critical" severity lines with high counts
-                for line in alert_text.split("\n") if isinstance(alert_text, str) else []:
-                    line_lower = line.lower()
-                    if ("error" in line_lower or "critical" in line_lower) and any(c.isdigit() for c in line):
-                        # Extract count — last number on the line
-                        import re
-                        counts = re.findall(r'[\d,]+', line)
-                        if counts:
-                            count = int(counts[-1].replace(",", ""))
-                            if count > 100:  # Significant alert volume
-                                await forward_to_langgraph(
-                                    alertname="ntopng High Severity Alerts",
-                                    severity="warning",
-                                    description=f"ntopng detected {count} high-severity network alerts on LAN: {line.strip()}",
-                                    source="alerting-pipeline"
-                                )
-
-                # Check host alerts for behavioral detections (scans, floods, dangerous hosts)
-                host_alerts = await call_mcp_tool(obs_url, "ntopng_get_alerts", {"alert_type": "host", "interface": "igc3", "limit": 5})
+                host_alerts = await call_mcp_tool(obs_url, "ntopng_get_alerts", {"alert_type": "host", "interface": "igc3", "limit": 10})
                 host_text = host_alerts.get("text", "")
-                if isinstance(host_text, str) and "critical" in host_text.lower():
-                    await forward_to_langgraph(
-                        alertname="ntopng Critical Host Alert",
-                        severity="critical",
-                        description=f"ntopng detected critical host behavior on LAN. Details: {host_text[:500]}",
-                        source="alerting-pipeline"
-                    )
+                if isinstance(host_text, str) and host_text.strip() and "No host alerts found" not in host_text:
+                    # Only forward if there are critical or warning host alerts
+                    for line in host_text.split("\n"):
+                        line_lower = line.lower()
+                        if line.startswith("- [") and ("critical" in line_lower or "error" in line_lower):
+                            await forward_to_langgraph(
+                                alertname="ntopng Host Behavioral Alert",
+                                severity="critical" if "critical" in line_lower else "warning",
+                                description=f"ntopng host detection on LAN: {line.strip()[:300]}",
+                                source="alerting-pipeline"
+                            )
+                            break  # One alert per poll cycle to avoid flooding
         except Exception as e:
             logger.error(f"ntopng alert check error: {e}")
 
