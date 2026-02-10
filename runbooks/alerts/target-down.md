@@ -208,7 +208,7 @@ mcp__monitoring__create_silence alertname=TargetDown comment="Investigating" dur
 | Job | Target | Expected |
 |-----|--------|----------|
 | proxmox-carrick | 10.30.0.10:8006 | YES |
-| k3s-monitor | 10.30.0.20 | YES |
+| talos-monitor | 10.10.0.30 | YES |
 
 ### Agentic Cluster Targets
 | Job | Target | Expected |

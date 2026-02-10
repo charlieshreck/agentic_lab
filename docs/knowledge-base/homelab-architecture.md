@@ -46,7 +46,7 @@ Three-cluster Kubernetes homelab running on Proxmox and bare metal, following Gi
 
 ### Monitoring Cluster (monit)
 - **Network**: 10.30.0.0/24
-- **Platform**: K3s on VM
+- **Platform**: Talos Linux on VM
 - **Purpose**: Observability stack only
 - **ArgoCD**: NO
 - **MCP Servers**: NO (migrate any found to agentic)

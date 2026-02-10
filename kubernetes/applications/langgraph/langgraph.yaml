@@ -584,7 +584,7 @@ data:
     Network architecture:
     - Production cluster: 10.10.0.0/24 (Talos, ArgoCD)
     - Agentic AI cluster: 10.20.0.0/24 (Talos, AI workloads)
-    - Monitoring cluster: 10.30.0.0/24 (K3s, Coroot, VictoriaMetrics)
+    - Monitoring cluster: 10.30.0.0/24 (Talos, Coroot, VictoriaMetrics)
 
     Answer questions accurately using the provided context data. If data is unavailable,
     say so rather than guessing.""")

@@ -199,7 +199,7 @@ Related Networks:
 ## Related Projects
 
 - **[prod_homelab](https://github.com/charlieshreck/prod_homelab)**: Production Talos cluster
-- **[monit_homelab](https://github.com/charlieshreck/monit_homelab)**: Monitoring K3s cluster
+- **[monit_homelab](https://github.com/charlieshreck/monit_homelab)**: Monitoring Talos cluster
 
 ---
 

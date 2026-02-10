@@ -53,7 +53,7 @@ This plan addresses critical gaps in the homelab monitoring infrastructure to en
 | Talos API server | prod | K8s API metrics |
 | kube-state-metrics | prod | K8s object state |
 | node-exporter | prod | Host metrics (4 nodes) |
-| K3s kubelet | monit | K8s node metrics |
+| Talos kubelet | monit | K8s node metrics |
 
 ### What's NOT Being Monitored
 
