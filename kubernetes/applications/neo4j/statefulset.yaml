@@ -24,7 +24,7 @@ spec:
         runAsGroup: 7474
       containers:
       - name: neo4j
-        image: neo4j:5.17-community
+        image: neo4j:2026.01-community
         ports:
         - containerPort: 7474
           name: http
