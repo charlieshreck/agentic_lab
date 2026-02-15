@@ -299,7 +299,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: forwarder
-              image: python:3.12-slim
+              image: python:3.14-slim
               env:
                 - name: LANGGRAPH_URL
                   value: "http://langgraph.ai-platform:8000"
