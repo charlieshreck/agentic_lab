@@ -18,10 +18,9 @@ spec:
         app: ollama
         component: inference
     spec:
-      # Init container to pre-pull required models before accepting traffic
       initContainers:
       - name: model-puller
-        image: ollama/ollama:0.5.4-rocm
+        image: ollama/ollama:0.5.4
         command:
         - /bin/sh
         - -c
@@ -30,15 +29,10 @@ spec:
           /bin/ollama serve &
           sleep 5
 
-          # Pull required models (qwen2.5:7b for reasoning, nomic-embed-text for embeddings)
-          echo "Pulling qwen2.5:7b..."
-          /bin/ollama pull qwen2.5:7b
-
           echo "Pulling nomic-embed-text..."
           /bin/ollama pull nomic-embed-text
 
-          echo "All models pulled successfully!"
-          # Give models a moment to settle
+          echo "Embedding model pulled successfully!"
           sleep 2
         env:
         - name: OLLAMA_HOST
@@ -50,14 +44,14 @@ spec:
           mountPath: /root/.ollama
         resources:
           requests:
-            cpu: "1000m"
-            memory: "8Gi"
+            cpu: "500m"
+            memory: "1Gi"
           limits:
-            cpu: "4000m"
-            memory: "12Gi"
+            cpu: "2000m"
+            memory: "2Gi"
       containers:
       - name: ollama
-        image: ollama/ollama:0.5.4-rocm
+        image: ollama/ollama:0.5.4
         ports:
         - containerPort: 11434
           name: http
@@ -69,28 +63,18 @@ spec:
           value: "/root/.ollama/models"
         - name: OLLAMA_KEEP_ALIVE
           value: "5m"
-        # Increased parallel requests for handling multiple simultaneous queries
         - name: OLLAMA_NUM_PARALLEL
-          value: "4"
-        # AMD Radeon 680M (RDNA2/YELLOW_CARP) GPU acceleration
-        - name: HSA_OVERRIDE_GFX_VERSION
-          value: "10.3.0"
-        - name: OLLAMA_GPU_LAYERS
-          value: "999"
-        securityContext:
-          privileged: true
+          value: "2"
         resources:
           requests:
-            cpu: "2000m"
-            memory: "8Gi"
+            cpu: "250m"
+            memory: "512Mi"
           limits:
-            cpu: "8000m"
-            memory: "16Gi"
+            cpu: "2000m"
+            memory: "2Gi"
         volumeMounts:
         - name: ollama-models
           mountPath: /root/.ollama
-        - name: dri
-          mountPath: /dev/dri
         readinessProbe:
           httpGet:
             path: /
@@ -105,11 +89,6 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
-      volumes:
-      - name: dri
-        hostPath:
-          path: /dev/dri
-          type: Directory
   volumeClaimTemplates:
   - metadata:
       name: ollama-models
