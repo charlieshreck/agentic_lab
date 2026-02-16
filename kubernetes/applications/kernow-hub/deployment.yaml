@@ -17,9 +17,18 @@ spec:
     spec:
       imagePullSecrets:
       - name: ghcr-credentials
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
       containers:
       - name: kernow-hub
         image: ghcr.io/charlieshreck/kernow-hub:latest
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
         ports:
         - containerPort: 3456
           name: http
@@ -38,15 +47,20 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
-        readinessProbe:
+        startupProbe:
           httpGet:
-            path: /api/push/vapid-key
+            path: /health
             port: 3456
           initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3456
           periodSeconds: 10
         livenessProbe:
           httpGet:
-            path: /api/push/vapid-key
+            path: /health
             port: 3456
-          initialDelaySeconds: 10
           periodSeconds: 30
