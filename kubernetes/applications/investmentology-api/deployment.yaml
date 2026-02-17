@@ -39,7 +39,7 @@ spec:
             name: investmentology-api-secrets
         env:
         - name: DATABASE_URL
-          value: "postgresql://investmentology:$(INVEST_DB_PASSWORD)@$(PG_HOST):$(PG_PORT)/investmentology"
+          value: "postgresql://$(PG_USER):$(INVEST_DB_PASSWORD)@$(PG_HOST):$(PG_PORT)/investmentology"
         resources:
           requests:
             cpu: 100m
