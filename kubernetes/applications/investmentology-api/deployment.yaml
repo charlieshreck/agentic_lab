@@ -15,8 +15,6 @@ spec:
       labels:
         app: investmentology-api
     spec:
-      imagePullSecrets:
-      - name: ghcr-credentials
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
