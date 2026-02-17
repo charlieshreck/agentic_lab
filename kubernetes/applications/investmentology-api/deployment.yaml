@@ -6,7 +6,7 @@ metadata:
   labels:
     app: investmentology-api
 spec:
-  replicas: 1
+  replicas: 0  # API runs on HB LXC (10.10.0.101:80) for CLI agent access
   selector:
     matchLabels:
       app: investmentology-api

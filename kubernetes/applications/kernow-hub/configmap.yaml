@@ -19,4 +19,4 @@ data:
   GATUS_URL: "http://gatus.monit.kernow.io"
   SYNAPSE_URL: "http://10.10.0.22:3460"
   HB_URL: "http://10.10.0.101:3460"
-  INVEST_API_URL: "http://investmentology-api:8000"
+  INVEST_API_URL: "http://10.10.0.101:80"
