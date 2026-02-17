@@ -17,6 +17,6 @@ data:
   KNOWLEDGE_MCP_URL: "http://knowledge-mcp:8000/api/call"
   LANGGRAPH_URL: "http://langgraph:8000"
   GATUS_URL: "http://gatus.monit.kernow.io"
-  SYNAPSE_URL: "http://10.10.0.22:3456"
+  SYNAPSE_URL: "http://10.10.0.22:3460"
   HB_URL: "http://10.10.0.101:3460"
   INVEST_API_URL: "http://investmentology-api:8000"
