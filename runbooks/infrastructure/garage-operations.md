@@ -11,7 +11,7 @@ Garage is a lightweight, self-hosted S3-compatible object storage system deploye
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                         GARAGE ON TRUENAS-HDD                            │
-│                           10.20.0.103                                    │
+│                           10.10.0.103                                    │
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │   ┌─────────────────────────────────────────────────────────────────┐   │
@@ -24,11 +24,11 @@ Garage is a lightweight, self-hosted S3-compatible object storage system deploye
 │   ┌──────────────────────────────────────────────────────────────────┐  │
 │   │                      Exposed Ports                                │  │
 │   │                                                                   │  │
-│   │   S3 API:    http://10.20.0.103:30188  (client operations)       │  │
-│   │   Web UI:    http://10.20.0.103:30186  (management)              │  │
-│   │   Admin API: http://10.20.0.103:30190  (cluster management)      │  │
-│   │   RPC:       10.20.0.103:30187         (internal cluster)        │  │
-│   │   K2V API:   10.20.0.103:30189         (key-value, unused)       │  │
+│   │   S3 API:    http://10.10.0.103:30188  (client operations)       │  │
+│   │   Web UI:    http://10.10.0.103:30186  (management)              │  │
+│   │   Admin API: http://10.10.0.103:30190  (cluster management)      │  │
+│   │   RPC:       10.10.0.103:30187         (internal cluster)        │  │
+│   │   K2V API:   10.10.0.103:30189         (key-value, unused)       │  │
 │   └──────────────────────────────────────────────────────────────────┘  │
 │                                                                          │
 │   Storage Pool: Taupo (13.3 TB available)                               │
@@ -42,9 +42,9 @@ Garage is a lightweight, self-hosted S3-compatible object storage system deploye
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| S3 API | http://10.20.0.103:30188 | Bucket operations, uploads, downloads |
-| Web UI | http://10.20.0.103:30186 or https://garage.kernow.io | Management interface |
-| Admin API | http://10.20.0.103:30190 | Cluster configuration, layout |
+| S3 API | http://10.10.0.103:30188 | Bucket operations, uploads, downloads |
+| Web UI | http://10.10.0.103:30186 or https://garage.kernow.io | Management interface |
+| Admin API | http://10.10.0.103:30190 | Cluster configuration, layout |
 
 ## Credentials
 
@@ -84,12 +84,12 @@ infisical-mcp: get_secret(path="/backups/garage", key="ACCESS_KEY_ID")
 
 ```bash
 # Via S3 API (anonymous request returns 403)
-curl -I http://10.20.0.103:30188
+curl -I http://10.10.0.103:30188
 # Expected: HTTP/1.1 403 Forbidden
 
 # Via Admin API
 curl -H "Authorization: Bearer $(infisical secrets get ADMIN_TOKEN --path=/backups/garage --plain)" \
-  http://10.20.0.103:30190/v1/status
+  http://10.10.0.103:30190/v1/status
 ```
 
 ### List Buckets (via AWS CLI)
@@ -98,25 +98,25 @@ curl -H "Authorization: Bearer $(infisical secrets get ADMIN_TOKEN --path=/backu
 export AWS_ACCESS_KEY_ID=$(infisical secrets get ACCESS_KEY_ID --path=/backups/garage --plain)
 export AWS_SECRET_ACCESS_KEY=$(infisical secrets get SECRET_ACCESS_KEY --path=/backups/garage --plain)
 
-aws s3 ls --endpoint-url=http://10.20.0.103:30188
+aws s3 ls --endpoint-url=http://10.10.0.103:30188
 ```
 
 ### Create Bucket
 
 ```bash
-aws s3 mb s3://new-bucket --endpoint-url=http://10.20.0.103:30188
+aws s3 mb s3://new-bucket --endpoint-url=http://10.10.0.103:30188
 ```
 
 ### List Objects in Bucket
 
 ```bash
-aws s3 ls s3://backrest/ --endpoint-url=http://10.20.0.103:30188
+aws s3 ls s3://backrest/ --endpoint-url=http://10.10.0.103:30188
 ```
 
 ### Check Bucket Size
 
 ```bash
-aws s3 ls s3://backrest/ --recursive --summarize --endpoint-url=http://10.20.0.103:30188 | tail -2
+aws s3 ls s3://backrest/ --recursive --summarize --endpoint-url=http://10.10.0.103:30188 | tail -2
 ```
 
 ## Admin Operations
@@ -127,14 +127,14 @@ aws s3 ls s3://backrest/ --recursive --summarize --endpoint-url=http://10.20.0.1
 ADMIN_TOKEN=$(infisical secrets get ADMIN_TOKEN --path=/backups/garage --plain)
 
 curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://10.20.0.103:30190/v1/status | jq
+  http://10.10.0.103:30190/v1/status | jq
 ```
 
 ### Check Layout
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://10.20.0.103:30190/v1/layout | jq
+  http://10.10.0.103:30190/v1/layout | jq
 ```
 
 ### Create API Key
@@ -142,7 +142,7 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```bash
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  http://10.20.0.103:30190/v1/key \
+  http://10.10.0.103:30190/v1/key \
   -d '{"name": "new-key-name"}' | jq
 ```
 
@@ -150,13 +150,13 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://10.20.0.103:30190/v1/key | jq
+  http://10.10.0.103:30190/v1/key | jq
 ```
 
 ## TrueNAS SCALE App Management
 
 ### Access TrueNAS UI
-- URL: https://10.20.0.103 (TrueNAS-HDD)
+- URL: https://10.10.0.103 (TrueNAS-HDD)
 - Navigate to: Apps → Installed Applications → garage
 
 ### Restart Garage App
@@ -170,7 +170,7 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 ### Update Garage
 1. In TrueNAS UI: Apps → garage → Update
 2. Review release notes before updating
-3. Test after update: `curl http://10.20.0.103:30188`
+3. Test after update: `curl http://10.10.0.103:30188`
 
 ## Storage Considerations
 
@@ -213,7 +213,7 @@ spec:
   config:
     region: garage
     s3ForcePathStyle: "true"
-    s3Url: http://10.20.0.103:30188
+    s3Url: http://10.10.0.103:30188
   credential:
     name: garage-credentials
     key: cloud
@@ -223,13 +223,13 @@ spec:
 
 In Backrest UI, repository configuration:
 - **Type**: S3
-- **Endpoint**: http://10.20.0.103:30188
+- **Endpoint**: http://10.10.0.103:30188
 - **Bucket**: backrest
 - **Region**: garage
 - **Access Key**: From Infisical
 - **Secret Key**: From Infisical
 
-Repository URI format: `s3:http://10.20.0.103:30188/backrest`
+Repository URI format: `s3:http://10.10.0.103:30188/backrest`
 
 ## Troubleshooting
 
@@ -253,17 +253,17 @@ Garage requires layout configuration after fresh install:
 ```bash
 # Get node ID
 NODE_ID=$(curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://10.20.0.103:30190/v1/status | jq -r '.node')
+  http://10.10.0.103:30190/v1/status | jq -r '.node')
 
 # Assign capacity (10TB = 10000000000000 bytes)
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  http://10.20.0.103:30190/v1/layout \
+  http://10.10.0.103:30190/v1/layout \
   -d "{\"node_id\": \"$NODE_ID\", \"zone\": \"dc1\", \"capacity\": 10000000000000}"
 
 # Apply layout
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://10.20.0.103:30190/v1/layout/apply \
+  http://10.10.0.103:30190/v1/layout/apply \
   -d '{"version": 1}'
 ```
 

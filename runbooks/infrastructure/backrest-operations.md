@@ -40,10 +40,10 @@ Backrest provides a web UI for managing restic backups of VMs and LXC containers
 │   ┌─────────────────────────────────────┐    ┌────────────────────────────────┐│
 │   │         SSH to Backup Targets       │    │      S3 to Garage Storage      ││
 │   │                                     │    │                                ││
-│   │   IAC LXC (10.10.0.100)            │    │   s3:http://10.20.0.103:30188  ││
+│   │   IAC LXC (10.10.0.100)            │    │   s3:http://10.10.0.103:30188  ││
 │   │   Plex VM (10.10.0.50)             │    │   Bucket: backrest             ││
 │   │   UniFi VM (10.10.0.51)            │    │                                ││
-│   │   TrueNAS-HDD (10.20.0.103)        │    │   Encrypted, deduplicated      ││
+│   │   TrueNAS-HDD (10.10.0.103)        │    │   Encrypted, deduplicated      ││
 │   │                                     │    │   restic repository            ││
 │   └─────────────────────────────────────┘    └────────────────────────────────┘│
 │                                                                                  │
@@ -54,9 +54,9 @@ Backrest provides a web UI for managing restic backups of VMs and LXC containers
 
 | Setting | Value |
 |---------|-------|
-| Repository URI | `s3:http://10.20.0.103:30188/backrest` |
+| Repository URI | `s3:http://10.10.0.103:30188/backrest` |
 | Region | `garage` |
-| Endpoint | `http://10.20.0.103:30188` |
+| Endpoint | `http://10.10.0.103:30188` |
 | Bucket | `backrest` |
 | Credentials | Infisical `/backups/garage` |
 
@@ -69,7 +69,7 @@ Backrest uses **SSH commandPrefix** to run restic on remote hosts. This means re
 | **iac-daily** | 10.10.0.175 | /home, /root, /etc | /root/.cache, /home/*/.cache, /root/.local/share/nvim | 3AM daily | 14 daily, 4 weekly |
 | **plex-daily** | 10.10.0.50 | /opt/plex/config/Library/Application Support/Plex Media Server, /opt/plex/compose | Cache, Logs directories | 4AM daily | 7 daily, 4 weekly |
 | **unifi-daily** | 10.10.0.51 | Container volumes (uosserver_data, uosserver_var_lib_unifi) | Logs | 5AM daily | 7 daily, 4 weekly |
-| **truenas-hdd-weekly** | 10.20.0.103 | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
+| **truenas-hdd-weekly** | 10.10.0.103 | /root | - | 6AM Sundays | 4 weekly, 2 monthly |
 | **truenas-media-weekly** | 10.20.0.100 | /root | - | 7AM Sundays | 4 weekly, 2 monthly |
 
 ### Cron Expressions
@@ -96,7 +96,7 @@ This causes Backrest to execute: `ssh root@10.10.0.50 restic backup /path/to/bac
 **Requirements on target hosts**:
 - `restic` binary installed (installed via package manager)
 - SSH public key in `/root/.ssh/authorized_keys`
-- Network access to Garage S3 (10.20.0.103:30188)
+- Network access to Garage S3 (10.10.0.103:30188)
 
 ### Path Validation Workaround
 
@@ -144,7 +144,7 @@ The public key must be in `/root/.ssh/authorized_keys` on each target:
 | IAC LXC | 10.10.0.175 | ✅ Configured |
 | Plex VM | 10.10.0.50 | ✅ Configured |
 | UniFi VM | 10.10.0.51 | ✅ Configured |
-| TrueNAS-HDD | 10.20.0.103 | ✅ Local (no SSH needed) |
+| TrueNAS-HDD | 10.10.0.103 | ✅ Local (no SSH needed) |
 
 ### Adding SSH Key to New Host
 
@@ -241,7 +241,7 @@ infrastructure-mcp: kubectl_logs(namespace="backrest", pod_name="backrest")
 
 1. **Verify Garage is running**:
    ```bash
-   curl http://10.20.0.103:30188
+   curl http://10.10.0.103:30188
    # Expected: 403 Forbidden (anonymous access denied)
    ```
 
@@ -252,7 +252,7 @@ infrastructure-mcp: kubectl_logs(namespace="backrest", pod_name="backrest")
 
 3. **Test with AWS CLI from pod**:
    ```bash
-   kubectl exec -n backrest deployment/backrest -- aws s3 ls --endpoint-url=http://10.20.0.103:30188
+   kubectl exec -n backrest deployment/backrest -- aws s3 ls --endpoint-url=http://10.10.0.103:30188
    ```
 
 ### Backup Slow
@@ -271,7 +271,7 @@ This happens if a backup was interrupted.
    - Select Repository → Actions → Unlock
 3. Or via restic CLI:
    ```bash
-   kubectl exec -n backrest deployment/backrest -- restic unlock -r s3:http://10.20.0.103:30188/backrest
+   kubectl exec -n backrest deployment/backrest -- restic unlock -r s3:http://10.10.0.103:30188/backrest
    ```
 
 ### "Permission Denied" During Backup

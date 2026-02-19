@@ -35,7 +35,7 @@ spec:
                 - name: BACKUP_PREFIX
                   value: "agentic/qdrant"
                 - name: S3_ENDPOINT
-                  value: "http://10.20.0.103:30188"
+                  value: "http://10.10.0.103:30188"
               command:
                 - /bin/sh
                 - -c

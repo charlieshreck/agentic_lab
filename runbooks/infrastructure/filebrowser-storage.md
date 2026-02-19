@@ -12,7 +12,7 @@ FileBrowser (https://files.kernow.io) provides web access to all TrueNAS storage
 | Instance | NFS IP | Management IP | Purpose |
 |----------|--------|---------------|---------|
 | Media | 10.40.0.10 | 10.20.0.100 | Plex media, downloads |
-| HDD | 10.20.0.103 | 10.20.0.103 | Backups, archives |
+| HDD | 10.10.0.103 | 10.10.0.103 | Backups, archives |
 
 ## Step 1: Create NFS Share (if needed)
 
@@ -23,7 +23,7 @@ FileBrowser (https://files.kernow.io) provides web access to all TrueNAS storage
 /root/.config/infisical/secrets.sh get /apps/truenas/truenas-hdd API_KEY
 
 # Create NFS share
-curl -s -k -X POST "https://10.20.0.103/api/v2.0/sharing/nfs" \
+curl -s -k -X POST "https://10.10.0.103/api/v2.0/sharing/nfs" \
   -H "Authorization: Bearer <API_KEY>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -63,7 +63,7 @@ volumeMounts:
 volumes:
   - name: newvolume
     nfs:
-      server: 10.20.0.103  # or 10.40.0.10 for media
+      server: 10.10.0.103  # or 10.40.0.10 for media
       path: /mnt/Pool/Dataset
 ```
 
@@ -102,10 +102,10 @@ kubectl exec -n apps deploy/filebrowser -- ls -la /folder/hdd/
 |------------------|------------|------------------|
 | /folder/media/Plexopathy | 10.40.0.10:/mnt/Tongariro/Plexopathy | Media |
 | /folder/media/Tarriance | 10.40.0.10:/mnt/Taranaki/Tarriance | Media |
-| /folder/hdd/Pleximetry | 10.20.0.103:/mnt/Taupo/Pleximetry | HDD |
-| /folder/hdd/PBS-Backups | 10.20.0.103:/mnt/Taupo/pbs | HDD |
-| /folder/hdd/MinIO | 10.20.0.103:/mnt/Taupo/MinIO | HDD |
-| /folder/hdd/Truro | 10.20.0.103:/mnt/Truro | HDD |
+| /folder/hdd/Pleximetry | 10.10.0.103:/mnt/Taupo/Pleximetry | HDD |
+| /folder/hdd/PBS-Backups | 10.10.0.103:/mnt/Taupo/pbs | HDD |
+| /folder/hdd/MinIO | 10.10.0.103:/mnt/Taupo/MinIO | HDD |
+| /folder/hdd/Truro | 10.10.0.103:/mnt/Truro | HDD |
 
 ## Related
 - FileBrowser deployment: `prod_homelab/kubernetes/applications/apps/filebrowser/`

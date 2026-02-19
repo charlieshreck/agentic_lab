@@ -20,7 +20,7 @@
 │                    ▼                                 ▼                     │
 │   ┌────────────────────────────────────────────────────────────────────┐  │
 │   │                     GARAGE (S3-Compatible)                          │  │
-│   │                     TrueNAS HDD - 10.20.0.103                       │  │
+│   │                     TrueNAS HDD - 10.10.0.103                       │  │
 │   │                     Buckets: velero-*, backrest                     │  │
 │   │                     Capacity: 13TB available                        │  │
 │   └────────────────────────────────────────────────────────────────────┘  │
@@ -65,7 +65,7 @@ Velero handles Kubernetes-native backups including PVCs, ConfigMaps, Secrets, an
 | **Agentic** | ⚠️ K8s metadata only | N/A | N/A | Uses CronJob backups |
 | **Monit** | ⚠️ K8s metadata only | N/A | N/A | Needs app-level backup |
 
-- **Backend**: Garage S3 at http://10.20.0.103:30188
+- **Backend**: Garage S3 at http://10.10.0.103:30188
 - **Credentials**: Infisical `/backups/garage`
 - **Runbook**: `/home/agentic_lab/runbooks/infrastructure/velero-operations.md`
 
@@ -100,7 +100,7 @@ Backups run via SSH commandPrefix - restic executes on the remote host and strea
 | **iac-daily** | 10.10.0.175 | Daily 3AM | /home, /root, /etc | 14d, 4w |
 | **plex-daily** | 10.10.0.50 | Daily 4AM | /opt/plex/config/..., /opt/plex/compose | 7d, 4w |
 | **unifi-daily** | 10.10.0.51 | Daily 5AM | UniFi OS container volumes (~800MB) | 7d, 4w |
-| **truenas-hdd-weekly** | 10.20.0.103 | Sunday 6AM | /root | 4w, 2m |
+| **truenas-hdd-weekly** | 10.10.0.103 | Sunday 6AM | /root | 4w, 2m |
 | **truenas-media-weekly** | 10.20.0.100 | Sunday 7AM | /root | 4w, 2m |
 
 - **UI**: https://backrest.kernow.io or http://10.20.0.40:31115
@@ -134,7 +134,7 @@ Garage is a lightweight S3-compatible storage system running on TrueNAS-HDD.
 | 30190 | Admin API | Cluster configuration |
 
 - **Admin**: https://garage.kernow.io (admin token in Infisical)
-- **S3 API**: http://10.20.0.103:30188
+- **S3 API**: http://10.10.0.103:30188
 - **Credentials**: Infisical `/backups/garage`
 - **Runbook**: `/home/agentic_lab/runbooks/infrastructure/garage-operations.md`
 
@@ -143,7 +143,7 @@ Garage is a lightweight S3-compatible storage system running on TrueNAS-HDD.
 | Service | Internal URL | External URL |
 |---------|-------------|--------------||
 | Backrest | http://10.20.0.40:31115 | https://backrest.kernow.io |
-| Garage Web | http://10.20.0.103:30186 | https://garage.kernow.io |
+| Garage Web | http://10.10.0.103:30186 | https://garage.kernow.io |
 | PBS | https://10.10.0.150:8007 | N/A |
 | Gatus (monitoring) | http://10.30.0.120:31100 | https://gatus.kernow.io |
 
@@ -153,8 +153,8 @@ Garage is a lightweight S3-compatible storage system running on TrueNAS-HDD.
 
 | Endpoint | Check | Expected |
 |----------|-------|----------|
-| Garage S3 API | http://10.20.0.103:30188 | 403 Forbidden |
-| Garage Web UI | http://10.20.0.103:30186 | 200 OK |
+| Garage S3 API | http://10.10.0.103:30188 | 403 Forbidden |
+| Garage Web UI | http://10.10.0.103:30186 | 200 OK |
 | Backrest | http://10.20.0.40:31115 | 200 OK |
 
 ### Alerts

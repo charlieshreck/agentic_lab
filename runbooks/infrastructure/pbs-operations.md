@@ -9,7 +9,7 @@ PBS provides VM/LXC snapshot-level backups as a disaster recovery layer, complem
 **PBS Server**: 10.10.0.151 (VM 101 on Pihanga)
 **Web UI**: https://10.10.0.151:8007
 **Datastore**: `pbs-datastore` → `/mnt/pbs-datastore` (NFS to TrueNAS-HDD)
-**NFS Path**: 10.20.0.103:/mnt/Taupo/pbs
+**NFS Path**: 10.10.0.103:/mnt/Taupo/pbs
 **Storage**: 13.3 TB available
 
 ### Why Pihanga?

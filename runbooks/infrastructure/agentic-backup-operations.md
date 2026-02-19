@@ -25,7 +25,7 @@ Application-level backups for the agentic cluster (10.20.0.0/24). These backups 
 │          │                │               │               │               │
 │          ▼                ▼               ▼               ▼               │
 │   ┌────────────────────────────────────────────────────────────────────┐  │
-│   │                      GARAGE S3 (10.20.0.103:30188)                  │  │
+│   │                      GARAGE S3 (10.10.0.103:30188)                  │  │
 │   │                      Bucket: backrest                               │  │
 │   │                                                                     │  │
 │   │   agentic/postgresql/YYYYMMDD-HHMMSS/*.dump                        │  │
@@ -127,10 +127,10 @@ export AWS_ACCESS_KEY_ID=<from infisical>
 export AWS_SECRET_ACCESS_KEY=<from infisical>
 
 # List PostgreSQL backups
-aws s3 ls s3://backrest/agentic/postgresql/ --endpoint-url http://10.20.0.103:30188
+aws s3 ls s3://backrest/agentic/postgresql/ --endpoint-url http://10.10.0.103:30188
 
 # List Qdrant backups
-aws s3 ls s3://backrest/agentic/qdrant/ --endpoint-url http://10.20.0.103:30188
+aws s3 ls s3://backrest/agentic/qdrant/ --endpoint-url http://10.10.0.103:30188
 ```
 
 ## Recovery Procedures
@@ -140,7 +140,7 @@ aws s3 ls s3://backrest/agentic/qdrant/ --endpoint-url http://10.20.0.103:30188
 ```bash
 # 1. Download backup
 aws s3 cp s3://backrest/agentic/postgresql/20260121-020000/outline.dump /tmp/ \
-  --endpoint-url http://10.20.0.103:30188
+  --endpoint-url http://10.10.0.103:30188
 
 # 2. Restore to PostgreSQL
 kubectl exec -it postgresql-0 -n ai-platform -- \
@@ -156,7 +156,7 @@ pg_restore -h localhost -U postgres -d outline --clean /tmp/outline.dump
 ```bash
 # 1. Download snapshot
 aws s3 cp s3://backrest/agentic/qdrant/20260121-023000/runbooks-<snapshot-id> /tmp/ \
-  --endpoint-url http://10.20.0.103:30188
+  --endpoint-url http://10.10.0.103:30188
 
 # 2. Upload to Qdrant
 curl -X POST "http://10.20.0.40:6333/collections/runbooks/snapshots/upload" \
@@ -174,7 +174,7 @@ curl -X PUT "http://10.20.0.40:6333/collections/runbooks/snapshots/recover" \
 ```bash
 # 1. Download and extract backup
 aws s3 cp s3://backrest/agentic/neo4j/20260121-033000/neo4j-20260121-033000.tar.gz /tmp/ \
-  --endpoint-url http://10.20.0.103:30188
+  --endpoint-url http://10.10.0.103:30188
 tar -xzf /tmp/neo4j-20260121-033000.tar.gz -C /tmp/
 
 # 2. Import via Cypher (custom script needed)
@@ -192,7 +192,7 @@ tar -xzf /tmp/neo4j-20260121-033000.tar.gz -C /tmp/
    ```
 
 2. Common issues:
-   - **S3 connection failed**: Check Garage is running (`curl http://10.20.0.103:30188`)
+   - **S3 connection failed**: Check Garage is running (`curl http://10.10.0.103:30188`)
    - **Auth failed**: Verify `backup-s3-credentials` secret exists
    - **Service unavailable**: Check target service is running (postgresql, qdrant, etc.)
 

@@ -48,17 +48,17 @@ Assignment: Cilium LB IPAM (label: io.cilium/lb-ipam-ips=traefik)
 ```bash
 # Get node ID
 NODE_ID=$(curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://10.20.0.103:30190/v1/status | jq -r '.node')
+  http://10.10.0.103:30190/v1/status | jq -r '.node')
 
 # Assign storage capacity
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  http://10.20.0.103:30190/v1/layout \
+  http://10.10.0.103:30190/v1/layout \
   -d "{\"node_id\": \"$NODE_ID\", \"zone\": \"dc1\", \"capacity\": 10000000000000}"
 
 # Apply layout
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://10.20.0.103:30190/v1/layout/apply \
+  http://10.10.0.103:30190/v1/layout/apply \
   -d '{"version": 1}'
 ```
 

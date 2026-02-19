@@ -33,7 +33,7 @@ spec:
               accessMode: ReadWrite
               config:
                 region: garage
-                s3Url: http://10.20.0.103:30188
+                s3Url: http://10.10.0.103:30188
                 s3ForcePathStyle: "true"
               credential:
                 name: velero-garage-credentials
