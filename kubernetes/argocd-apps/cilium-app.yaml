@@ -65,6 +65,13 @@ spec:
 
         # Network interface for L2 announcements (eno1 on agentic cluster)
         devices: "eno1"
+
+        # Native routing — no VXLAN overhead (single node, same L2)
+        routingMode: native
+        autoDirectNodeRoutes: true
+        ipv4NativeRoutingCIDR: "10.244.0.0/16"
+        bpf:
+          masquerade: true
   destination:
     server: https://10.20.0.40:6443  # Agentic cluster API server
     namespace: kube-system
