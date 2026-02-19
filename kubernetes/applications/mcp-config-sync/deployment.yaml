@@ -92,9 +92,8 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 31103
       name: http
-  type: NodePort
+  type: ClusterIP
 ---
 apiVersion: v1
 kind: ServiceAccount

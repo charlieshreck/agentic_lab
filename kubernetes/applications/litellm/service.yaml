@@ -7,11 +7,10 @@ metadata:
     app: litellm
     component: inference-proxy
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
   - port: 4000
     targetPort: 4000
-    nodePort: 31400
     protocol: TCP
     name: http
   selector:

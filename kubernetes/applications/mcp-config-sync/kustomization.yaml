@@ -6,4 +6,5 @@ namespace: ai-platform
 resources:
   - configmap.yaml
   - deployment.yaml
+  - ingress.yaml
   - infisical-secrets.yaml

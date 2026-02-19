@@ -6,12 +6,11 @@ metadata:
   labels:
     app.kubernetes.io/name: outline
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: outline
   ports:
     - name: http
       port: 80
       targetPort: 80  # nginx sidecar
-      nodePort: 31113
       protocol: TCP

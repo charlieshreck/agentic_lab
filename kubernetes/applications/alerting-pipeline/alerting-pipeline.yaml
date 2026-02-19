@@ -698,11 +698,29 @@ metadata:
   name: alerting-pipeline
   namespace: ai-platform
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: alerting-pipeline
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 31102
       name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alerting-pipeline
+  namespace: ai-platform
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: alerting-pipeline.agentic.kernow.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: alerting-pipeline
+                port:
+                  number: 8000

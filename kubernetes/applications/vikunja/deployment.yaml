@@ -112,11 +112,10 @@ metadata:
   name: vikunja
   namespace: vikunja
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: vikunja
   ports:
     - port: 8080
       targetPort: 3456
-      nodePort: 31095
       name: http

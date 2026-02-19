@@ -1,18 +1,18 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: vikunja-traefik
-  namespace: vikunja
+  name: mcp-config-sync
+  namespace: ai-platform
 spec:
   ingressClassName: traefik
   rules:
-    - host: vikunja.kernow.io
+    - host: mcp-webhook.kernow.io
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: vikunja
+                name: mcp-config-sync
                 port:
-                  number: 8080  # Service port (NOT container port 3456)
+                  number: 8000

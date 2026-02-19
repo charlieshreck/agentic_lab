@@ -69,25 +69,25 @@ All services exposed via NodePort on the agentic cluster (10.20.0.40).
 | 31092 | homepage-mcp | Dashboard widgets | `curl http://10.20.0.40:31092/health` |
 | 31093 | web-search-mcp | SearXNG web search | `curl http://10.20.0.40:31093/health` |
 | 31094 | browser-automation-mcp | Playwright browser | `curl http://10.20.0.40:31094/health` |
-| 31095 | **AVAILABLE** | - | - |
+| 31095 | ~~vikunja~~ | RETIRED → ClusterIP + Traefik | - |
 | 31096 | plex-mcp | Plex media server | `curl http://10.20.0.40:31096/health` |
 | 31097 | vikunja-mcp | Task/project management | `curl http://10.20.0.40:31097/health` |
 | 31098 | neo4j-mcp | Knowledge graph queries | `curl http://10.20.0.40:31098/health` |
 | 31099 | fumadocs | Knowledge UI (Next.js) | `curl http://10.20.0.40:31099/` |
 | 31100 | tasmota-mcp | Tasmota smart devices | `curl http://10.20.0.40:31100/health` |
 | 31101 | monitoring-mcp | VictoriaMetrics, Grafana, Gatus | `curl http://10.20.0.40:31101/health` |
-| 31102 | alerting-pipeline | Alert processing | - |
-| 31103 | mcp-config-sync | MCP config sync | - |
+| 31102 | ~~alerting-pipeline~~ | RETIRED → ClusterIP + Traefik | - |
+| 31103 | ~~mcp-config-sync~~ | RETIRED → ClusterIP + Traefik | - |
 | 31104 | reddit-mcp | Reddit browsing | `curl http://10.20.0.40:31104/health` |
 | 31105 | keep | Keep API (internal) | - |
 | 31106 | keep-frontend | Keep UI | - |
 | 31107 | keep-mcp | Keep alert aggregation | `curl http://10.20.0.40:31107/health` |
 | 31108 | **AVAILABLE** | - | - |
 | 31109 | **AVAILABLE** | - | - |
-| 31110 | claude-refresh | Claude token refresh | - |
+| 31110 | ~~claude-refresh~~ | REMOVED (redundant) | - |
 | 31111 | github-mcp | GitHub repos, issues, PRs | `curl http://10.20.0.40:31111/health` |
 | 31112 | wikipedia-mcp | Wikipedia articles | `curl http://10.20.0.40:31112/health` |
-| 31113 | outline | Outline wiki (internal) | - |
+| 31113 | ~~outline~~ | RETIRED → ClusterIP + Traefik | - |
 | 31114 | outline-mcp | Outline wiki MCP | `curl http://10.20.0.40:31114/health` |
 | 31115 | backrest | Backrest backup UI | - |
 
@@ -97,7 +97,7 @@ All services exposed via NodePort on the agentic cluster (10.20.0.40).
 
 | Port | Service | Description |
 |------|---------|-------------|
-| 31400 | litellm | LiteLLM proxy (primary) |
+| 31400 | ~~litellm~~ | RETIRED → ClusterIP (use 30400 litellm-nodeport) |
 | 31434 | ollama | Ollama inference server |
 
 ---
@@ -106,10 +106,11 @@ All services exposed via NodePort on the agentic cluster (10.20.0.40).
 
 | Port | Service | Namespace | Description |
 |------|---------|-----------|-------------|
-| 31095 | vikunja | vikunja | Vikunja app |
+| 31095 | ~~vikunja~~ | vikunja | RETIRED → ClusterIP + Traefik |
 | 31115 | backrest | backrest | Backrest backup UI |
 | 31105 | keep | keep | Keep API |
 | 31106 | keep-frontend | keep | Keep UI |
+| 31116 | ~~silverbullet~~ | ai-platform | RETIRED → ClusterIP + Traefik |
 
 ---
 
@@ -181,4 +182,5 @@ done
 
 | Date | Change |
 |------|--------|
+| 2026-02-19 | NodePort → ClusterIP migration: retired 31095(vikunja), 31102(alerting-pipeline), 31103(mcp-config-sync), 31110(claude-refresh removed), 31113(outline), 31116(silverbullet), 31400(litellm). Consolidated domain MCPs (31121-31126) also converted to ClusterIP. All now use Traefik ingress routing. |
 | 2026-01-21 | Initial registry created from cluster audit |
