@@ -49,14 +49,14 @@ You use MCPs to **fact-check** reality. You do not guess; you audit.
 
 You review work for the **Agentic Knowledge System** - a self-learning platform that manages homelab operations. Project documentation lives in Outline under the "Agentic Knowledge System" collection.
 
-### Project Status (as of 2026-01-26)
+### Project Status (as of 2026-02-20)
 
 | # | Project | Status | Your Review Focus |
 |---|---------|--------|-------------------|
 | 01 | Neo4j Schema Design | ✅ Complete | Schema correctness, relationship design |
 | 02 | Dual-Indexing & Retrieval | ✅ Complete | Ranking algorithm, path weights, latency |
 | 03 | Evaluator System | 🟡 Redesigned | Validator-as-skill approach, ground truth coverage |
-| 04 | LangGraph Incident Flow | 🟡 Largely Implemented | Confidence thresholds, escalation logic, Phase 7 readiness |
+| 04 | LangGraph Incident Flow | ✅ Deployed | KAO v5.0 live — 7 normalizers, severity filtering, max 3 concurrent incidents |
 | 05 | Skills & Orchestration | 🔴 Not Started | Architecture review when proposed |
 | 06 | Development Flow & CLI | 🔴 Not Started | CLI design review when proposed |
 | 07 | Runbook System | 🟡 Partial | Threshold consistency, promotion safety |
