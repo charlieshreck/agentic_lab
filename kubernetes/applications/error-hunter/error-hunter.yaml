@@ -63,6 +63,16 @@ data:
     # A2A token for MCP REST bridge
     A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
 
+    # GitHub token for Renovate PR management
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+
+    # Repos to check for Renovate updates
+    RENOVATE_REPOS = [
+        ("charlieshreck", "prod_homelab"),
+        ("charlieshreck", "agentic_lab"),
+        ("charlieshreck", "monit_homelab"),
+    ]
+
     # Cluster contexts for kubectl MCP calls
     CLUSTERS = {
         "production": "admin@homelab-prod",
@@ -1001,6 +1011,112 @@ data:
         return findings
 
     # ========================================================================
+    # CHECK: RENOVATE / DEPENDENCY UPDATES
+    # ========================================================================
+
+    async def check_renovate() -> list:
+        """Check for pending Renovate PRs and auto-merge mature ones."""
+        findings = []
+        ext = EXTERNAL_MCP_URL
+
+        if not GITHUB_TOKEN:
+            logger.warning("GITHUB_TOKEN not set, skipping Renovate check")
+            return findings
+
+        for owner, repo in RENOVATE_REPOS:
+            try:
+                prs_result = await call_mcp_tool_safe(ext, "github_list_prs", {
+                    "owner": owner, "repo": repo, "state": "open", "per_page": 20,
+                })
+                # Parse the markdown response for Renovate PRs
+                prs_text = ""
+                if isinstance(prs_result, dict):
+                    prs_text = prs_result.get("result", "")
+                elif isinstance(prs_result, str):
+                    prs_text = prs_result
+
+                # Extract PR info from markdown lines like:
+                # - #7 **chore(deps): Update ...** (renovate/... -> main)
+                for line in prs_text.split("\n"):
+                    if "chore(deps):" not in line and "renovate" not in line.lower():
+                        continue
+                    # Extract PR number
+                    pr_match = re.search(r"#(\d+)", line)
+                    if not pr_match:
+                        continue
+                    pr_num = int(pr_match.group(1))
+
+                    # Extract title
+                    title_match = re.search(r"\*\*(.+?)\*\*", line)
+                    pr_title = title_match.group(1) if title_match else f"PR #{pr_num}"
+
+                    # Skip config migration PRs
+                    if "migrate" in pr_title.lower():
+                        continue
+
+                    # Get PR details to check age
+                    pr_detail = await call_mcp_tool_safe(ext, "github_get_pr", {
+                        "owner": owner, "repo": repo, "pr_number": pr_num,
+                    })
+                    pr_text = ""
+                    if isinstance(pr_detail, dict):
+                        pr_text = pr_detail.get("result", "")
+
+                    is_major = "major" in line.lower() or "major" in pr_text.lower()
+
+                    # Record finding
+                    findings.append(make_finding(
+                        "dependencies", "renovate_pr_pending", "global",
+                        f"renovate/{owner}/{repo}/pr-{pr_num}",
+                        "warning" if is_major else "info",
+                        f"Renovate PR #{pr_num} on {repo}: {pr_title}",
+                        {"owner": owner, "repo": repo, "pr_number": pr_num,
+                         "title": pr_title, "is_major": is_major},
+                        "", "",
+                    ))
+
+                    # Auto-merge if conditions met
+                    if is_major:
+                        merged = await _try_merge_renovate_pr(owner, repo, pr_num, pr_title)
+                        if merged:
+                            logger.info(f"Auto-merged Renovate PR #{pr_num} on {repo}: {pr_title}")
+                            # Update finding to reflect merge
+                            findings[-1]["evidence"]["auto_merged"] = True
+                            findings[-1]["description"] = f"[AUTO-MERGED] {findings[-1]['description']}"
+
+            except Exception as e:
+                logger.error(f"Renovate check error for {owner}/{repo}: {e}")
+
+        return findings
+
+    async def _try_merge_renovate_pr(owner: str, repo: str, pr_num: int, title: str) -> bool:
+        """Merge a Renovate PR via GitHub API. Returns True if merged."""
+        if not GITHUB_TOKEN:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.put(
+                    f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}/merge",
+                    json={
+                        "commit_title": f"{title}\n\nAuto-merged by Error Hunter",
+                        "merge_method": "squash",
+                    },
+                    headers={
+                        "Authorization": f"Bearer {GITHUB_TOKEN}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                )
+                if resp.status_code == 200:
+                    return True
+                else:
+                    logger.warning(f"Failed to merge PR #{pr_num} on {repo}: {resp.status_code} {resp.text[:200]}")
+                    return False
+        except Exception as e:
+            logger.error(f"Error merging PR #{pr_num} on {repo}: {e}")
+            return False
+
+    # ========================================================================
     # LANGGRAPH STATE AND NODES
     # ========================================================================
 
@@ -1043,6 +1159,7 @@ data:
             check_logs("agentic"),
             check_logs("monitoring"),
             check_mcp_health(),
+            check_renovate(),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1149,6 +1266,12 @@ data:
             # MCP empty responses: informational, track trends
             elif check_name == "mcp_tool_empty_response":
                 log_only.append(finding)
+            # Renovate PRs: auto-merged ones are log_only, pending are create_rule
+            elif check_name == "renovate_pr_pending":
+                if finding.get("evidence", {}).get("auto_merged"):
+                    log_only.append(finding)
+                else:
+                    create_rule.append(finding)
             # Informational
             elif severity == "info":
                 log_only.append(finding)
@@ -1560,6 +1683,11 @@ spec:
                 secretKeyRef:
                   name: incident-db-credentials
                   key: DATABASE_URL
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-github
+                  key: GITHUB_TOKEN
           volumeMounts:
             - name: code
               mountPath: /code
