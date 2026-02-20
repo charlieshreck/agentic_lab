@@ -130,8 +130,8 @@ data:
             "canary_tools": [
                 # kubectl uses flat kwargs — response is markdown, no structured key
                 ("kubectl_get_namespaces", {"cluster": "admin@agentic-platform"}, None),
-                # Pydantic-model tools need explicit params wrapper to avoid auto-retry delay
-                ("proxmox_list_vms", {"params": {}}, None),
+                # proxmox_list_nodes is faster than list_vms (single API call vs all hosts)
+                ("proxmox_list_nodes", {"params": {"host": "ruapehu"}}, None),
                 ("cloudflare_list_zones", {"params": {}}, None),
                 ("get_system_status", {}, None),
                 ("truenas_list_pools", {"params": {}}, None),
