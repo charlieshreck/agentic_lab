@@ -6,76 +6,119 @@
   "dependencyDashboard": true,
   "dependencyDashboardTitle": "Dependency Dashboard - Agentic Platform",
   "automerge": true,
-  "automergeType": "pr",
-  "automergeStrategy": "squash",
-  "platformAutomerge": true,
+  "automergeType": "branch",
+  "platformAutomerge": false,
   "minimumReleaseAge": "3 days",
   "internalChecksFilter": "strict",
   "prCreation": "not-pending",
   "vulnerabilityAlerts": {
     "enabled": true,
-    "labels": ["security"]
+    "labels": [
+      "security"
+    ]
   },
   "kubernetes": {
-    "fileMatch": ["kubernetes/.+\\.ya?ml$"]
+    "managerFilePatterns": [
+      "/kubernetes/.+\\.ya?ml$/"
+    ]
   },
   "pep621": {
-    "fileMatch": ["mcp-servers/.+/pyproject\\.toml$", "pyproject\\.toml$"]
+    "managerFilePatterns": [
+      "/mcp-servers/.+/pyproject\\.toml$/",
+      "/pyproject\\.toml$/"
+    ]
   },
   "npm": {
-    "fileMatch": ["fumadocs/package\\.json$", "package\\.json$"]
+    "managerFilePatterns": [
+      "/fumadocs/package\\.json$/",
+      "/package\\.json$/"
+    ]
   },
   "packageRules": [
     {
       "description": "Auto-merge patch and minor updates after stability period",
-      "matchUpdateTypes": ["patch", "minor"],
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
+      ],
       "automerge": true
     },
     {
-      "description": "Require review for major updates",
-      "matchUpdateTypes": ["major"],
+      "description": "Require review for major updates (creates PR)",
+      "matchUpdateTypes": [
+        "major"
+      ],
       "automerge": false,
-      "labels": ["major-update"]
+      "automergeType": "pr",
+      "labels": [
+        "major-update"
+      ]
     },
     {
       "description": "Group Kubernetes platform updates",
-      "matchManagers": ["kubernetes"],
-      "matchFileNames": ["kubernetes/platform/**"],
+      "matchManagers": [
+        "kubernetes"
+      ],
+      "matchFileNames": [
+        "kubernetes/platform/**"
+      ],
       "groupName": "kubernetes-platform"
     },
     {
       "description": "Group AI platform application updates",
-      "matchManagers": ["kubernetes"],
-      "matchFileNames": ["kubernetes/applications/**"],
+      "matchManagers": [
+        "kubernetes"
+      ],
+      "matchFileNames": [
+        "kubernetes/applications/**"
+      ],
       "groupName": "kubernetes-apps"
     },
     {
       "description": "Group MCP server container images",
-      "matchManagers": ["kubernetes"],
-      "matchFileNames": ["kubernetes/applications/mcp-servers/**"],
+      "matchManagers": [
+        "kubernetes"
+      ],
+      "matchFileNames": [
+        "kubernetes/applications/mcp-servers/**"
+      ],
       "groupName": "mcp-server-images"
     },
     {
       "description": "Group MCP server Python dependencies",
-      "matchManagers": ["pep621"],
-      "matchFileNames": ["mcp-servers/**"],
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchFileNames": [
+        "mcp-servers/**"
+      ],
       "groupName": "mcp-python-deps"
     },
     {
       "description": "Group MCP server Dockerfile updates",
-      "matchManagers": ["dockerfile"],
-      "matchFileNames": ["mcp-servers/**"],
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchFileNames": [
+        "mcp-servers/**"
+      ],
       "groupName": "mcp-dockerfiles"
     },
     {
       "description": "Group Terraform updates",
-      "matchManagers": ["terraform"],
+      "matchManagers": [
+        "terraform"
+      ],
       "groupName": "terraform"
     },
     {
       "description": "Group fumadocs/Next.js dependencies",
-      "matchManagers": ["npm"],
-      "matchFileNames": ["fumadocs/**"],
+      "matchManagers": [
+        "npm"
+      ],
+      "matchFileNames": [
+        "fumadocs/**"
+      ],
       "groupName": "fumadocs-deps"
     }
   ],
@@ -90,6 +133,11 @@
   "semanticCommits": "enabled",
   "commitMessagePrefix": "chore(deps):",
   "rebaseWhen": "behind-base-branch",
-  "labels": ["dependencies", "renovate"],
-  "assignees": ["@charlieshreck"]
+  "labels": [
+    "dependencies",
+    "renovate"
+  ],
+  "assignees": [
+    "@charlieshreck"
+  ]
 }
