@@ -114,11 +114,11 @@ data:
     # API Helpers
     # ============================================================
 
-    def http_get(url: str, headers: dict = None) -> Optional[dict]:
+    def http_get(url: str, headers: dict = None, timeout: int = 15) -> Optional[dict]:
         """HTTP GET with JSON response."""
         req = Request(url, headers=headers or {"Accept": "application/json"})
         try:
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except (URLError, HTTPError, json.JSONDecodeError) as e:
             logger.warning(f"HTTP GET {url} failed: {e}")
@@ -296,8 +296,8 @@ data:
         """Query Tasmota device directly for detailed info."""
         enrichment = {}
 
-        # Get full status
-        status = http_get(f"http://{ip}/cm?cmnd=Status%200")
+        # Get full status (short timeout - many devices are offline)
+        status = http_get(f"http://{ip}/cm?cmnd=Status%200", timeout=5)
         if status:
             # Device info
             if "StatusFWR" in status:
@@ -1060,7 +1060,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 2
-      activeDeadlineSeconds: 600  # 10 minute timeout
+      activeDeadlineSeconds: 900  # 15 minute timeout
       template:
         metadata:
           labels:
@@ -1088,13 +1088,13 @@ spec:
                   name: neo4j-credentials
                   key: NEO4J_PASSWORD
             - name: HOME_ASSISTANT_MCP_URL
-              value: "http://home-assistant-mcp:8000"
+              value: "http://home-mcp:8000"
             - name: PLEX_MCP_URL
-              value: "http://plex-mcp:8000"
+              value: "http://media-mcp:8000"
             - name: UNIFI_MCP_URL
-              value: "http://unifi-mcp:8000"
+              value: "http://home-mcp:8000"
             - name: PROXMOX_MCP_URL
-              value: "http://proxmox-mcp:8000"
+              value: "http://infrastructure-mcp:8000"
             - name: INFRASTRUCTURE_MCP_URL
               value: "http://infrastructure-mcp:8000"
             volumeMounts:
