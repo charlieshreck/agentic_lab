@@ -383,8 +383,8 @@ data:
                                     "prometheus",
                                 ))
 
-                    # High restart count
-                    if restarts > 2:
+                    # High restart count (10+ to reduce noise from routine restarts)
+                    if restarts >= 10:
                         findings.append(make_finding(
                             "kubernetes", "pod_restart_trending", cluster_name,
                             f"{ns}/{pod_name}", "warning",
@@ -393,7 +393,7 @@ data:
                             "Check pod events and previous logs: kubectl -n {ns} logs {pod_name} --previous",
                             "prometheus",
                             {"type": "prometheus", "alert_name": "HomelabPodRestartsTrending",
-                             "expr": f'increase(kube_pod_container_status_restarts_total{{namespace="{ns}"}}[6h]) > 2',
+                             "expr": f'increase(kube_pod_container_status_restarts_total{{namespace="{ns}"}}[6h]) > 5',
                              "for": "30m", "severity": "warning"},
                         ))
             except Exception as e:
@@ -1373,7 +1373,7 @@ data:
             + [(f, "log_only") for f in log_only]
         )
 
-        # Persist each finding
+        # Persist each finding (upsert: update last_seen + sweep_id if already active)
         persisted = 0
         for finding, classification in all_classified:
             try:
@@ -1382,7 +1382,8 @@ data:
                         (sweep_id, fingerprint, check_category, check_name, cluster, resource,
                          severity, classification, description, evidence, status)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'new')
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (fingerprint) WHERE status NOT IN ('resolved', 'ignored', 'superseded')
+                    DO UPDATE SET last_seen = NOW(), sweep_id = $1, severity = $7, description = $9
                 """,
                     sweep_id,
                     finding["fingerprint"],
