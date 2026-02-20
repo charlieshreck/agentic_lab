@@ -128,11 +128,13 @@ data:
         "infrastructure": {
             "url_key": "INFRASTRUCTURE_MCP_URL",
             "canary_tools": [
-                ("kubectl_get_namespaces", {"cluster": "admin@agentic-platform"}, "namespaces"),
-                ("proxmox_list_vms", {}, "vms"),
-                ("cloudflare_list_zones", {}, "zones"),
+                # kubectl uses flat kwargs — response is markdown, no structured key
+                ("kubectl_get_namespaces", {"cluster": "admin@agentic-platform"}, None),
+                # Pydantic-model tools need explicit params wrapper to avoid auto-retry delay
+                ("proxmox_list_vms", {"params": {}}, None),
+                ("cloudflare_list_zones", {"params": {}}, None),
                 ("get_system_status", {}, None),
-                ("truenas_list_pools", {}, "pools"),
+                ("truenas_list_pools", {"params": {}}, None),
             ],
         },
         "observability": {
@@ -172,8 +174,8 @@ data:
         "external": {
             "url_key": "EXTERNAL_MCP_URL",
             "canary_tools": [
-                ("websearch_search", {"query": "test", "limit": 1}, None),
-                ("github_list_repos", {"username": "charlieshreck", "limit": 1}, None),
+                ("websearch_search", {"query": "test", "num_results": 1}, None),
+                ("github_list_repos", {"owner": "charlieshreck", "per_page": 1}, None),
             ],
         },
     }
