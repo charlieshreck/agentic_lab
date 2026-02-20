@@ -795,21 +795,29 @@ data:
         except Exception as e:
             logger.error(f"TrueNAS pool check error: {e}")
 
-        # -- TrueNAS alerts --
+        # -- TrueNAS alerts (all levels including INFO for app updates) --
         try:
-            alerts_result = await call_mcp_tool_safe(infra, "truenas_get_alerts")
+            alerts_result = await call_mcp_tool_safe(infra, "truenas_get_all_alerts")
             for alert in extract_list(alerts_result, "alerts"):
                 if not isinstance(alert, dict):
                     continue
                 level = str(alert.get("level", "INFO")).upper()
-                if level in ("WARNING", "CRITICAL", "ERROR"):
-                    msg = alert.get("formatted", alert.get("message", "Unknown"))
-                    findings.append(make_finding(
-                        "infrastructure", "truenas_alert", "global",
-                        f"truenas/alert-{alert.get('id', 'x')}", "critical" if level != "WARNING" else "warning",
-                        f"TrueNAS alert ({level}): {str(msg)[:200]}",
-                        alert, "", "alerting-pipeline",
-                    ))
+                dismissed = alert.get("dismissed", False)
+                if dismissed:
+                    continue
+                msg = alert.get("formatted", alert.get("message", "Unknown"))
+                if level in ("CRITICAL", "ERROR"):
+                    sev = "critical"
+                elif level == "WARNING":
+                    sev = "warning"
+                else:
+                    sev = "info"
+                findings.append(make_finding(
+                    "infrastructure", "truenas_alert", "global",
+                    f"truenas/alert-{alert.get('id', 'x')}", sev,
+                    f"TrueNAS alert ({level}): {str(msg)[:200]}",
+                    alert, "", "alerting-pipeline",
+                ))
         except Exception as e:
             logger.error(f"TrueNAS alerts check error: {e}")
 
