@@ -748,45 +748,62 @@ data:
         findings = []
         infra = INFRASTRUCTURE_MCP_URL
 
-        # -- Proxmox VMs --
-        try:
-            vms_result = await call_mcp_tool_safe(infra, "proxmox_list_vms")
-            for vm in extract_list(vms_result, "vms"):
-                if not isinstance(vm, dict):
-                    continue
-                vm_name = vm.get("name", "unknown")
-                vm_id = vm.get("vmid", "?")
-                status = vm.get("status", "")
-                if status and status != "running":
-                    findings.append(make_finding(
-                        "infrastructure", "proxmox_vm_not_running", "global",
-                        f"proxmox/vm-{vm_id}-{vm_name}", "warning",
-                        f"VM '{vm_name}' (ID: {vm_id}) status: {status}",
-                        {"vm_name": vm_name, "vmid": vm_id, "status": status},
-                        f"qm start {vm_id}", "alerting-pipeline",
-                    ))
-        except Exception as e:
-            logger.error(f"Proxmox VM check error: {e}")
+        # -- Proxmox VMs + LXCs (per-host parallel to avoid all-hosts timeout) --
+        PROXMOX_HOSTS = ["ruapehu", "pihanga", "hikurangi"]
 
-        # -- Proxmox LXCs --
-        try:
-            ct_result = await call_mcp_tool_safe(infra, "proxmox_list_containers")
-            for ct in extract_list(ct_result, "containers"):
-                if not isinstance(ct, dict):
-                    continue
-                ct_name = ct.get("name", "unknown")
-                ct_id = ct.get("vmid", "?")
-                status = ct.get("status", "")
-                if status and status != "running":
-                    findings.append(make_finding(
-                        "infrastructure", "proxmox_ct_not_running", "global",
-                        f"proxmox/ct-{ct_id}-{ct_name}", "warning",
-                        f"LXC '{ct_name}' (ID: {ct_id}) status: {status}",
-                        {"ct_name": ct_name, "vmid": ct_id, "status": status},
-                        "", "alerting-pipeline",
-                    ))
-        except Exception as e:
-            logger.error(f"Proxmox LXC check error: {e}")
+        async def _check_proxmox_host(host: str) -> list:
+            host_findings = []
+            # VMs
+            try:
+                vms_result = await call_mcp_tool_safe(
+                    infra, "proxmox_list_vms", {"params": {"host": host, "response_format": "json"}})
+                for vm in extract_list(vms_result, "vms"):
+                    if not isinstance(vm, dict):
+                        continue
+                    vm_name = vm.get("name", "unknown")
+                    vm_id = vm.get("vmid", "?")
+                    status = vm.get("status", "")
+                    if status and status != "running":
+                        host_findings.append(make_finding(
+                            "infrastructure", "proxmox_vm_not_running", "global",
+                            f"proxmox/{host}/vm-{vm_id}-{vm_name}", "warning",
+                            f"VM '{vm_name}' (ID: {vm_id}) on {host} status: {status}",
+                            {"vm_name": vm_name, "vmid": vm_id, "status": status, "host": host},
+                            f"qm start {vm_id}", "alerting-pipeline",
+                        ))
+            except Exception as e:
+                logger.error(f"Proxmox VM check error on {host}: {e}")
+            # LXCs
+            try:
+                ct_result = await call_mcp_tool_safe(
+                    infra, "proxmox_list_containers", {"params": {"host": host, "response_format": "json"}})
+                for ct in extract_list(ct_result, "containers"):
+                    if not isinstance(ct, dict):
+                        continue
+                    ct_name = ct.get("name", "unknown")
+                    ct_id = ct.get("vmid", "?")
+                    status = ct.get("status", "")
+                    if status and status != "running":
+                        host_findings.append(make_finding(
+                            "infrastructure", "proxmox_ct_not_running", "global",
+                            f"proxmox/{host}/ct-{ct_id}-{ct_name}", "warning",
+                            f"LXC '{ct_name}' (ID: {ct_id}) on {host} status: {status}",
+                            {"ct_name": ct_name, "vmid": ct_id, "status": status, "host": host},
+                            "", "alerting-pipeline",
+                        ))
+            except Exception as e:
+                logger.error(f"Proxmox LXC check error on {host}: {e}")
+            return host_findings
+
+        host_results = await asyncio.gather(
+            *[_check_proxmox_host(h) for h in PROXMOX_HOSTS],
+            return_exceptions=True,
+        )
+        for result in host_results:
+            if isinstance(result, list):
+                findings.extend(result)
+            elif isinstance(result, Exception):
+                logger.error(f"Proxmox host check failed: {result}")
 
         # -- TrueNAS pools --
         try:
