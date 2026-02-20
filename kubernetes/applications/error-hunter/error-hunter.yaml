@@ -1293,6 +1293,18 @@ data:
         except Exception as e:
             logger.warning(f"Failed to log sweep event: {e}")
 
+        # Notify Kernow Hub (Patrol tab) about sweep completion
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{AFFERENT_URL}/webhook/patrol-sweep",
+                    json={"sweep_id": sweep_id, "summary": summary},
+                    headers={"Content-Type": "application/json"},
+                )
+            logger.info(f"[{sweep_id}] Notified Kernow Hub patrol webhook")
+        except Exception as e:
+            logger.warning(f"Failed to notify Kernow Hub: {e}")
+
         logger.info(f"[{sweep_id}] Sweep recorded: {json.dumps(summary)}")
         return {"summary": summary, "status": "completed"}
 
