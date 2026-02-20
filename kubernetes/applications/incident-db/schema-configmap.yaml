@@ -143,3 +143,62 @@ data:
     CREATE TRIGGER fp_patterns_updated_at
       BEFORE UPDATE ON fp_patterns
       FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+    -- ============================================================
+    -- Error Hunter: Proactive estate sweep tables
+    -- ============================================================
+
+    -- Sweep run log: one row per scheduled sweep
+    CREATE TABLE IF NOT EXISTS sweep_runs (
+      id                SERIAL PRIMARY KEY,
+      sweep_id          TEXT UNIQUE NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'running'
+                          CHECK (status IN ('running', 'completed', 'failed')),
+      started_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at      TIMESTAMPTZ,
+      total_findings    INTEGER DEFAULT 0,
+      fix_now_count     INTEGER DEFAULT 0,
+      create_rule_count INTEGER DEFAULT 0,
+      log_only_count    INTEGER DEFAULT 0,
+      screens_created   INTEGER DEFAULT 0,
+      rules_written     INTEGER DEFAULT 0,
+      summary           JSONB DEFAULT '{}'
+    );
+
+    -- Individual findings from each sweep
+    CREATE TABLE IF NOT EXISTS error_hunter_findings (
+      id              SERIAL PRIMARY KEY,
+      sweep_id        TEXT NOT NULL,
+      fingerprint     TEXT NOT NULL,
+      check_category  TEXT NOT NULL,
+      check_name      TEXT NOT NULL,
+      cluster         TEXT,
+      resource        TEXT,
+      severity        TEXT NOT NULL DEFAULT 'warning'
+                        CHECK (severity IN ('critical', 'warning', 'info')),
+      classification  TEXT
+                        CHECK (classification IN ('fix_now', 'create_rule', 'log_only', NULL)),
+      description     TEXT,
+      evidence        JSONB DEFAULT '{}',
+
+      -- Disposition
+      screen_session  TEXT,
+      incident_id     INTEGER REFERENCES incidents(id),
+      rule_written    BOOLEAN DEFAULT FALSE,
+      runbook_id      TEXT,
+
+      -- State
+      status          TEXT NOT NULL DEFAULT 'new'
+                        CHECK (status IN ('new', 'dispatched', 'resolved', 'ignored', 'superseded')),
+
+      -- Timestamps
+      first_seen      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_seen       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at     TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ehf_fingerprint ON error_hunter_findings(fingerprint);
+    CREATE INDEX IF NOT EXISTS idx_ehf_sweep ON error_hunter_findings(sweep_id);
+    CREATE INDEX IF NOT EXISTS idx_ehf_status ON error_hunter_findings(status);
+    CREATE INDEX IF NOT EXISTS idx_ehf_category ON error_hunter_findings(check_category);
+    CREATE INDEX IF NOT EXISTS idx_sweep_runs_id ON sweep_runs(sweep_id);

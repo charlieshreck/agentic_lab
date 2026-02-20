@@ -1,0 +1,1588 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: error-hunter-code
+  namespace: ai-platform
+  labels:
+    app: error-hunter
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """Error Hunter - Proactive Estate Patrol for Kernow Homelab.
+
+    Scheduled LangGraph workflow that sweeps the entire estate during off-hours,
+    finds issues before alerts catch them, dispatches fixes to Claude Code screens,
+    writes alert rules, and generates runbooks via collaborate.py.
+
+    Phase 1: Core sweep engine with comprehensive checks, dedup, classification,
+    and PostgreSQL persistence. Screen dispatch stubs for Phase 2.
+    """
+    import os
+    import json
+    import logging
+    import hashlib
+    import uuid as uuid_mod
+    import asyncio
+    import re
+    from typing import TypedDict, Optional, List, Dict, Any
+    from datetime import datetime, timedelta
+
+    from langgraph.graph import StateGraph, END
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+    import httpx
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger("error-hunter")
+
+    # ========================================================================
+    # CONFIGURATION
+    # ========================================================================
+
+    LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+    KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
+    INFRASTRUCTURE_MCP_URL = os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000")
+    OBSERVABILITY_MCP_URL = os.environ.get("OBSERVABILITY_MCP_URL", "http://observability-mcp:8000")
+    HOME_MCP_URL = os.environ.get("HOME_MCP_URL", "http://home-mcp:8000")
+    MEDIA_MCP_URL = os.environ.get("MEDIA_MCP_URL", "http://media-mcp:8000")
+    EXTERNAL_MCP_URL = os.environ.get("EXTERNAL_MCP_URL", "http://external-mcp:8000")
+
+    # PostgreSQL (shared with KAO incident_management DB)
+    INCIDENT_DB_URL = os.environ.get(
+        "INCIDENT_DB_URL",
+        "postgresql://langgraph:password@postgresql.ai-platform.svc.cluster.local:5432/incident_management"
+    )
+
+    # Kernow Hub / Synapse for screen dispatch (Phase 2)
+    AFFERENT_URL = os.environ.get("AFFERENT_URL", "http://10.20.0.40:30456")
+    AFFERENT_AUTH_TOKEN = os.environ.get("AFFERENT_AUTH_TOKEN", "")
+    SYNAPSE_URL = os.environ.get("SYNAPSE_URL", "http://10.10.0.22:3456")
+
+    # A2A token for MCP REST bridge
+    A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
+
+    # Cluster contexts for kubectl MCP calls
+    CLUSTERS = {
+        "production": "admin@homelab-prod",
+        "agentic": "admin@agentic-platform",
+        "monitoring": "admin@monitoring-cluster",
+    }
+
+    # Max concurrent screens per sweep
+    MAX_FIX_SCREENS = 3
+    MAX_RULE_SCREENS = 2
+
+    # Log error patterns to search for
+    LOG_ERROR_PATTERNS = [
+        r"(?i)OOMKilled",
+        r"(?i)out of memory",
+        r"(?i)connection refused",
+        r"(?i)connection reset",
+        r"(?i)connection timed out",
+        r"(?i)dial tcp.*: i/o timeout",
+        r"(?i)no such host",
+        r"(?i)name resolution failure",
+        r"(?i)certificate.*expired",
+        r"(?i)x509.*certificate",
+        r"(?i)permission denied",
+        r"(?i)unauthorized",
+        r"(?i)403 forbidden",
+        r"(?i)500 internal server error",
+        r"(?i)502 bad gateway",
+        r"(?i)503 service unavailable",
+        r"(?i)panic:",
+        r"(?i)fatal error",
+        r"(?i)segmentation fault",
+        r"(?i)killed",
+        r"(?i)exec format error",
+        r"(?i)image.*not found",
+        r"(?i)pull.*access denied",
+        r"(?i)back-off restarting",
+        r"(?i)readiness probe failed",
+        r"(?i)liveness probe failed",
+        r"(?i)CrashLoopBackOff",
+        r"(?i)ErrImagePull",
+        r"(?i)ImagePullBackOff",
+        r"(?i)mount.*failed",
+        r"(?i)nfs.*stale",
+        r"(?i)disk pressure",
+        r"(?i)evicted",
+    ]
+    _compiled_patterns = [re.compile(p) for p in LOG_ERROR_PATTERNS]
+
+    # MCP tool validation matrix: each MCP gets a canary tool call to verify
+    # it actually works (not just health endpoint)
+    MCP_VALIDATION = {
+        "infrastructure": {
+            "url_key": "INFRASTRUCTURE_MCP_URL",
+            "canary_tools": [
+                ("kubectl_get_namespaces", {"cluster": "admin@agentic-platform"}, "namespaces"),
+                ("proxmox_list_vms", {}, "vms"),
+                ("cloudflare_list_zones", {}, "zones"),
+                ("get_system_status", {}, None),
+                ("truenas_list_pools", {}, "pools"),
+            ],
+        },
+        "observability": {
+            "url_key": "OBSERVABILITY_MCP_URL",
+            "canary_tools": [
+                ("gatus_get_failing_endpoints", {}, None),
+                ("coroot_get_recent_anomalies", {"params": {"hours": 1}}, None),
+                ("get_scrape_targets", {}, None),
+                ("grafana_list_dashboards", {}, None),
+            ],
+        },
+        "home": {
+            "url_key": "HOME_MCP_URL",
+            "canary_tools": [
+                ("list_entities", {}, None),
+                ("unifi_list_clients", {}, None),
+                ("adguard_get_stats", {}, None),
+                ("tasmota_list_devices", {}, None),
+            ],
+        },
+        "media": {
+            "url_key": "MEDIA_MCP_URL",
+            "canary_tools": [
+                ("plex_get_server_status", {}, None),
+                ("sonarr_list_series", {}, None),
+                ("radarr_list_movies", {}, None),
+                ("tautulli_get_activity", {}, None),
+            ],
+        },
+        "knowledge": {
+            "url_key": "KNOWLEDGE_MCP_URL",
+            "canary_tools": [
+                ("list_collections", {}, None),
+                ("search_runbooks", {"query": "test"}, None),
+            ],
+        },
+        "external": {
+            "url_key": "EXTERNAL_MCP_URL",
+            "canary_tools": [
+                ("websearch_search", {"query": "test", "limit": 1}, None),
+                ("github_list_repos", {"username": "charlieshreck", "limit": 1}, None),
+            ],
+        },
+    }
+
+    # ========================================================================
+    # MCP TOOL CALLING (same pattern as alerting-pipeline)
+    # ========================================================================
+
+    async def call_mcp_tool(mcp_url: str, tool_name: str, params: dict = None,
+                            timeout: float = 30.0) -> dict:
+        """Call a tool on a domain MCP server via the REST bridge."""
+        headers = {"Content-Type": "application/json"}
+        if A2A_API_TOKEN:
+            headers["Authorization"] = f"Bearer {A2A_API_TOKEN}"
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                resp = await client.post(
+                    f"{mcp_url}/api/call",
+                    json={"tool": tool_name, "arguments": params or {}},
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("status") == "success":
+                        output = result.get("output")
+                        if isinstance(output, dict):
+                            return output
+                        if isinstance(output, str):
+                            try:
+                                return json.loads(output)
+                            except (json.JSONDecodeError, ValueError):
+                                return {"text": output}
+                        if isinstance(output, list):
+                            return {"items": output}
+                        return {"result": output}
+                    else:
+                        return {"_error": True, "message": result.get("error", "Unknown error"), "status_code": resp.status_code}
+                else:
+                    return {"_error": True, "message": f"HTTP {resp.status_code}: {resp.text[:200]}", "status_code": resp.status_code}
+            except httpx.TimeoutException:
+                return {"_error": True, "message": f"Timeout calling {tool_name}", "status_code": 0}
+            except Exception as e:
+                return {"_error": True, "message": str(e), "status_code": 0}
+
+    async def call_mcp_tool_safe(mcp_url: str, tool_name: str, params: dict = None,
+                                  timeout: float = 30.0) -> dict:
+        """Like call_mcp_tool but returns {} on error (backward compat)."""
+        result = await call_mcp_tool(mcp_url, tool_name, params, timeout)
+        if result.get("_error"):
+            logger.warning(f"MCP {tool_name} failed: {result.get('message', 'unknown')}")
+            return {}
+        return result
+
+    # ========================================================================
+    # POSTGRESQL HELPERS
+    # ========================================================================
+
+    _pg_pool = None
+
+    async def get_pg_pool():
+        global _pg_pool
+        if _pg_pool is None:
+            import asyncpg
+            _pg_pool = await asyncpg.create_pool(INCIDENT_DB_URL, min_size=1, max_size=5)
+        return _pg_pool
+
+    async def pg_execute(query: str, *args):
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            return await conn.execute(query, *args)
+
+    async def pg_fetchrow(query: str, *args):
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetchrow(query, *args)
+
+    async def pg_fetch(query: str, *args):
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(query, *args)
+
+    # ========================================================================
+    # FINDING HELPERS
+    # ========================================================================
+
+    def make_fingerprint(check_name: str, cluster: str, resource: str) -> str:
+        """Stable fingerprint for deduplication."""
+        raw = f"{check_name}:{cluster or 'global'}:{resource or 'none'}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def make_finding(
+        check_category: str,
+        check_name: str,
+        cluster: str,
+        resource: str,
+        severity: str,
+        description: str,
+        evidence: dict = None,
+        suggested_fix: str = "",
+        alert_target: str = "alerting-pipeline",
+        alert_rule_sketch: dict = None,
+    ) -> dict:
+        return {
+            "check_category": check_category,
+            "check_name": check_name,
+            "cluster": cluster,
+            "resource": resource,
+            "severity": severity,
+            "description": description,
+            "evidence": evidence or {},
+            "fingerprint": make_fingerprint(check_name, cluster, resource),
+            "suggested_fix": suggested_fix,
+            "alert_target": alert_target,
+            "alert_rule_sketch": alert_rule_sketch or {},
+        }
+
+    def safe_int(val, default=0) -> int:
+        if isinstance(val, int):
+            return val
+        if isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError:
+                return default
+        return default
+
+    def extract_list(result: dict, *keys) -> list:
+        """Extract a list from an MCP result, trying multiple key names."""
+        for key in keys:
+            val = result.get(key)
+            if isinstance(val, list):
+                return val
+        # Maybe the result itself wraps items
+        if result.get("items") and isinstance(result["items"], list):
+            return result["items"]
+        if result.get("result") and isinstance(result["result"], list):
+            return result["result"]
+        return []
+
+    # ========================================================================
+    # CHECK: KUBERNETES (all 3 clusters)
+    # ========================================================================
+
+    async def check_kubernetes(cluster_name: str) -> list:
+        """Comprehensive Kubernetes health check for a single cluster."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+        ctx = CLUSTERS.get(cluster_name, cluster_name)
+
+        # Get all namespaces
+        ns_result = await call_mcp_tool_safe(infra, "kubectl_get_namespaces", {"cluster": ctx})
+        namespaces = []
+        if ns_result:
+            for ns in extract_list(ns_result, "namespaces"):
+                name = ns.get("name", ns) if isinstance(ns, dict) else str(ns)
+                if name not in ("kube-system", "kube-public", "kube-node-lease"):
+                    namespaces.append(name)
+        if not namespaces:
+            namespaces = ["default"]
+
+        for ns in namespaces:
+            # -- PODS: check ALL non-healthy states --
+            try:
+                pods_result = await call_mcp_tool_safe(infra, "kubectl_get_pods", {
+                    "namespace": ns, "cluster": ctx,
+                })
+                for pod in extract_list(pods_result, "pods"):
+                    if not isinstance(pod, dict):
+                        continue
+                    pod_name = pod.get("name", "unknown")
+                    status = pod.get("status", pod.get("phase", ""))
+                    restarts = safe_int(pod.get("restarts", pod.get("restart_count", 0)))
+                    ready = pod.get("ready", "")
+
+                    # Unhealthy pod states
+                    unhealthy = (
+                        "CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff",
+                        "ErrImagePull", "CreateContainerConfigError", "InvalidImageName",
+                        "Pending", "Terminating", "Unknown", "Init:Error",
+                        "Init:CrashLoopBackOff", "PodInitializing",
+                    )
+                    if status and status not in ("Running", "Succeeded", "Completed"):
+                        sev = "critical" if status in ("CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff") else "warning"
+                        findings.append(make_finding(
+                            "kubernetes", "pod_not_running", cluster_name,
+                            f"{ns}/{pod_name}", sev,
+                            f"Pod {pod_name} in {ns} is {status} (restarts: {restarts})",
+                            {"pod": pod_name, "namespace": ns, "status": status, "restarts": restarts, "ready": ready},
+                            f"kubectl -n {ns} describe pod {pod_name} && kubectl -n {ns} logs {pod_name} --tail=50",
+                            "prometheus",
+                        ))
+
+                    # Running but not ready (probes failing)
+                    elif status == "Running" and ready and "/" in str(ready):
+                        parts = str(ready).split("/")
+                        if len(parts) == 2:
+                            current, total = safe_int(parts[0]), safe_int(parts[1])
+                            if total > 0 and current < total:
+                                findings.append(make_finding(
+                                    "kubernetes", "pod_not_ready", cluster_name,
+                                    f"{ns}/{pod_name}", "warning",
+                                    f"Pod {pod_name} in {ns} is Running but not ready ({ready})",
+                                    {"pod": pod_name, "namespace": ns, "ready": ready, "restarts": restarts},
+                                    f"Check readiness probe: kubectl -n {ns} describe pod {pod_name}",
+                                    "prometheus",
+                                ))
+
+                    # High restart count
+                    if restarts > 2:
+                        findings.append(make_finding(
+                            "kubernetes", "pod_restart_trending", cluster_name,
+                            f"{ns}/{pod_name}", "warning",
+                            f"Pod {pod_name} in {ns} has {restarts} restarts",
+                            {"pod": pod_name, "namespace": ns, "restarts": restarts, "status": status},
+                            "Check pod events and previous logs: kubectl -n {ns} logs {pod_name} --previous",
+                            "prometheus",
+                            {"type": "prometheus", "alert_name": "HomelabPodRestartsTrending",
+                             "expr": f'increase(kube_pod_container_status_restarts_total{{namespace="{ns}"}}[6h]) > 2',
+                             "for": "30m", "severity": "warning"},
+                        ))
+            except Exception as e:
+                logger.error(f"Pod check error {cluster_name}/{ns}: {e}")
+
+            # -- DEPLOYMENTS: unavailable + progressing stuck --
+            try:
+                dep_result = await call_mcp_tool_safe(infra, "kubectl_get_deployments", {
+                    "namespace": ns, "cluster": ctx,
+                })
+                for dep in extract_list(dep_result, "deployments"):
+                    if not isinstance(dep, dict):
+                        continue
+                    dep_name = dep.get("name", "unknown")
+                    desired = safe_int(dep.get("replicas", dep.get("desired", 0)))
+                    available = safe_int(dep.get("available", dep.get("available_replicas", 0)))
+                    ready_r = safe_int(dep.get("ready", dep.get("ready_replicas", 0)))
+                    updated = safe_int(dep.get("updated", dep.get("updated_replicas", 0)))
+
+                    if desired > 0 and available < desired:
+                        findings.append(make_finding(
+                            "kubernetes", "deployment_unavailable", cluster_name,
+                            f"{ns}/{dep_name}", "warning",
+                            f"Deployment {dep_name} in {ns}: {available}/{desired} available, {ready_r} ready, {updated} updated",
+                            {"deployment": dep_name, "namespace": ns, "desired": desired,
+                             "available": available, "ready": ready_r, "updated": updated},
+                            f"kubectl -n {ns} describe deploy {dep_name} && kubectl -n {ns} get rs -l app={dep_name}",
+                            "prometheus",
+                        ))
+
+                    # Progressing but not completing (rollout stuck)
+                    if desired > 0 and updated < desired and available == desired:
+                        findings.append(make_finding(
+                            "kubernetes", "deployment_rollout_stuck", cluster_name,
+                            f"{ns}/{dep_name}", "warning",
+                            f"Deployment {dep_name} in {ns} appears stuck mid-rollout: {updated}/{desired} updated",
+                            {"deployment": dep_name, "namespace": ns, "updated": updated, "desired": desired},
+                            f"kubectl -n {ns} rollout status deploy {dep_name}",
+                            "alerting-pipeline",
+                        ))
+            except Exception as e:
+                logger.error(f"Deployment check error {cluster_name}/{ns}: {e}")
+
+            # -- STATEFULSETS --
+            try:
+                sts_result = await call_mcp_tool_safe(infra, "kubectl_get_statefulsets", {
+                    "namespace": ns, "cluster": ctx,
+                })
+                for sts in extract_list(sts_result, "statefulsets"):
+                    if not isinstance(sts, dict):
+                        continue
+                    sts_name = sts.get("name", "unknown")
+                    desired = safe_int(sts.get("replicas", 0))
+                    ready_r = safe_int(sts.get("ready", sts.get("ready_replicas", 0)))
+                    if desired > 0 and ready_r < desired:
+                        findings.append(make_finding(
+                            "kubernetes", "statefulset_not_ready", cluster_name,
+                            f"{ns}/{sts_name}", "warning",
+                            f"StatefulSet {sts_name} in {ns}: {ready_r}/{desired} ready",
+                            {"statefulset": sts_name, "namespace": ns, "desired": desired, "ready": ready_r},
+                            f"kubectl -n {ns} describe sts {sts_name}",
+                            "prometheus",
+                        ))
+            except Exception as e:
+                logger.error(f"StatefulSet check error {cluster_name}/{ns}: {e}")
+
+            # -- FAILED JOBS --
+            try:
+                jobs_result = await call_mcp_tool_safe(infra, "kubectl_get_jobs", {
+                    "namespace": ns, "cluster": ctx,
+                })
+                for job in extract_list(jobs_result, "jobs"):
+                    if not isinstance(job, dict):
+                        continue
+                    job_name = job.get("name", "unknown")
+                    failed = safe_int(job.get("failed", 0))
+                    if failed > 0:
+                        findings.append(make_finding(
+                            "kubernetes", "job_failed", cluster_name,
+                            f"{ns}/{job_name}", "warning",
+                            f"Job {job_name} in {ns} has {failed} failure(s)",
+                            {"job": job_name, "namespace": ns, "failed": failed},
+                            f"kubectl -n {ns} logs job/{job_name}",
+                            "prometheus",
+                        ))
+            except Exception as e:
+                logger.error(f"Job check error {cluster_name}/{ns}: {e}")
+
+            # -- WARNING EVENTS --
+            try:
+                events_result = await call_mcp_tool_safe(infra, "kubectl_get_events", {
+                    "namespace": ns, "cluster": ctx,
+                })
+                events = extract_list(events_result, "events")
+                warning_events = [e for e in events if isinstance(e, dict) and e.get("type", "").lower() == "warning"]
+                if len(warning_events) > 10:
+                    reasons = {}
+                    for evt in warning_events:
+                        reason = evt.get("reason", "Unknown")
+                        reasons[reason] = reasons.get(reason, 0) + 1
+                    top_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:5]
+                    findings.append(make_finding(
+                        "kubernetes", "warning_events_accumulating", cluster_name,
+                        f"{ns}/events", "warning",
+                        f"{len(warning_events)} warning events in {ns}. Top: {', '.join(f'{r}({c})' for r, c in top_reasons)}",
+                        {"namespace": ns, "count": len(warning_events), "top_reasons": dict(top_reasons)},
+                        "Review events for persistent issues",
+                        "alerting-pipeline",
+                    ))
+            except Exception as e:
+                logger.error(f"Events check error {cluster_name}/{ns}: {e}")
+
+        # -- ARGOCD (only from production, manages all 3 clusters) --
+        if cluster_name == "production":
+            try:
+                apps_result = await call_mcp_tool_safe(infra, "argocd_get_applications")
+                for app in extract_list(apps_result, "applications"):
+                    if not isinstance(app, dict):
+                        continue
+                    app_name = app.get("name", "unknown")
+                    sync = app.get("sync_status", app.get("syncStatus", ""))
+                    health = app.get("health_status", app.get("healthStatus", ""))
+
+                    if sync == "OutOfSync":
+                        findings.append(make_finding(
+                            "kubernetes", "argocd_out_of_sync", "production",
+                            f"argocd/{app_name}", "warning",
+                            f"ArgoCD app '{app_name}' is OutOfSync (health: {health})",
+                            {"app": app_name, "sync": sync, "health": health},
+                            "Check ArgoCD UI or run: argocd app sync " + app_name,
+                            "alerting-pipeline",
+                        ))
+
+                    if health in ("Degraded", "Missing", "Progressing"):
+                        sev = "critical" if health == "Degraded" else "warning"
+                        findings.append(make_finding(
+                            "kubernetes", "argocd_unhealthy", "production",
+                            f"argocd/{app_name}", sev,
+                            f"ArgoCD app '{app_name}' health: {health} (sync: {sync})",
+                            {"app": app_name, "sync": sync, "health": health},
+                            "Investigate: argocd app get " + app_name,
+                            "alerting-pipeline",
+                        ))
+            except Exception as e:
+                logger.error(f"ArgoCD check error: {e}")
+
+        # -- NODES --
+        try:
+            nodes_result = await call_mcp_tool_safe(infra, "kubectl_get_nodes", {"cluster": ctx})
+            for node in extract_list(nodes_result, "nodes"):
+                if not isinstance(node, dict):
+                    continue
+                node_name = node.get("name", "unknown")
+                status = node.get("status", "")
+                if status and status != "Ready":
+                    findings.append(make_finding(
+                        "kubernetes", "node_not_ready", cluster_name,
+                        f"node/{node_name}", "critical",
+                        f"Node {node_name} in {cluster_name} is {status}",
+                        {"node": node_name, "status": status},
+                        f"talosctl -n {node_name} health",
+                        "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"Node check error {cluster_name}: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: LOG TRAWLING (scan pod logs for errors)
+    # ========================================================================
+
+    async def check_logs(cluster_name: str) -> list:
+        """Trawl pod logs across all namespaces looking for error patterns."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+        ctx = CLUSTERS.get(cluster_name, cluster_name)
+
+        # Get namespaces
+        ns_result = await call_mcp_tool_safe(infra, "kubectl_get_namespaces", {"cluster": ctx})
+        namespaces = []
+        for ns in extract_list(ns_result, "namespaces"):
+            name = ns.get("name", ns) if isinstance(ns, dict) else str(ns)
+            if name not in ("kube-system", "kube-public", "kube-node-lease"):
+                namespaces.append(name)
+        if not namespaces:
+            return findings
+
+        for ns in namespaces:
+            # Get pods in this namespace
+            pods_result = await call_mcp_tool_safe(infra, "kubectl_get_pods", {
+                "namespace": ns, "cluster": ctx,
+            })
+            pods = extract_list(pods_result, "pods")
+
+            for pod in pods:
+                if not isinstance(pod, dict):
+                    continue
+                pod_name = pod.get("name", "unknown")
+                status = pod.get("status", "")
+
+                # Skip completed/succeeded pods
+                if status in ("Succeeded", "Completed"):
+                    continue
+
+                # Get last 100 lines of logs
+                try:
+                    log_result = await call_mcp_tool(infra, "kubectl_logs", {
+                        "pod_name": pod_name,
+                        "namespace": ns,
+                        "cluster": ctx,
+                        "tail": 100,
+                    }, timeout=15.0)
+
+                    if log_result.get("_error"):
+                        continue
+
+                    log_text = log_result.get("text", log_result.get("logs", log_result.get("output", "")))
+                    if not isinstance(log_text, str) or not log_text.strip():
+                        continue
+
+                    # Scan for error patterns
+                    matched_patterns = set()
+                    error_lines = []
+                    for line in log_text.split("\n"):
+                        for i, pattern in enumerate(_compiled_patterns):
+                            if pattern.search(line):
+                                pattern_name = LOG_ERROR_PATTERNS[i]
+                                if pattern_name not in matched_patterns:
+                                    matched_patterns.add(pattern_name)
+                                    error_lines.append(line.strip()[:200])
+
+                    if matched_patterns:
+                        # Determine severity from pattern types
+                        critical_patterns = {"OOMKilled", "panic:", "fatal error", "segmentation fault"}
+                        has_critical = any(p in str(matched_patterns) for p in critical_patterns)
+                        sev = "critical" if has_critical else "warning"
+
+                        findings.append(make_finding(
+                            "logs", "log_error_pattern", cluster_name,
+                            f"{ns}/{pod_name}", sev,
+                            f"Pod {pod_name} in {ns}: {len(matched_patterns)} error pattern(s) found: {', '.join(list(matched_patterns)[:5])}",
+                            {"pod": pod_name, "namespace": ns,
+                             "patterns": list(matched_patterns),
+                             "sample_lines": error_lines[:5]},
+                            f"kubectl -n {ns} logs {pod_name} --tail=200",
+                            "alerting-pipeline",
+                        ))
+                except Exception as e:
+                    # Log fetch errors are expected for some pods
+                    pass
+
+        return findings
+
+    # ========================================================================
+    # CHECK: MCP TOOL VALIDATION (maintenance hunter)
+    # ========================================================================
+
+    async def check_mcp_health() -> list:
+        """Validate each MCP server by calling canary tools.
+
+        Not just 'is the HTTP endpoint up' but 'can it actually call its
+        backend APIs'. This catches auth failures, connectivity issues,
+        stale configs, and API changes.
+        """
+        findings = []
+
+        mcp_urls = {
+            "infrastructure": INFRASTRUCTURE_MCP_URL,
+            "observability": OBSERVABILITY_MCP_URL,
+            "home": HOME_MCP_URL,
+            "media": MEDIA_MCP_URL,
+            "knowledge": KNOWLEDGE_MCP_URL,
+            "external": EXTERNAL_MCP_URL,
+        }
+
+        for mcp_name, config in MCP_VALIDATION.items():
+            mcp_url = mcp_urls.get(mcp_name, "")
+            if not mcp_url:
+                continue
+
+            # First check HTTP health endpoint
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(f"{mcp_url}/health")
+                    if resp.status_code >= 500:
+                        findings.append(make_finding(
+                            "mcp_health", "mcp_http_down", "agentic",
+                            f"mcp/{mcp_name}", "critical",
+                            f"MCP {mcp_name} health endpoint returned HTTP {resp.status_code}",
+                            {"mcp": mcp_name, "url": mcp_url, "status_code": resp.status_code},
+                            f"kubectl -n ai-platform logs deploy/{mcp_name}-mcp --tail=50",
+                            "alerting-pipeline",
+                        ))
+                        continue  # Skip tool validation if HTTP is down
+            except Exception as e:
+                findings.append(make_finding(
+                    "mcp_health", "mcp_unreachable", "agentic",
+                    f"mcp/{mcp_name}", "critical",
+                    f"MCP {mcp_name} unreachable: {str(e)[:100]}",
+                    {"mcp": mcp_name, "url": mcp_url, "error": str(e)},
+                    f"kubectl -n ai-platform get pods -l app={mcp_name}-mcp",
+                    "alerting-pipeline",
+                ))
+                continue
+
+            # Now validate each canary tool
+            for tool_name, tool_params, expected_key in config["canary_tools"]:
+                try:
+                    result = await call_mcp_tool(mcp_url, tool_name, tool_params, timeout=20.0)
+
+                    if result.get("_error"):
+                        error_msg = result.get("message", "Unknown error")
+                        findings.append(make_finding(
+                            "mcp_health", "mcp_tool_broken", "agentic",
+                            f"mcp/{mcp_name}/{tool_name}", "warning",
+                            f"MCP {mcp_name} tool '{tool_name}' failed: {error_msg[:150]}",
+                            {"mcp": mcp_name, "tool": tool_name, "error": error_msg,
+                             "params": tool_params},
+                            f"Check {mcp_name}-mcp logs and backend API connectivity",
+                            "alerting-pipeline",
+                        ))
+                    elif expected_key and not result.get(expected_key):
+                        # Tool returned success but unexpected/empty response
+                        findings.append(make_finding(
+                            "mcp_health", "mcp_tool_empty_response", "agentic",
+                            f"mcp/{mcp_name}/{tool_name}", "info",
+                            f"MCP {mcp_name} tool '{tool_name}' returned empty '{expected_key}' (may be normal)",
+                            {"mcp": mcp_name, "tool": tool_name, "expected_key": expected_key,
+                             "actual_keys": list(result.keys())[:10]},
+                            "Verify the backend service has data",
+                            "alerting-pipeline",
+                        ))
+                except Exception as e:
+                    findings.append(make_finding(
+                        "mcp_health", "mcp_tool_exception", "agentic",
+                        f"mcp/{mcp_name}/{tool_name}", "warning",
+                        f"MCP {mcp_name} tool '{tool_name}' exception: {str(e)[:100]}",
+                        {"mcp": mcp_name, "tool": tool_name, "error": str(e)},
+                        "Check MCP server pod health and restart if needed",
+                        "alerting-pipeline",
+                    ))
+
+        return findings
+
+    # ========================================================================
+    # CHECK: INFRASTRUCTURE
+    # ========================================================================
+
+    async def check_infrastructure() -> list:
+        """Check Proxmox, TrueNAS, OPNsense, Cloudflare health."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # -- Proxmox VMs --
+        try:
+            vms_result = await call_mcp_tool_safe(infra, "proxmox_list_vms")
+            for vm in extract_list(vms_result, "vms"):
+                if not isinstance(vm, dict):
+                    continue
+                vm_name = vm.get("name", "unknown")
+                vm_id = vm.get("vmid", "?")
+                status = vm.get("status", "")
+                if status and status != "running":
+                    findings.append(make_finding(
+                        "infrastructure", "proxmox_vm_not_running", "global",
+                        f"proxmox/vm-{vm_id}-{vm_name}", "warning",
+                        f"VM '{vm_name}' (ID: {vm_id}) status: {status}",
+                        {"vm_name": vm_name, "vmid": vm_id, "status": status},
+                        f"qm start {vm_id}", "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"Proxmox VM check error: {e}")
+
+        # -- Proxmox LXCs --
+        try:
+            ct_result = await call_mcp_tool_safe(infra, "proxmox_list_containers")
+            for ct in extract_list(ct_result, "containers"):
+                if not isinstance(ct, dict):
+                    continue
+                ct_name = ct.get("name", "unknown")
+                ct_id = ct.get("vmid", "?")
+                status = ct.get("status", "")
+                if status and status != "running":
+                    findings.append(make_finding(
+                        "infrastructure", "proxmox_ct_not_running", "global",
+                        f"proxmox/ct-{ct_id}-{ct_name}", "warning",
+                        f"LXC '{ct_name}' (ID: {ct_id}) status: {status}",
+                        {"ct_name": ct_name, "vmid": ct_id, "status": status},
+                        "", "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"Proxmox LXC check error: {e}")
+
+        # -- TrueNAS pools --
+        try:
+            pools_result = await call_mcp_tool_safe(infra, "truenas_list_pools")
+            for pool in extract_list(pools_result, "pools"):
+                if not isinstance(pool, dict):
+                    continue
+                pool_name = pool.get("name", "unknown")
+                status = str(pool.get("status", pool.get("healthy", ""))).upper()
+                if status and status not in ("ONLINE", "HEALTHY", ""):
+                    findings.append(make_finding(
+                        "infrastructure", "truenas_pool_degraded", "global",
+                        f"truenas/{pool_name}", "critical",
+                        f"ZFS pool '{pool_name}' status: {status}",
+                        {"pool": pool_name, "status": status},
+                        f"zpool status {pool_name}", "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"TrueNAS pool check error: {e}")
+
+        # -- TrueNAS alerts --
+        try:
+            alerts_result = await call_mcp_tool_safe(infra, "truenas_get_alerts")
+            for alert in extract_list(alerts_result, "alerts"):
+                if not isinstance(alert, dict):
+                    continue
+                level = str(alert.get("level", "INFO")).upper()
+                if level in ("WARNING", "CRITICAL", "ERROR"):
+                    msg = alert.get("formatted", alert.get("message", "Unknown"))
+                    findings.append(make_finding(
+                        "infrastructure", "truenas_alert", "global",
+                        f"truenas/alert-{alert.get('id', 'x')}", "critical" if level != "WARNING" else "warning",
+                        f"TrueNAS alert ({level}): {str(msg)[:200]}",
+                        alert, "", "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"TrueNAS alerts check error: {e}")
+
+        # -- TrueNAS disk usage --
+        try:
+            disk_result = await call_mcp_tool_safe(infra, "truenas_get_disk_usage")
+            if disk_result:
+                for ds in extract_list(disk_result, "datasets", "result"):
+                    if not isinstance(ds, dict):
+                        continue
+                    name = ds.get("name", "unknown")
+                    used_pct = ds.get("used_percent", ds.get("usage_percent", 0))
+                    if isinstance(used_pct, str):
+                        used_pct = float(used_pct.rstrip("%")) if used_pct.rstrip("%").replace(".", "").isdigit() else 0
+                    if used_pct > 85:
+                        findings.append(make_finding(
+                            "infrastructure", "truenas_disk_high", "global",
+                            f"truenas/disk-{name}", "warning" if used_pct < 95 else "critical",
+                            f"TrueNAS dataset '{name}' at {used_pct:.0f}% capacity",
+                            {"dataset": name, "used_percent": used_pct},
+                            "Review and clean up data", "alerting-pipeline",
+                        ))
+        except Exception as e:
+            logger.error(f"TrueNAS disk check error: {e}")
+
+        # -- OPNsense gateway --
+        try:
+            gw_result = await call_mcp_tool_safe(infra, "get_gateway_status")
+            for gw in extract_list(gw_result, "gateways"):
+                if not isinstance(gw, dict):
+                    continue
+                gw_name = gw.get("name", "unknown")
+                status = str(gw.get("status", gw.get("status_translated", "")))
+                loss = gw.get("loss", "0%")
+                if "down" in status.lower():
+                    findings.append(make_finding(
+                        "infrastructure", "gateway_down", "global",
+                        f"opnsense/gw-{gw_name}", "critical",
+                        f"Gateway '{gw_name}' is down (loss: {loss})",
+                        {"gateway": gw_name, "status": status, "loss": loss},
+                        "", "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"Gateway check error: {e}")
+
+        # -- OPNsense services --
+        try:
+            svc_result = await call_mcp_tool_safe(infra, "get_services")
+            for svc in extract_list(svc_result, "services"):
+                if not isinstance(svc, dict):
+                    continue
+                svc_name = svc.get("name", "unknown")
+                running = svc.get("running", True)
+                if not running:
+                    findings.append(make_finding(
+                        "infrastructure", "opnsense_service_down", "global",
+                        f"opnsense/svc-{svc_name}", "warning",
+                        f"OPNsense service '{svc_name}' is not running",
+                        {"service": svc_name}, "", "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"OPNsense service check error: {e}")
+
+        # -- Cloudflare tunnels --
+        try:
+            cf_result = await call_mcp_tool_safe(infra, "cloudflare_list_tunnels")
+            for tunnel in extract_list(cf_result, "tunnels"):
+                if not isinstance(tunnel, dict):
+                    continue
+                t_name = tunnel.get("name", "unknown")
+                t_status = str(tunnel.get("status", ""))
+                if t_status.lower() not in ("healthy", "active", ""):
+                    findings.append(make_finding(
+                        "infrastructure", "cloudflare_tunnel_unhealthy", "global",
+                        f"cloudflare/tunnel-{t_name}", "critical",
+                        f"Cloudflare tunnel '{t_name}' status: {t_status}",
+                        {"tunnel": t_name, "status": t_status},
+                        "", "alerting-pipeline",
+                    ))
+        except Exception as e:
+            logger.error(f"Cloudflare tunnel check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: OBSERVABILITY
+    # ========================================================================
+
+    async def check_observability() -> list:
+        """Check Coroot anomalies, scrape targets, Gatus failures."""
+        findings = []
+        obs = OBSERVABILITY_MCP_URL
+
+        # -- Coroot anomalies --
+        try:
+            anomalies_result = await call_mcp_tool_safe(obs, "coroot_get_recent_anomalies", {
+                "params": {"hours": 24}
+            })
+            for anom in extract_list(anomalies_result, "anomalies"):
+                if not isinstance(anom, dict):
+                    continue
+                app_name = anom.get("application", anom.get("app", "unknown"))
+                check = anom.get("check", anom.get("type", "unknown"))
+                sev = str(anom.get("severity", "warning")).lower()
+                msg = anom.get("message", f"{check} anomaly on {app_name}")
+                findings.append(make_finding(
+                    "metrics", "coroot_anomaly", "global",
+                    f"coroot/{app_name}/{check}",
+                    sev if sev in ("critical", "warning", "info") else "warning",
+                    f"Coroot anomaly: {str(msg)[:200]}",
+                    anom, "", "alerting-pipeline",
+                ))
+        except Exception as e:
+            logger.error(f"Coroot anomaly check error: {e}")
+
+        # -- Scrape targets down --
+        try:
+            targets_result = await call_mcp_tool_safe(obs, "get_scrape_targets")
+            targets = extract_list(targets_result, "targets", "activeTargets")
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                if str(target.get("health", "")).lower() == "down":
+                    job = target.get("labels", {}).get("job", target.get("job", "unknown"))
+                    instance = target.get("labels", {}).get("instance", target.get("scrapeUrl", "unknown"))
+                    findings.append(make_finding(
+                        "metrics", "scrape_target_down", "monitoring",
+                        f"prometheus/{job}/{instance}", "warning",
+                        f"Scrape target down: job={job} instance={instance} error={target.get('lastError', '')[:100]}",
+                        {"job": job, "instance": instance, "error": target.get("lastError", "")},
+                        "Check if the target service is running", "prometheus",
+                        {"type": "prometheus", "alert_name": "HomelabScrapeTargetDown",
+                         "expr": f'up{{job="{job}"}} == 0', "for": "10m", "severity": "warning"},
+                    ))
+        except Exception as e:
+            logger.error(f"Scrape target check error: {e}")
+
+        # -- Gatus: ALL failing endpoints (not just summary) --
+        try:
+            gatus_result = await call_mcp_tool_safe(obs, "gatus_get_failing_endpoints")
+            for ep in extract_list(gatus_result, "endpoints"):
+                if not isinstance(ep, dict):
+                    continue
+                ep_name = ep.get("name", "unknown")
+                ep_group = ep.get("group", "")
+                ep_url = ep.get("url", "")
+                findings.append(make_finding(
+                    "network", "gatus_endpoint_failing", "global",
+                    f"gatus/{ep_group}/{ep_name}", "warning",
+                    f"Gatus endpoint failing: {ep_group}/{ep_name} ({ep_url})",
+                    ep, "", "gatus",
+                ))
+        except Exception as e:
+            logger.error(f"Gatus check error: {e}")
+
+        # -- Gatus: check all endpoint statuses for degraded/flapping --
+        try:
+            all_status = await call_mcp_tool_safe(obs, "gatus_get_endpoint_status")
+            for ep in extract_list(all_status, "endpoints", "statuses"):
+                if not isinstance(ep, dict):
+                    continue
+                ep_name = ep.get("name", "unknown")
+                ep_group = ep.get("group", "")
+                results = ep.get("results", [])
+                if isinstance(results, list) and len(results) >= 5:
+                    # Check for flapping (alternating success/failure)
+                    recent = results[-10:]
+                    successes = sum(1 for r in recent if isinstance(r, dict) and r.get("success"))
+                    failures = len(recent) - successes
+                    if failures >= 3 and successes >= 2:
+                        findings.append(make_finding(
+                            "network", "gatus_endpoint_flapping", "global",
+                            f"gatus/{ep_group}/{ep_name}/flap", "warning",
+                            f"Gatus endpoint flapping: {ep_group}/{ep_name} ({failures}/{len(recent)} failures in recent checks)",
+                            {"name": ep_name, "group": ep_group, "successes": successes, "failures": failures},
+                            "Investigate intermittent connectivity", "gatus",
+                        ))
+        except Exception as e:
+            logger.error(f"Gatus status check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # LANGGRAPH STATE AND NODES
+    # ========================================================================
+
+    class SweepState(TypedDict):
+        sweep_id: str
+        sweep_time: str
+        raw_findings: list
+        deduplicated_findings: list
+        fix_now: list
+        create_rule: list
+        log_only: list
+        screens_created: list
+        rules_written: list
+        runbooks_drafted: list
+        summary: dict
+        status: str
+
+    async def sweep_estate(state: SweepState) -> dict:
+        """Node 1: Run all checks in parallel across the estate."""
+        sweep_id = state["sweep_id"]
+        logger.info(f"[{sweep_id}] Starting estate sweep...")
+
+        # Record sweep start
+        try:
+            await pg_execute(
+                "INSERT INTO sweep_runs (sweep_id, status) VALUES ($1, 'running')",
+                sweep_id
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record sweep start: {e}")
+
+        # Run all checks concurrently
+        tasks = [
+            check_kubernetes("production"),
+            check_kubernetes("agentic"),
+            check_kubernetes("monitoring"),
+            check_infrastructure(),
+            check_observability(),
+            check_logs("production"),
+            check_logs("agentic"),
+            check_logs("monitoring"),
+            check_mcp_health(),
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_findings = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Check task {i} failed: {result}")
+            elif isinstance(result, list):
+                all_findings.extend(result)
+
+        logger.info(f"[{sweep_id}] Sweep complete: {len(all_findings)} raw findings")
+        return {"raw_findings": all_findings}
+
+    async def deduplicate(state: SweepState) -> dict:
+        """Node 2: Remove findings already being handled or previously seen."""
+        sweep_id = state["sweep_id"]
+        findings = state.get("raw_findings", [])
+        deduplicated = []
+
+        for finding in findings:
+            fp = finding["fingerprint"]
+
+            try:
+                # Check if already being tracked and not resolved
+                existing = await pg_fetchrow("""
+                    SELECT id, status, screen_session, rule_written
+                    FROM error_hunter_findings
+                    WHERE fingerprint = $1 AND status NOT IN ('resolved', 'superseded', 'ignored')
+                    ORDER BY last_seen DESC LIMIT 1
+                """, fp)
+
+                if existing:
+                    # Update last_seen
+                    await pg_execute(
+                        "UPDATE error_hunter_findings SET last_seen = NOW() WHERE id = $1",
+                        existing["id"]
+                    )
+                    # Skip if already dispatched
+                    if existing["status"] == "dispatched":
+                        continue
+                    # Skip if rule already written
+                    if existing["rule_written"]:
+                        continue
+
+                # Check if KAO has an active incident for this
+                active_incident = await pg_fetchrow("""
+                    SELECT id FROM incidents
+                    WHERE fingerprint = $1 AND status NOT IN ('resolved', 'closed', 'false_positive')
+                """, fp)
+                if active_incident:
+                    continue
+
+                deduplicated.append(finding)
+
+            except Exception as e:
+                logger.warning(f"Dedup check error for {fp}: {e}")
+                deduplicated.append(finding)
+
+        logger.info(f"[{sweep_id}] Dedup: {len(findings)} -> {len(deduplicated)} findings")
+        return {"deduplicated_findings": deduplicated}
+
+    async def classify(state: SweepState) -> dict:
+        """Node 3: Classify findings into fix_now / create_rule / log_only.
+
+        Phase 1: severity-based heuristics. Phase 6 will add LLM classification.
+        """
+        sweep_id = state["sweep_id"]
+        findings = state.get("deduplicated_findings", [])
+
+        fix_now = []
+        create_rule = []
+        log_only = []
+
+        for finding in findings:
+            severity = finding.get("severity", "info")
+            category = finding.get("check_category", "")
+            check_name = finding.get("check_name", "")
+
+            # Critical findings always go to fix_now
+            if severity == "critical":
+                fix_now.append(finding)
+            # Active failures: pods down, deployments unavailable
+            elif check_name in ("pod_not_running", "deployment_unavailable", "job_failed",
+                                "statefulset_not_ready", "node_not_ready"):
+                fix_now.append(finding)
+            # MCP health: broken tools and unreachable servers need fixing
+            elif check_name in ("mcp_http_down", "mcp_unreachable", "mcp_tool_broken"):
+                fix_now.append(finding)
+            # ArgoCD drift needs attention but is less urgent
+            elif check_name.startswith("argocd_"):
+                create_rule.append(finding)
+            # Trending issues need a rule but not immediate fix
+            elif check_name in ("pod_restart_trending", "warning_events_accumulating",
+                                "pod_not_ready", "deployment_rollout_stuck"):
+                create_rule.append(finding)
+            # Observability gaps (missing scrape targets, etc.)
+            elif check_name in ("scrape_target_down", "gatus_endpoint_failing",
+                                "gatus_endpoint_flapping"):
+                create_rule.append(finding)
+            # Log errors: create rules for patterns found
+            elif check_name == "log_error_pattern":
+                create_rule.append(finding)
+            # MCP empty responses: informational, track trends
+            elif check_name == "mcp_tool_empty_response":
+                log_only.append(finding)
+            # Informational
+            elif severity == "info":
+                log_only.append(finding)
+            # Default: create a rule
+            else:
+                create_rule.append(finding)
+
+        logger.info(f"[{sweep_id}] Classification: fix_now={len(fix_now)}, create_rule={len(create_rule)}, log_only={len(log_only)}")
+        return {"fix_now": fix_now, "create_rule": create_rule, "log_only": log_only}
+
+    async def dispatch_fixes(state: SweepState) -> dict:
+        """Node 4: Create Claude screen sessions for fix_now findings.
+
+        Phase 1: Stub - just logs. Phase 2 will wire to Kernow Hub.
+        """
+        sweep_id = state["sweep_id"]
+        fix_now = state.get("fix_now", [])
+        screens = []
+
+        for finding in fix_now[:MAX_FIX_SCREENS]:
+            logger.info(f"[{sweep_id}] [PHASE2-STUB] Would dispatch fix screen for: "
+                        f"{finding['check_name']} on {finding.get('cluster')}/{finding.get('resource')}")
+            # Phase 2: create incident + screen session here
+            screens.append({
+                "finding": finding["check_name"],
+                "resource": finding.get("resource"),
+                "status": "stub_logged",
+            })
+
+        return {"screens_created": screens}
+
+    async def write_rules(state: SweepState) -> dict:
+        """Node 5: Create screen sessions to write alert rules.
+
+        Phase 1: Stub - just logs. Phase 3 will wire to Synapse screens.
+        """
+        sweep_id = state["sweep_id"]
+        create_rule = state.get("create_rule", [])
+        rules = []
+
+        for finding in create_rule[:MAX_RULE_SCREENS]:
+            logger.info(f"[{sweep_id}] [PHASE3-STUB] Would create rule-writing screen for: "
+                        f"{finding['check_name']} -> {finding.get('alert_target')}")
+            rules.append({
+                "finding": finding["check_name"],
+                "target": finding.get("alert_target"),
+                "status": "stub_logged",
+            })
+
+        return {"rules_written": rules}
+
+    async def draft_runbooks(state: SweepState) -> dict:
+        """Node 6: Draft runbooks and submit through collaborate.py.
+
+        Phase 1: Stub - just logs. Phase 5 will wire to collaborate.py.
+        """
+        sweep_id = state["sweep_id"]
+        actionable = state.get("fix_now", []) + state.get("create_rule", [])
+        runbooks = []
+
+        for finding in actionable[:5]:
+            logger.info(f"[{sweep_id}] [PHASE5-STUB] Would draft runbook for: {finding['check_name']}")
+            runbooks.append({
+                "finding": finding["check_name"],
+                "status": "stub_logged",
+            })
+
+        return {"runbooks_drafted": runbooks}
+
+    async def record_sweep(state: SweepState) -> dict:
+        """Node 7: Persist all findings and update sweep run record."""
+        sweep_id = state["sweep_id"]
+        fix_now = state.get("fix_now", [])
+        create_rule = state.get("create_rule", [])
+        log_only = state.get("log_only", [])
+
+        all_classified = (
+            [(f, "fix_now") for f in fix_now]
+            + [(f, "create_rule") for f in create_rule]
+            + [(f, "log_only") for f in log_only]
+        )
+
+        # Persist each finding
+        persisted = 0
+        for finding, classification in all_classified:
+            try:
+                await pg_execute("""
+                    INSERT INTO error_hunter_findings
+                        (sweep_id, fingerprint, check_category, check_name, cluster, resource,
+                         severity, classification, description, evidence, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'new')
+                    ON CONFLICT DO NOTHING
+                """,
+                    sweep_id,
+                    finding["fingerprint"],
+                    finding["check_category"],
+                    finding["check_name"],
+                    finding.get("cluster"),
+                    finding.get("resource"),
+                    finding.get("severity", "warning"),
+                    classification,
+                    finding.get("description", ""),
+                    json.dumps(finding.get("evidence", {})),
+                )
+                persisted += 1
+            except Exception as e:
+                logger.warning(f"Failed to persist finding {finding.get('check_name')}: {e}")
+
+        # Update sweep run
+        summary = {
+            "total": len(all_classified),
+            "fix_now": len(fix_now),
+            "create_rule": len(create_rule),
+            "log_only": len(log_only),
+            "screens_created": len(state.get("screens_created", [])),
+            "rules_written": len(state.get("rules_written", [])),
+            "runbooks_drafted": len(state.get("runbooks_drafted", [])),
+            "persisted": persisted,
+        }
+
+        try:
+            await pg_execute("""
+                UPDATE sweep_runs
+                SET status = 'completed', completed_at = NOW(),
+                    total_findings = $2, fix_now_count = $3, create_rule_count = $4,
+                    log_only_count = $5, screens_created = $6, rules_written = $7,
+                    summary = $8
+                WHERE sweep_id = $1
+            """,
+                sweep_id,
+                len(all_classified),
+                len(fix_now),
+                len(create_rule),
+                len(log_only),
+                len(state.get("screens_created", [])),
+                len(state.get("rules_written", [])),
+                json.dumps(summary),
+            )
+        except Exception as e:
+            logger.error(f"Failed to update sweep run: {e}")
+
+        # Log to knowledge-mcp
+        try:
+            await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+                "event_type": "error_hunter.sweep_complete",
+                "description": f"Error Hunter sweep {sweep_id}: {len(all_classified)} findings ({len(fix_now)} fix_now, {len(create_rule)} create_rule, {len(log_only)} log_only)",
+                "source_agent": "error-hunter",
+                "metadata": summary,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to log sweep event: {e}")
+
+        logger.info(f"[{sweep_id}] Sweep recorded: {json.dumps(summary)}")
+        return {"summary": summary, "status": "completed"}
+
+    # ========================================================================
+    # GRAPH DEFINITION
+    # ========================================================================
+
+    def create_error_hunter_workflow():
+        workflow = StateGraph(SweepState)
+        workflow.add_node("sweep_estate", sweep_estate)
+        workflow.add_node("deduplicate", deduplicate)
+        workflow.add_node("classify", classify)
+        workflow.add_node("dispatch_fixes", dispatch_fixes)
+        workflow.add_node("write_rules", write_rules)
+        workflow.add_node("draft_runbooks", draft_runbooks)
+        workflow.add_node("record_sweep", record_sweep)
+
+        workflow.set_entry_point("sweep_estate")
+        workflow.add_edge("sweep_estate", "deduplicate")
+        workflow.add_edge("deduplicate", "classify")
+        workflow.add_edge("classify", "dispatch_fixes")
+        workflow.add_edge("dispatch_fixes", "write_rules")
+        workflow.add_edge("write_rules", "draft_runbooks")
+        workflow.add_edge("draft_runbooks", "record_sweep")
+        workflow.add_edge("record_sweep", END)
+
+        return workflow.compile()
+
+    error_hunter_graph = create_error_hunter_workflow()
+
+    # ========================================================================
+    # SWEEP EXECUTION
+    # ========================================================================
+
+    # Track active sweep to prevent concurrent runs
+    _active_sweep: Optional[str] = None
+
+    async def run_sweep(sweep_id: str):
+        global _active_sweep
+
+        if _active_sweep:
+            logger.warning(f"Sweep {sweep_id} rejected: sweep {_active_sweep} already running")
+            return
+
+        _active_sweep = sweep_id
+        try:
+            initial_state: SweepState = {
+                "sweep_id": sweep_id,
+                "sweep_time": datetime.utcnow().isoformat(),
+                "raw_findings": [],
+                "deduplicated_findings": [],
+                "fix_now": [],
+                "create_rule": [],
+                "log_only": [],
+                "screens_created": [],
+                "rules_written": [],
+                "runbooks_drafted": [],
+                "summary": {},
+                "status": "running",
+            }
+
+            result = await error_hunter_graph.ainvoke(initial_state)
+            logger.info(f"Sweep {sweep_id} completed: {result.get('summary', {})}")
+
+        except Exception as e:
+            logger.error(f"Sweep {sweep_id} failed: {e}")
+            try:
+                await pg_execute(
+                    "UPDATE sweep_runs SET status = 'failed', completed_at = NOW(), summary = $2 WHERE sweep_id = $1",
+                    sweep_id, json.dumps({"error": str(e)}),
+                )
+            except Exception:
+                pass
+        finally:
+            _active_sweep = None
+
+    # ========================================================================
+    # FASTAPI APPLICATION
+    # ========================================================================
+
+    app = FastAPI(title="Error Hunter", description="Proactive estate patrol for Kernow homelab")
+
+    @app.post("/sweep")
+    async def trigger_sweep():
+        """Trigger a proactive estate sweep."""
+        if _active_sweep:
+            raise HTTPException(status_code=409, detail=f"Sweep {_active_sweep} already in progress")
+
+        sweep_id = f"eh-{uuid_mod.uuid4().hex[:8]}"
+        asyncio.create_task(run_sweep(sweep_id))
+        return {"status": "sweep_started", "sweep_id": sweep_id}
+
+    @app.get("/sweep/{sweep_id}")
+    async def get_sweep_status(sweep_id: str):
+        """Get status and results of a specific sweep."""
+        row = await pg_fetchrow("SELECT * FROM sweep_runs WHERE sweep_id = $1", sweep_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Sweep not found")
+        return dict(row)
+
+    @app.get("/findings")
+    async def list_findings(
+        status: str = None,
+        severity: str = None,
+        category: str = None,
+        limit: int = 50,
+    ):
+        """List findings with optional filters."""
+        conditions = []
+        params = []
+        idx = 1
+
+        if status:
+            conditions.append(f"status = ${idx}")
+            params.append(status)
+            idx += 1
+        if severity:
+            conditions.append(f"severity = ${idx}")
+            params.append(severity)
+            idx += 1
+        if category:
+            conditions.append(f"check_category = ${idx}")
+            params.append(category)
+            idx += 1
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+
+        rows = await pg_fetch(
+            f"SELECT * FROM error_hunter_findings {where} ORDER BY last_seen DESC LIMIT ${idx}",
+            *params
+        )
+        return {"findings": [dict(r) for r in rows], "count": len(rows)}
+
+    @app.get("/sweeps")
+    async def list_sweeps(limit: int = 10):
+        """List recent sweep runs."""
+        rows = await pg_fetch(
+            "SELECT * FROM sweep_runs ORDER BY started_at DESC LIMIT $1", limit
+        )
+        return {"sweeps": [dict(r) for r in rows]}
+
+    @app.get("/health")
+    async def health():
+        return {"status": "healthy", "active_sweep": _active_sweep}
+
+    @app.get("/status")
+    async def status():
+        """Overall Error Hunter status."""
+        last_sweep = await pg_fetchrow(
+            "SELECT * FROM sweep_runs ORDER BY started_at DESC LIMIT 1"
+        )
+        total_findings = await pg_fetchrow(
+            "SELECT COUNT(*) as total FROM error_hunter_findings WHERE status = 'new'"
+        )
+        return {
+            "active_sweep": _active_sweep,
+            "last_sweep": dict(last_sweep) if last_sweep else None,
+            "pending_findings": total_findings["total"] if total_findings else 0,
+        }
+
+    def main():
+        port = int(os.environ.get("PORT", "8000"))
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+    if __name__ == "__main__":
+        main()
+
+  requirements.txt: |
+    langgraph>=0.2.0
+    langchain-core>=0.3.0
+    asyncpg>=0.30.0
+    fastapi>=0.115.0
+    uvicorn>=0.34.0
+    httpx>=0.28.0
+    pydantic>=2.11.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: error-hunter
+  namespace: ai-platform
+  labels:
+    app: error-hunter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: error-hunter
+  template:
+    metadata:
+      labels:
+        app: error-hunter
+    spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.11-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+      containers:
+        - name: error-hunter
+          image: python:3.11-slim
+          command: ['sh', '-c', 'PYTHONPATH=/app/deps python /code/main.py']
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: LITELLM_URL
+              value: "http://litellm:4000"
+            - name: KNOWLEDGE_MCP_URL
+              value: "http://knowledge-mcp:8000"
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp:8000"
+            - name: OBSERVABILITY_MCP_URL
+              value: "http://observability-mcp:8000"
+            - name: HOME_MCP_URL
+              value: "http://home-mcp:8000"
+            - name: MEDIA_MCP_URL
+              value: "http://media-mcp:8000"
+            - name: EXTERNAL_MCP_URL
+              value: "http://external-mcp:8000"
+            - name: AFFERENT_URL
+              value: "http://10.20.0.40:30456"
+            - name: SYNAPSE_URL
+              value: "http://10.10.0.22:3456"
+            - name: A2A_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-api-token
+                  key: TOKEN
+            - name: AFFERENT_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: afferent-auth-token
+                  key: AUTH_TOKEN
+                  optional: true
+            - name: INCIDENT_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: incident-db-credentials
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 60
+      volumes:
+        - name: code
+          configMap:
+            name: error-hunter-code
+        - name: deps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: error-hunter
+  namespace: ai-platform
+  labels:
+    app: error-hunter
+spec:
+  type: ClusterIP
+  selector:
+    app: error-hunter
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
