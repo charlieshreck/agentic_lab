@@ -19,6 +19,7 @@ spec:
           image: traefik:v2.11
           args:
             - --providers.kubernetesingress
+            - --providers.kubernetesingress.ingressEndpoint.publishedService=traefik/traefik
             - --entrypoints.web.address=:80
             - --entrypoints.websecure.address=:443
             - --entrypoints.websecure.http.tls=true
