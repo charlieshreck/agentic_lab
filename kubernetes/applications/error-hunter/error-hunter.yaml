@@ -756,7 +756,10 @@ data:
             # VMs
             try:
                 vms_result = await call_mcp_tool_safe(
-                    infra, "proxmox_list_vms", {"params": {"host": host, "response_format": "json"}})
+                    infra, "proxmox_list_vms", {"params": {"host": host, "response_format": "json"}},
+                    timeout=45.0)
+                if not vms_result:
+                    logger.warning(f"Proxmox {host}: no VM data returned (timeout or error)")
                 for vm in extract_list(vms_result, "vms"):
                     if not isinstance(vm, dict):
                         continue
@@ -776,7 +779,10 @@ data:
             # LXCs
             try:
                 ct_result = await call_mcp_tool_safe(
-                    infra, "proxmox_list_containers", {"params": {"host": host, "response_format": "json"}})
+                    infra, "proxmox_list_containers", {"params": {"host": host, "response_format": "json"}},
+                    timeout=45.0)
+                if not ct_result:
+                    logger.warning(f"Proxmox {host}: no container data returned (timeout or error)")
                 for ct in extract_list(ct_result, "containers"):
                     if not isinstance(ct, dict):
                         continue
