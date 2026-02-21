@@ -97,6 +97,7 @@ kubectl delete servicemonitor -n monitoring \
 **Symptoms:**
 - TargetDown for specific application
 - Application pod may not be running
+- Service exists but has no ServiceMonitor
 
 **Verification:**
 ```bash
@@ -108,12 +109,22 @@ kubectl get endpoints <service-name> -n <namespace>
 
 # Check if ServiceMonitor is correct
 kubectl get servicemonitor <name> -n <namespace> -o yaml
+
+# Check if ServiceMonitor exists at all
+kubectl get servicemonitor -n <namespace>
 ```
 
 **Resolution:**
+- If pod is running but no ServiceMonitor: Create the ServiceMonitor
 - Fix the application if it's down
 - Correct the ServiceMonitor selector if misconfigured
 - Delete ServiceMonitor if target shouldn't exist
+
+**Common Application Example - ArgoCD Metrics (Feb 2026):**
+- ArgoCD metrics service (`argocd-metrics:8082`) was running but had NO ServiceMonitor
+- Prometheus couldn't discover it, causing TargetDown alert
+- Fix: Created ServiceMonitor in `kubernetes/platform/argocd/servicemonitor.yaml`
+- Pattern: Any application with metrics needs a ServiceMonitor in the Prometheus operator ecosystem
 
 ### 4. Node Exporter Targets
 
