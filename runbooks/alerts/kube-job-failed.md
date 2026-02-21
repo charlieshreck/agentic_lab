@@ -193,6 +193,15 @@ kubectl get jobs -n <namespace> -w
   - Qdrant unavailable
   - Malformed runbook files
 
+### huntarr-start / huntarr-stop (media namespace)
+- **Schedule:** Start at 00:00 UTC, Stop at 08:00 UTC
+- **Purpose:** Scale up/down Huntarr deployment for missing media discovery
+- **Common Issues:**
+  - **activeDeadlineSeconds timeout (120s) too short** ⚠️
+    - kubectl scale command needs time for image pull + pod startup
+    - Solution: Increase `activeDeadlineSeconds` to 300+ seconds
+    - Config: `/home/prod_homelab/kubernetes/applications/media/huntarr/schedule.yaml`
+
 ## Cleaning Up Failed Jobs
 
 Failed jobs don't auto-delete. To prevent alert spam:
