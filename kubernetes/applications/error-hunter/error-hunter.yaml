@@ -159,7 +159,7 @@ data:
             "url_key": "OBSERVABILITY_MCP_URL",
             "canary_tools": [
                 ("gatus_get_failing_endpoints", {}, None),
-                ("coroot_get_recent_anomalies", {"params": {"hours": 1}}, None),
+                ("coroot_get_recent_anomalies", {"hours": 1}, None),
                 ("get_scrape_targets", {}, None),
                 ("grafana_list_dashboards", {}, None),
             ],
@@ -1002,7 +1002,7 @@ data:
         # -- Coroot anomalies --
         try:
             anomalies_result = await call_mcp_tool_safe(obs, "coroot_get_recent_anomalies", {
-                "params": {"hours": 24}
+                "hours": 24
             })
             for anom in extract_list(anomalies_result, "anomalies"):
                 if not isinstance(anom, dict):
