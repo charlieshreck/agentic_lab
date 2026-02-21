@@ -276,6 +276,21 @@ data:
             return await conn.fetch(query, *args)
 
     # ========================================================================
+    # PROGRESS REPORTING
+    # ========================================================================
+
+    async def report_progress(sweep_id: str, stage: str, detail: str = "", percent: int = 0):
+        """Post sweep progress to Kernow Hub for live dashboard updates."""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{AFFERENT_URL}/webhook/patrol-progress",
+                    json={"sweep_id": sweep_id, "stage": stage, "detail": detail, "percent": percent},
+                )
+        except Exception:
+            pass  # Non-critical — don't fail the sweep
+
+    # ========================================================================
     # FINDING HELPERS
     # ========================================================================
 
@@ -1197,6 +1212,7 @@ data:
         """Node 1: Run all checks in parallel across the estate."""
         sweep_id = state["sweep_id"]
         logger.info(f"[{sweep_id}] Starting estate sweep...")
+        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 10 checks", 10)
 
         # Record sweep start
         try:
@@ -1231,11 +1247,13 @@ data:
                 all_findings.extend(result)
 
         logger.info(f"[{sweep_id}] Sweep complete: {len(all_findings)} raw findings")
+        await report_progress(sweep_id, "Scan complete", f"{len(all_findings)} raw findings", 30)
         return {"raw_findings": all_findings}
 
     async def deduplicate(state: SweepState) -> dict:
         """Node 2: Remove findings already being handled or previously seen."""
         sweep_id = state["sweep_id"]
+        await report_progress(sweep_id, "Deduplicating", "Removing known issues", 40)
         findings = state.get("raw_findings", [])
         deduplicated = []
 
@@ -1286,6 +1304,7 @@ data:
 
         Phase 1: severity-based heuristics. Phase 6 will add LLM classification.
         """
+        await report_progress(state["sweep_id"], "Classifying", "Severity analysis", 55)
         sweep_id = state["sweep_id"]
         findings = state.get("deduplicated_findings", [])
 
@@ -1345,6 +1364,7 @@ data:
                 create_rule.append(finding)
 
         logger.info(f"[{sweep_id}] Classification: fix_now={len(fix_now)}, create_rule={len(create_rule)}, log_only={len(log_only)}")
+        await report_progress(sweep_id, "Classified", f"{len(fix_now)} fix, {len(create_rule)} rules, {len(log_only)} log", 65)
         return {"fix_now": fix_now, "create_rule": create_rule, "log_only": log_only}
 
     def _build_sweep_prompt(sweep_id: str, fix_now: list, create_rule: list, log_only: list) -> str:
@@ -1477,6 +1497,7 @@ data:
         All findings are included in the prompt — fix_now first, then create_rule,
         then log_only as context. Claude Code works through them as a batch queue.
         """
+        await report_progress(state["sweep_id"], "Dispatching", "Creating Claude session", 70)
         sweep_id = state["sweep_id"]
         fix_now = state.get("fix_now", [])
         create_rule = state.get("create_rule", [])
@@ -1558,6 +1579,7 @@ data:
     async def record_sweep(state: SweepState) -> dict:
         """Node 7: Persist all findings and update sweep run record."""
         sweep_id = state["sweep_id"]
+        await report_progress(sweep_id, "Recording results", "Persisting to DB", 90)
         fix_now = state.get("fix_now", [])
         create_rule = state.get("create_rule", [])
         log_only = state.get("log_only", [])
