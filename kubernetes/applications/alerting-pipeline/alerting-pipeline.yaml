@@ -456,6 +456,26 @@ data:
         except Exception as e:
             logger.error(f"Velero backup check error: {e}")
 
+        # 7. ArgoCD Sync Drift — detect apps that have been OutOfSync too long
+        try:
+            infra_url = MCP_SERVERS.get("infrastructure")
+            if infra_url:
+                apps = await call_mcp_tool(infra_url, "argocd_get_applications") or {}
+                app_list = apps.get("result", apps) if isinstance(apps, dict) else apps
+                if isinstance(app_list, list):
+                    for app in app_list:
+                        if isinstance(app, dict) and app.get("sync_status") == "OutOfSync":
+                            app_name = app.get("name", "unknown")
+                            health = app.get("health", "unknown")
+                            await forward_to_langgraph(
+                                alertname="ArgoCDOutOfSync",
+                                severity="warning",
+                                description=f"ArgoCD app '{app_name}' is OutOfSync (health: {health}). Git state does not match live cluster.",
+                                source="alerting-pipeline"
+                            )
+        except Exception as e:
+            logger.error(f"ArgoCD sync check error: {e}")
+
     async def check_mcp_service_health():
         """Check if MCP services are reachable."""
         for name, url in MCP_SERVERS.items():
