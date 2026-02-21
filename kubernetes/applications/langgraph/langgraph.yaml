@@ -2321,11 +2321,12 @@ spec:
                 secretKeyRef:
                   name: incident-db-credentials
                   key: DATABASE_URL
-            # Afferent PWA
+            # Screen creation → Synapse directly (port 3460)
             - name: AFFERENT_URL
-              value: "http://10.10.0.22:3456"
+              value: "http://10.10.0.22:3460"
+            # Webhook notifications → Kernow Hub (push, WS broadcast)
             - name: AFFERENT_WEBHOOK_URL
-              value: "http://10.10.0.22:3456/webhook/ingest"
+              value: "http://kernow-hub:3456/webhook/ingest"
             - name: AFFERENT_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
