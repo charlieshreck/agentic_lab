@@ -518,15 +518,19 @@ data:
                         continue
                     job_name = job.get("name", "unknown")
                     failed = safe_int(job.get("failed", 0))
-                    if failed > 0:
-                        findings.append(make_finding(
-                            "kubernetes", "job_failed", cluster_name,
-                            f"{ns}/{job_name}", "warning",
-                            f"Job {job_name} in {ns} has {failed} failure(s)",
-                            {"job": job_name, "namespace": ns, "failed": failed},
-                            f"kubectl -n {ns} logs job/{job_name}",
-                            "prometheus",
-                        ))
+                    if failed <= 0:
+                        continue
+                    # Skip routine CronJob failures — these are normal retries
+                    if any(job_name.startswith(p) for p in ROUTINE_CRONJOB_PREFIXES):
+                        continue
+                    findings.append(make_finding(
+                        "kubernetes", "job_failed", cluster_name,
+                        f"{ns}/{job_name}", "warning",
+                        f"Job {job_name} in {ns} has {failed} failure(s)",
+                        {"job": job_name, "namespace": ns, "failed": failed},
+                        f"kubectl -n {ns} logs job/{job_name}",
+                        "prometheus",
+                    ))
             except Exception as e:
                 logger.error(f"Job check error {cluster_name}/{ns}: {e}")
 
