@@ -1353,19 +1353,59 @@ data:
         lines = [
             f"# Error Hunter Sweep: {sweep_id}",
             "",
-            f"This sweep found **{total} findings** across the homelab estate.",
-            f"- **{len(fix_now)} fix_now** — investigate and fix these",
-            f"- **{len(create_rule)} create_rule** — create monitoring rules for these",
-            f"- **{len(log_only)} log_only** — informational, no action needed",
+            f"This sweep found **{total} findings** across the Kernow homelab estate.",
+            f"- **{len(fix_now)} fix_now** — investigate, fix, and write a runbook",
+            f"- **{len(create_rule)} create_rule** — create a monitoring alert and write a runbook",
+            f"- **{len(log_only)} log_only** — informational context only",
             "",
-            "Work through the fix_now and create_rule items below. For each one:",
-            "1. Use MCP tools to investigate the issue",
-            "2. Diagnose the root cause",
-            "3. Fix the issue if possible (follow GitOps — commit changes, never kubectl apply)",
-            "4. If you cannot fix it, document what you found",
-            "5. Move on to the next item",
+            "## Your Workflow",
             "",
-            "When all items are done, summarize what you fixed and what needs manual attention.",
+            "Work through every fix_now and create_rule item. For EACH item, do all three:",
+            "",
+            "### 1. Fix (fix_now items)",
+            "- Use MCP tools to investigate the root cause",
+            "- Fix the issue following GitOps (edit manifests in the repo, commit, push — NEVER kubectl apply)",
+            "- If unfixable, document what you found and why",
+            "",
+            "### 2. Write Alert Rule (create_rule items, and any fix_now that should have an alert)",
+            "- Add a PrometheusRule to `/home/monit_homelab/kubernetes/platform/prometheus-rules/homelab-rules.yaml`",
+            "- OR add a Gatus endpoint to the relevant Gatus config",
+            "- Alert should catch this issue automatically next time",
+            "- Commit and push to the monit_homelab repo",
+            "",
+            "### 3. Write Runbook (ALL actionable items)",
+            "- Create a runbook in `/home/agentic_lab/runbooks/` under the right subdirectory:",
+            "  - `alerts/` — for alert-triggered issues (use alert name as filename)",
+            "  - `troubleshooting/` — for general troubleshooting",
+            "  - `infrastructure/` — for infra patterns",
+            "- Follow the existing format (see other .md files in those dirs for examples):",
+            "  - Alert/Issue Details table (name, severity, source, clusters)",
+            "  - Description",
+            "  - Quick Diagnosis steps (with MCP tool examples, not raw kubectl)",
+            "  - Common Causes with symptoms/verification/resolution",
+            "  - Resolution Steps",
+            "  - Prevention",
+            "- Commit and push to the agentic_lab repo",
+            "",
+            "## Repository Paths",
+            "",
+            "- **Prod cluster manifests**: `/home/prod_homelab/`",
+            "- **Agentic cluster manifests**: `/home/agentic_lab/`",
+            "- **Monit cluster manifests**: `/home/monit_homelab/`",
+            "- **Alert rules**: `/home/monit_homelab/kubernetes/platform/prometheus-rules/homelab-rules.yaml`",
+            "- **Runbooks**: `/home/agentic_lab/runbooks/`",
+            "- **MCP server source**: `/home/mcp-servers/`",
+            "",
+            "## Git Workflow",
+            "",
+            "Always use `git -C <repo-path>` — never cd. Commit to each submodule separately:",
+            "```",
+            "git -C /home/<submodule> add <files>",
+            "git -C /home/<submodule> commit -m 'message'",
+            "git -C /home/<submodule> push origin main",
+            "```",
+            "",
+            "When done with all items, give a brief summary of what was fixed, what alerts were created, and what runbooks were written.",
             "",
         ]
 
@@ -1391,6 +1431,7 @@ data:
         if fix_now:
             lines.append("---")
             lines.append(f"## Fix Now ({len(fix_now)} items)")
+            lines.append("For each: investigate → fix → write alert if missing → write runbook")
             lines.append("")
             for i, f in enumerate(fix_now, 1):
                 lines.extend(_format_finding(i, f))
@@ -1398,8 +1439,7 @@ data:
         if create_rule:
             lines.append("---")
             lines.append(f"## Create Rules ({len(create_rule)} items)")
-            lines.append("")
-            lines.append("For each of these, create or update a monitoring rule (AlertManager, PrometheusRule, or Gatus endpoint) so the issue is caught automatically next time.")
+            lines.append("For each: create monitoring alert → write runbook")
             lines.append("")
             for i, f in enumerate(create_rule, 1):
                 target = f.get("alert_target", "")
@@ -1410,9 +1450,7 @@ data:
 
         if log_only:
             lines.append("---")
-            lines.append(f"## Log Only ({len(log_only)} items) — no action needed")
-            lines.append("")
-            lines.append("These are informational. Skim for context but no fixes required.")
+            lines.append(f"## Log Only ({len(log_only)} items) — context only, no action needed")
             lines.append("")
             for i, f in enumerate(log_only, 1):
                 lines.append(f"{i}. **{f.get('check_name', '?')}** on {f.get('cluster', '?')}/{f.get('resource', '?')} — {f.get('description', '')}")
