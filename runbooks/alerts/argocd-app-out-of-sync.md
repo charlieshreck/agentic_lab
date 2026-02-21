@@ -187,8 +187,8 @@ If the app keeps going OutOfSync, identify what's causing drift:
 
 | Method | Status |
 |--------|--------|
-| PrometheusRule (argocd_app_info metric) | Requires ArgoCD metrics scraping setup |
+| PrometheusRule (argocd_app_info metric) | Active — scrapes via API server proxy from monit Prometheus |
 | error-hunter sweep | Active — polls ArgoCD API periodically |
 | alerting-pipeline | Active — polls infrastructure MCP tools |
 
-**Note:** As of Feb 2026, ArgoCD metrics are not scraped into VictoriaMetrics. The PrometheusRule will activate once a ServiceMonitor is configured for ArgoCD. Until then, detection relies on error-hunter and alerting-pipeline.
+ArgoCD metrics are scraped from the prod cluster via the Kubernetes API server proxy pattern. The `argocd-metrics` service (port 8082) exposes `argocd_app_info` which powers both the `ArgoCDAppOutOfSync` and `ArgoCDAppUnhealthy` PrometheusRules. Scrape config is in the kube-prometheus-stack Helm values (`monit_homelab/kubernetes/argocd-apps/platform/kube-prometheus-stack-app.yaml`).
