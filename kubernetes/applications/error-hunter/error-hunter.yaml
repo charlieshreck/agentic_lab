@@ -73,11 +73,11 @@ data:
         ("charlieshreck", "monit_homelab"),
     ]
 
-    # Cluster contexts for kubectl MCP calls
+    # Cluster names for infrastructure-mcp kubectl tools (must match KUBECONFIGS keys)
     CLUSTERS = {
-        "production": "admin@homelab-prod",
-        "agentic": "admin@agentic-platform",
-        "monitoring": "admin@monitoring-cluster",
+        "production": "prod",
+        "agentic": "agentic",
+        "monitoring": "monit",
     }
 
     # Max concurrent screens per sweep
@@ -349,6 +349,19 @@ data:
                     status = pod.get("status", pod.get("phase", ""))
                     restarts = safe_int(pod.get("restarts", pod.get("restart_count", 0)))
                     ready = pod.get("ready", "")
+
+                    # Skip CronJob pods in transient states (Pending/ContainerCreating)
+                    # These are short-lived and will either succeed or fail quickly
+                    if status in ("Pending", "ContainerCreating", "PodInitializing") and any(
+                        pod_name.startswith(p) for p in (
+                            "error-hunter-sweep-", "alert-forwarder-", "entity-enrichment-",
+                            "graph-enrichment-", "graph-sync-", "neo4j-backup-",
+                            "postgresql-backup-", "qdrant-backup-", "redis-backup-",
+                            "pattern-detector-", "runbook-indexer-", "knowledge-reconcile-",
+                            "silverbullet-outline-sync-",
+                        )
+                    ):
+                        continue
 
                     # Unhealthy pod states
                     unhealthy = (
@@ -1320,10 +1333,18 @@ data:
             logger.info(f"[{sweep_id}] [PHASE2-STUB] Would dispatch fix screen for: "
                         f"{finding['check_name']} on {finding.get('cluster')}/{finding.get('resource')}")
             # Phase 2: create incident + screen session here
+            # Mark as dispatched so dedup skips on next sweep
+            try:
+                await pg_execute(
+                    "UPDATE error_hunter_findings SET status = 'dispatched' WHERE fingerprint = $1 AND status = 'new'",
+                    finding["fingerprint"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to mark finding dispatched: {e}")
             screens.append({
                 "finding": finding["check_name"],
                 "resource": finding.get("resource"),
-                "status": "stub_logged",
+                "status": "dispatched",
             })
 
         return {"screens_created": screens}
