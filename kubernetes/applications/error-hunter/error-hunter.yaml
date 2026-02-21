@@ -99,8 +99,8 @@ data:
     )
 
     # Max concurrent screens per sweep
-    MAX_FIX_SCREENS = 3
-    MAX_RULE_SCREENS = 2
+    # Minimum actionable findings to justify creating a screen session
+    MIN_FINDINGS_FOR_SCREEN = 1
 
     # Log error patterns to search for
     LOG_ERROR_PATTERNS = [
@@ -1347,54 +1347,98 @@ data:
         logger.info(f"[{sweep_id}] Classification: fix_now={len(fix_now)}, create_rule={len(create_rule)}, log_only={len(log_only)}")
         return {"fix_now": fix_now, "create_rule": create_rule, "log_only": log_only}
 
-    def _build_fix_prompt(finding: dict) -> str:
-        """Build a contextual Claude Code prompt for a fix_now finding."""
-        check = finding.get("check_name", "unknown")
-        cluster = finding.get("cluster", "unknown")
-        resource = finding.get("resource", "unknown")
-        desc = finding.get("description", "")
-        evidence = finding.get("evidence", {})
-        suggested = finding.get("suggested_fix", "")
-
+    def _build_sweep_prompt(sweep_id: str, fix_now: list, create_rule: list, log_only: list) -> str:
+        """Build a single prompt for the entire sweep — all findings as a batch queue."""
+        total = len(fix_now) + len(create_rule) + len(log_only)
         lines = [
-            f"# Error Hunter Fix: {check}",
+            f"# Error Hunter Sweep: {sweep_id}",
             "",
-            f"**Cluster**: {cluster}",
-            f"**Resource**: {resource}",
-            f"**Description**: {desc}",
+            f"This sweep found **{total} findings** across the homelab estate.",
+            f"- **{len(fix_now)} fix_now** — investigate and fix these",
+            f"- **{len(create_rule)} create_rule** — create monitoring rules for these",
+            f"- **{len(log_only)} log_only** — informational, no action needed",
             "",
-        ]
-
-        if evidence:
-            lines.append("## Evidence")
-            for k, v in evidence.items():
-                lines.append(f"- **{k}**: {v}")
-            lines.append("")
-
-        if suggested:
-            lines.append(f"## Suggested Investigation")
-            lines.append(suggested)
-            lines.append("")
-
-        lines.extend([
-            "## Instructions",
-            "",
-            "1. Use MCP tools to investigate this issue",
+            "Work through the fix_now and create_rule items below. For each one:",
+            "1. Use MCP tools to investigate the issue",
             "2. Diagnose the root cause",
             "3. Fix the issue if possible (follow GitOps — commit changes, never kubectl apply)",
             "4. If you cannot fix it, document what you found",
-            "5. When done, summarize what you did and the outcome",
-        ])
+            "5. Move on to the next item",
+            "",
+            "When all items are done, summarize what you fixed and what needs manual attention.",
+            "",
+        ]
+
+        def _format_finding(i: int, f: dict) -> list:
+            """Format a single finding as a prompt section."""
+            out = [
+                f"### {i}. [{f.get('severity', 'warning').upper()}] {f.get('check_name', 'unknown')}",
+                f"- **Cluster**: {f.get('cluster', 'unknown')}",
+                f"- **Resource**: {f.get('resource', 'unknown')}",
+                f"- **Description**: {f.get('description', '')}",
+            ]
+            evidence = f.get("evidence", {})
+            if evidence:
+                out.append("- **Evidence**:")
+                for k, v in evidence.items():
+                    out.append(f"  - {k}: {v}")
+            suggested = f.get("suggested_fix", "")
+            if suggested:
+                out.append(f"- **Suggested**: {suggested}")
+            out.append("")
+            return out
+
+        if fix_now:
+            lines.append("---")
+            lines.append(f"## Fix Now ({len(fix_now)} items)")
+            lines.append("")
+            for i, f in enumerate(fix_now, 1):
+                lines.extend(_format_finding(i, f))
+
+        if create_rule:
+            lines.append("---")
+            lines.append(f"## Create Rules ({len(create_rule)} items)")
+            lines.append("")
+            lines.append("For each of these, create or update a monitoring rule (AlertManager, PrometheusRule, or Gatus endpoint) so the issue is caught automatically next time.")
+            lines.append("")
+            for i, f in enumerate(create_rule, 1):
+                target = f.get("alert_target", "")
+                entry = _format_finding(i, f)
+                if target:
+                    entry.insert(-1, f"- **Alert target**: {target}")
+                lines.extend(entry)
+
+        if log_only:
+            lines.append("---")
+            lines.append(f"## Log Only ({len(log_only)} items) — no action needed")
+            lines.append("")
+            lines.append("These are informational. Skim for context but no fixes required.")
+            lines.append("")
+            for i, f in enumerate(log_only, 1):
+                lines.append(f"{i}. **{f.get('check_name', '?')}** on {f.get('cluster', '?')}/{f.get('resource', '?')} — {f.get('description', '')}")
+            lines.append("")
 
         return "\n".join(lines)
 
-    async def _create_fix_screen(finding: dict, sweep_id: str) -> dict:
-        """Create a Claude Code screen session on Synapse for a finding."""
-        finding_id = finding.get("fingerprint", "unknown")[:8]
-        screen_name = f"fix-{finding_id}"
-        prompt = _build_fix_prompt(finding)
+    async def dispatch_sweep_screen(state: SweepState) -> dict:
+        """Node 4: Create a single Claude Code screen for the entire sweep.
 
-        # POST to Synapse /api/screens
+        All findings are included in the prompt — fix_now first, then create_rule,
+        then log_only as context. Claude Code works through them as a batch queue.
+        """
+        sweep_id = state["sweep_id"]
+        fix_now = state.get("fix_now", [])
+        create_rule = state.get("create_rule", [])
+        log_only = state.get("log_only", [])
+
+        actionable = fix_now + create_rule
+        if len(actionable) < MIN_FINDINGS_FOR_SCREEN:
+            logger.info(f"[{sweep_id}] Only {len(actionable)} actionable findings — skipping screen dispatch")
+            return {"screens_created": [], "rules_written": [], "runbooks_drafted": []}
+
+        screen_name = f"sweep-{sweep_id}"
+        prompt = _build_sweep_prompt(sweep_id, fix_now, create_rule, log_only)
+
         synapse_url = SYNAPSE_URL.rstrip("/")
         headers = {
             "Content-Type": "application/json",
@@ -1403,9 +1447,9 @@ data:
         payload = {
             "name": screen_name,
             "prompt": prompt,
-            "model": "haiku",
         }
 
+        created = False
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
@@ -1415,86 +1459,38 @@ data:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    logger.info(f"[{sweep_id}] Created fix screen: {screen_name} "
-                                f"(existing={data.get('existing', False)})")
-                    return {"screen": screen_name, "created": True}
+                    created = not data.get("existing", False)
+                    logger.info(f"[{sweep_id}] Sweep screen '{screen_name}' "
+                                f"{'created' if created else 'already exists'}")
                 else:
                     logger.error(f"[{sweep_id}] Screen creation failed: {resp.status_code} {resp.text[:200]}")
-                    return {"screen": screen_name, "created": False, "error": resp.text[:200]}
         except Exception as e:
             logger.error(f"[{sweep_id}] Screen creation error: {e}")
-            return {"screen": screen_name, "created": False, "error": str(e)}
 
-    async def dispatch_fixes(state: SweepState) -> dict:
-        """Node 4: Create Claude Code screen sessions for fix_now findings."""
-        sweep_id = state["sweep_id"]
-        fix_now = state.get("fix_now", [])
-        screens = []
-
-        for finding in fix_now[:MAX_FIX_SCREENS]:
-            check = finding.get("check_name", "?")
-            resource = finding.get("resource", "?")
-            logger.info(f"[{sweep_id}] Dispatching fix screen for: {check} on {resource}")
-
-            result = await _create_fix_screen(finding, sweep_id)
-            screen_name = result.get("screen", "")
-
-            # Mark as dispatched so dedup skips on next sweep
+        # Mark all actionable findings as dispatched
+        dispatched = 0
+        for finding in actionable:
             try:
                 await pg_execute(
                     "UPDATE error_hunter_findings SET status = 'dispatched', screen_session = $2 "
                     "WHERE fingerprint = $1 AND status = 'new'",
                     finding["fingerprint"], screen_name,
                 )
+                dispatched += 1
             except Exception as e:
                 logger.warning(f"Failed to mark finding dispatched: {e}")
 
-            screens.append({
-                "finding": check,
-                "resource": resource,
-                "screen": screen_name,
-                "created": result.get("created", False),
-            })
+        logger.info(f"[{sweep_id}] Marked {dispatched}/{len(actionable)} findings as dispatched → {screen_name}")
 
-        return {"screens_created": screens}
+        screens_created = [{
+            "screen": screen_name,
+            "created": created,
+            "fix_now_count": len(fix_now),
+            "create_rule_count": len(create_rule),
+            "log_only_count": len(log_only),
+        }]
 
-    async def write_rules(state: SweepState) -> dict:
-        """Node 5: Create screen sessions to write alert rules.
-
-        Phase 1: Stub - just logs. Phase 3 will wire to Synapse screens.
-        """
-        sweep_id = state["sweep_id"]
-        create_rule = state.get("create_rule", [])
-        rules = []
-
-        for finding in create_rule[:MAX_RULE_SCREENS]:
-            logger.info(f"[{sweep_id}] [PHASE3-STUB] Would create rule-writing screen for: "
-                        f"{finding['check_name']} -> {finding.get('alert_target')}")
-            rules.append({
-                "finding": finding["check_name"],
-                "target": finding.get("alert_target"),
-                "status": "stub_logged",
-            })
-
-        return {"rules_written": rules}
-
-    async def draft_runbooks(state: SweepState) -> dict:
-        """Node 6: Draft runbooks and submit through collaborate.py.
-
-        Phase 1: Stub - just logs. Phase 5 will wire to collaborate.py.
-        """
-        sweep_id = state["sweep_id"]
-        actionable = state.get("fix_now", []) + state.get("create_rule", [])
-        runbooks = []
-
-        for finding in actionable[:5]:
-            logger.info(f"[{sweep_id}] [PHASE5-STUB] Would draft runbook for: {finding['check_name']}")
-            runbooks.append({
-                "finding": finding["check_name"],
-                "status": "stub_logged",
-            })
-
-        return {"runbooks_drafted": runbooks}
+        return {"screens_created": screens_created, "rules_written": [], "runbooks_drafted": []}
 
     async def record_sweep(state: SweepState) -> dict:
         """Node 7: Persist all findings and update sweep run record."""
@@ -1604,18 +1600,14 @@ data:
         workflow.add_node("sweep_estate", sweep_estate)
         workflow.add_node("deduplicate", deduplicate)
         workflow.add_node("classify", classify)
-        workflow.add_node("dispatch_fixes", dispatch_fixes)
-        workflow.add_node("write_rules", write_rules)
-        workflow.add_node("draft_runbooks", draft_runbooks)
+        workflow.add_node("dispatch_sweep_screen", dispatch_sweep_screen)
         workflow.add_node("record_sweep", record_sweep)
 
         workflow.set_entry_point("sweep_estate")
         workflow.add_edge("sweep_estate", "deduplicate")
         workflow.add_edge("deduplicate", "classify")
-        workflow.add_edge("classify", "dispatch_fixes")
-        workflow.add_edge("dispatch_fixes", "write_rules")
-        workflow.add_edge("write_rules", "draft_runbooks")
-        workflow.add_edge("draft_runbooks", "record_sweep")
+        workflow.add_edge("classify", "dispatch_sweep_screen")
+        workflow.add_edge("dispatch_sweep_screen", "record_sweep")
         workflow.add_edge("record_sweep", END)
 
         return workflow.compile()
