@@ -1405,14 +1405,27 @@ data:
             "git -C /home/<submodule> push origin main",
             "```",
             "",
-            "When done with all items, give a brief summary of what was fixed, what alerts were created, and what runbooks were written.",
+            "## When Done — Report Back",
+            "",
+            "After you finish ALL items, you MUST resolve each finding in the dashboard.",
+            "For each fix_now and create_rule finding, run this curl (replace FINDING_ID and summary):",
+            "```bash",
+            'curl -s -X POST http://10.20.0.40:30456/webhook/screen-resolve \\',
+            '  -H "Content-Type: application/json" \\',
+            '  -d \'{"type":"finding","id":FINDING_ID,"summary":"<what you did>"}\'',
+            "```",
+            "The FINDING_ID for each item is listed next to its heading below.",
+            "This marks them resolved in the dashboard. Do NOT skip this step.",
+            "",
+            "When all curl calls are done, give a brief summary of what was fixed, what alerts were created, and what runbooks were written.",
             "",
         ]
 
         def _format_finding(i: int, f: dict) -> list:
             """Format a single finding as a prompt section."""
+            fid = f.get("id", "?")
             out = [
-                f"### {i}. [{f.get('severity', 'warning').upper()}] {f.get('check_name', 'unknown')}",
+                f"### {i}. [{f.get('severity', 'warning').upper()}] {f.get('check_name', 'unknown')} (FINDING_ID={fid})",
                 f"- **Cluster**: {f.get('cluster', 'unknown')}",
                 f"- **Resource**: {f.get('resource', 'unknown')}",
                 f"- **Description**: {f.get('description', '')}",
@@ -1473,6 +1486,18 @@ data:
         if len(actionable) < MIN_FINDINGS_FOR_SCREEN:
             logger.info(f"[{sweep_id}] Only {len(actionable)} actionable findings — skipping screen dispatch")
             return {"screens_created": [], "rules_written": [], "runbooks_drafted": []}
+
+        # Fetch DB IDs for all findings so the prompt can include them for callback
+        for finding in fix_now + create_rule + log_only:
+            try:
+                rows = await pg_fetch(
+                    "SELECT id FROM error_hunter_findings WHERE fingerprint = $1 AND status IN ('new', 'dispatched') LIMIT 1",
+                    finding["fingerprint"],
+                )
+                if rows:
+                    finding["id"] = rows[0]["id"]
+            except Exception:
+                pass
 
         screen_name = f"sweep-{sweep_id}"
         prompt = _build_sweep_prompt(sweep_id, fix_now, create_rule, log_only)

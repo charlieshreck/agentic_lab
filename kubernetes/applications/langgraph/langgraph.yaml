@@ -1274,7 +1274,7 @@ data:
                                       enrichment: dict, runbook_matches: list,
                                       model: str) -> Optional[str]:
         """Create a Claude screen session on Afferent for this incident."""
-        context_prompt = build_incident_prompt(payload_data, enrichment, runbook_matches)
+        context_prompt = build_incident_prompt(incident_id, payload_data, enrichment, runbook_matches)
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
@@ -1291,10 +1291,10 @@ data:
             logger.error(f"Failed to create Afferent screen: {e}")
         return None
 
-    def build_incident_prompt(payload_data: dict, enrichment: dict, runbook_matches: list) -> str:
+    def build_incident_prompt(incident_id: int, payload_data: dict, enrichment: dict, runbook_matches: list) -> str:
         """Build context prompt for Claude screen session."""
         parts = [
-            f"## Incident: {payload_data.get('alert_name', 'Unknown')}",
+            f"## Incident #{incident_id}: {payload_data.get('alert_name', 'Unknown')}",
             f"**Source**: {payload_data.get('source')} | **Severity**: {payload_data.get('severity')}",
             f"**Description**: {payload_data.get('description', '')}",
         ]
@@ -1311,7 +1311,33 @@ data:
             parts.append(f"**Recurring Alert**: {tp['occurrence_count']} times in {TEMPORAL_WINDOW_HOURS}h (priority: {tp['escalation_priority']})")
         if runbook_matches:
             parts.append(f"**Matched Runbook**: {runbook_matches[0].get('name', 'unknown')} (score: {runbook_matches[0].get('score', 0):.2f})")
-        parts.append("\nInvestigate this incident. Use MCP tools to gather data. Report findings with [STATUS:AWAITING_REVIEW] when ready for human review.")
+        parts.append("")
+        parts.append("## Your Task")
+        parts.append("")
+        parts.append("1. Investigate this incident using MCP tools to gather data")
+        parts.append("2. Fix the root cause if possible (GitOps only — edit manifests, commit, push)")
+        parts.append("3. Write a runbook in `/home/agentic_lab/runbooks/` if one doesn't exist for this alert")
+        parts.append("4. Create an alert rule if this should be caught automatically next time")
+        parts.append("")
+        parts.append("## Git Workflow")
+        parts.append("")
+        parts.append("Always use `git -C <repo-path>` — never cd. Commit to each submodule separately:")
+        parts.append("```")
+        parts.append("git -C /home/<submodule> add <files>")
+        parts.append("git -C /home/<submodule> commit -m 'message'")
+        parts.append("git -C /home/<submodule> push origin main")
+        parts.append("```")
+        parts.append("")
+        parts.append("## When Done — Report Back")
+        parts.append("")
+        parts.append("After you finish investigating and fixing, you MUST report your resolution:")
+        parts.append("```bash")
+        parts.append(f'curl -s -X POST http://10.20.0.40:30456/webhook/screen-resolve \\')
+        parts.append(f'  -H "Content-Type: application/json" \\')
+        parts.append(f'  -d \'{{"type":"incident","id":{incident_id},"summary":"<brief description of what you did>"}}\'')
+        parts.append("```")
+        parts.append("Replace <brief description of what you did> with a 1-2 sentence summary of the fix.")
+        parts.append("This closes the incident in the dashboard. Do NOT skip this step.")
         return "\n\n".join(parts)
 
     # ============================================================================
