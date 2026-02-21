@@ -168,9 +168,16 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 2. Or via shell: `k3s kubectl logs -n ix-garage -l app.kubernetes.io/name=garage`
 
 ### Update Garage
+
+**IMPORTANT**: Before updating, see `/home/agentic_lab/runbooks/infrastructure/truenas-app-updates.md` for full pre-update checklist and post-update verification.
+
 1. In TrueNAS UI: Apps → garage → Update
-2. Review release notes before updating
-3. Test after update: `curl http://10.10.0.103:30188`
+2. Review release notes at https://garagehq.deuxfleurs.fr/ before updating
+3. Verify no active Velero/Backrest jobs (see Pre-Update Checklist in runbook)
+4. Perform update during maintenance window
+5. Test after update:
+   - `curl http://10.10.0.103:30188` (should return 403)
+   - `aws s3 ls --endpoint-url=http://10.10.0.103:30188` (should list buckets)
 
 ## Storage Considerations
 
@@ -314,6 +321,7 @@ This is included in TrueNAS ZFS snapshots.
 - `/home/agentic_lab/runbooks/infrastructure/backup-overview.md` - Overall backup strategy
 - `/home/agentic_lab/runbooks/infrastructure/backrest-operations.md` - Backrest procedures
 - `/home/agentic_lab/runbooks/infrastructure/velero-operations.md` - Velero procedures
+- `/home/agentic_lab/runbooks/infrastructure/truenas-app-updates.md` - TrueNAS app update procedures
 
 ## Infisical Paths
 
