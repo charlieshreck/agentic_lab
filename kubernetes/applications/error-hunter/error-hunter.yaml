@@ -80,6 +80,24 @@ data:
         "monitoring": "monit",
     }
 
+    # Namespaces to skip per cluster — prevents cross-cluster duplicate findings
+    # (e.g. ai-platform namespace exists on prod for ArgoCD but workloads are on agentic)
+    CLUSTER_SKIP_NAMESPACES = {
+        "production": {"ai-platform"},
+        "monitoring": {"ai-platform"},
+        "agentic": set(),
+    }
+
+    # Routine CronJob prefixes — failures classified as log_only, not fix_now
+    ROUTINE_CRONJOB_PREFIXES = (
+        "configarr-", "huntarr-start-", "huntarr-stop-", "mount-canary-writer-",
+        "matter-hub-health-", "renovate-", "silverbullet-outline-sync-",
+        "alert-forwarder-", "entity-enrichment-", "graph-enrichment-",
+        "graph-sync-", "neo4j-backup-", "postgresql-backup-", "qdrant-backup-",
+        "redis-backup-", "pattern-detector-", "runbook-indexer-",
+        "knowledge-reconcile-", "error-hunter-sweep-", "network-entity-discovery-",
+    )
+
     # Max concurrent screens per sweep
     MAX_FIX_SCREENS = 3
     MAX_RULE_SCREENS = 2
@@ -325,13 +343,14 @@ data:
         infra = INFRASTRUCTURE_MCP_URL
         ctx = CLUSTERS.get(cluster_name, cluster_name)
 
-        # Get all namespaces
+        # Get all namespaces (skip system + cross-cluster namespaces)
+        skip_ns = {"kube-system", "kube-public", "kube-node-lease"} | CLUSTER_SKIP_NAMESPACES.get(cluster_name, set())
         ns_result = await call_mcp_tool_safe(infra, "kubectl_get_namespaces", {"cluster": ctx})
         namespaces = []
         if ns_result:
             for ns in extract_list(ns_result, "namespaces"):
                 name = ns.get("name", ns) if isinstance(ns, dict) else str(ns)
-                if name not in ("kube-system", "kube-public", "kube-node-lease"):
+                if name not in skip_ns:
                     namespaces.append(name)
         if not namespaces:
             namespaces = ["default"]
@@ -350,17 +369,17 @@ data:
                     restarts = safe_int(pod.get("restarts", pod.get("restart_count", 0)))
                     ready = pod.get("ready", "")
 
-                    # Skip CronJob pods in transient states (Pending/ContainerCreating)
-                    # These are short-lived and will either succeed or fail quickly
-                    if status in ("Pending", "ContainerCreating", "PodInitializing") and any(
-                        pod_name.startswith(p) for p in (
-                            "error-hunter-sweep-", "alert-forwarder-", "entity-enrichment-",
-                            "graph-enrichment-", "graph-sync-", "neo4j-backup-",
-                            "postgresql-backup-", "qdrant-backup-", "redis-backup-",
-                            "pattern-detector-", "runbook-indexer-", "knowledge-reconcile-",
-                            "silverbullet-outline-sync-",
-                        )
-                    ):
+                    # Skip ALL CronJob/Job pods — failures are caught by the job_failed check.
+                    # This prevents double-reporting AND noise from old completed/failed Job pods.
+                    is_cronjob_pod = any(pod_name.startswith(p) for p in ROUTINE_CRONJOB_PREFIXES)
+                    # Also detect Job pods by naming pattern: <name>-<timestamp>-<random>
+                    # CronJob pods have a numeric segment (schedule timestamp) before the random suffix
+                    is_job_pod = bool(re.match(r'.+-\d{8,}-[a-z0-9]{5}$', pod_name))
+                    # Init jobs (e.g. outline-db-init, incident-db-init) are one-shot — skip entirely
+                    is_init_job = "-db-init" in pod_name or "-seed" in pod_name or pod_name.endswith("-init")
+                    if is_cronjob_pod or is_init_job:
+                        continue
+                    if is_job_pod and status not in ("Running",):
                         continue
 
                     # Unhealthy pod states
@@ -396,8 +415,9 @@ data:
                                     "prometheus",
                                 ))
 
-                    # High restart count (10+ to reduce noise from routine restarts)
-                    if restarts >= 10:
+                    # High restart count — threshold raised to 50 to ignore long-running pods
+                    # with accumulated restarts. Rate-based alerting is better (Prometheus handles that).
+                    if restarts >= 50:
                         findings.append(make_finding(
                             "kubernetes", "pod_restart_trending", cluster_name,
                             f"{ns}/{pod_name}", "warning",
@@ -585,12 +605,13 @@ data:
         infra = INFRASTRUCTURE_MCP_URL
         ctx = CLUSTERS.get(cluster_name, cluster_name)
 
-        # Get namespaces
+        # Get namespaces (skip system + cross-cluster)
+        skip_ns = {"kube-system", "kube-public", "kube-node-lease"} | CLUSTER_SKIP_NAMESPACES.get(cluster_name, set())
         ns_result = await call_mcp_tool_safe(infra, "kubectl_get_namespaces", {"cluster": ctx})
         namespaces = []
         for ns in extract_list(ns_result, "namespaces"):
             name = ns.get("name", ns) if isinstance(ns, dict) else str(ns)
-            if name not in ("kube-system", "kube-public", "kube-node-lease"):
+            if name not in skip_ns:
                 namespaces.append(name)
         if not namespaces:
             return findings
@@ -1277,9 +1298,15 @@ data:
             category = finding.get("check_category", "")
             check_name = finding.get("check_name", "")
 
+            resource = finding.get("resource", "")
+            is_routine_cronjob = any(resource.split("/")[-1].startswith(p) for p in ROUTINE_CRONJOB_PREFIXES)
+
             # Critical findings always go to fix_now
             if severity == "critical":
                 fix_now.append(finding)
+            # Routine CronJob failures are expected noise — log only
+            elif check_name == "job_failed" and is_routine_cronjob:
+                log_only.append(finding)
             # Active failures: pods down, deployments unavailable
             elif check_name in ("pod_not_running", "deployment_unavailable", "job_failed",
                                 "statefulset_not_ready", "node_not_ready"):
