@@ -22,9 +22,9 @@ All services exposed via NodePort on the agentic cluster (10.20.0.40).
 |------|---------|-------------|
 | 30167 | conduit | Matrix/Conduit server |
 | 30168 | matrix-bot | Matrix bot webhook |
-| 30200 | claude-agent | Claude agent service |
-| 30201 | claude-validator | Claude validation service |
-| 30202 | gemini-agent | Gemini agent service |
+| 30200 | ~~claude-agent~~ | RETIRED — decommissioned |
+| 30201 | ~~claude-validator~~ | RETIRED — decommissioned |
+| 30202 | ~~gemini-agent~~ | RETIRED — decommissioned |
 | 30203 | traefik-https | Traefik HTTPS (LoadBalancer) |
 
 ---
