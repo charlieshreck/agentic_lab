@@ -58,7 +58,7 @@ data:
     # Kernow Hub / Synapse for screen dispatch (Phase 2)
     AFFERENT_URL = os.environ.get("AFFERENT_URL", "http://10.20.0.40:30456")
     AFFERENT_AUTH_TOKEN = os.environ.get("AFFERENT_AUTH_TOKEN", "")
-    SYNAPSE_URL = os.environ.get("SYNAPSE_URL", "http://10.10.0.22:3456")
+    SYNAPSE_URL = os.environ.get("SYNAPSE_URL", "http://10.10.0.22:3460")
 
     # A2A token for MCP REST bridge
     A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
@@ -1347,31 +1347,113 @@ data:
         logger.info(f"[{sweep_id}] Classification: fix_now={len(fix_now)}, create_rule={len(create_rule)}, log_only={len(log_only)}")
         return {"fix_now": fix_now, "create_rule": create_rule, "log_only": log_only}
 
-    async def dispatch_fixes(state: SweepState) -> dict:
-        """Node 4: Create Claude screen sessions for fix_now findings.
+    def _build_fix_prompt(finding: dict) -> str:
+        """Build a contextual Claude Code prompt for a fix_now finding."""
+        check = finding.get("check_name", "unknown")
+        cluster = finding.get("cluster", "unknown")
+        resource = finding.get("resource", "unknown")
+        desc = finding.get("description", "")
+        evidence = finding.get("evidence", {})
+        suggested = finding.get("suggested_fix", "")
 
-        Phase 1: Stub - just logs. Phase 2 will wire to Kernow Hub.
-        """
+        lines = [
+            f"# Error Hunter Fix: {check}",
+            "",
+            f"**Cluster**: {cluster}",
+            f"**Resource**: {resource}",
+            f"**Description**: {desc}",
+            "",
+        ]
+
+        if evidence:
+            lines.append("## Evidence")
+            for k, v in evidence.items():
+                lines.append(f"- **{k}**: {v}")
+            lines.append("")
+
+        if suggested:
+            lines.append(f"## Suggested Investigation")
+            lines.append(suggested)
+            lines.append("")
+
+        lines.extend([
+            "## Instructions",
+            "",
+            "1. Use MCP tools to investigate this issue",
+            "2. Diagnose the root cause",
+            "3. Fix the issue if possible (follow GitOps — commit changes, never kubectl apply)",
+            "4. If you cannot fix it, document what you found",
+            "5. When done, summarize what you did and the outcome",
+        ])
+
+        return "\n".join(lines)
+
+    async def _create_fix_screen(finding: dict, sweep_id: str) -> dict:
+        """Create a Claude Code screen session on Synapse for a finding."""
+        finding_id = finding.get("fingerprint", "unknown")[:8]
+        screen_name = f"fix-{finding_id}"
+        prompt = _build_fix_prompt(finding)
+
+        # POST to Synapse /api/screens
+        synapse_url = SYNAPSE_URL.rstrip("/")
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Token": AFFERENT_AUTH_TOKEN,
+        }
+        payload = {
+            "name": screen_name,
+            "prompt": prompt,
+            "model": "haiku",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{synapse_url}/api/screens",
+                    json=payload,
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    logger.info(f"[{sweep_id}] Created fix screen: {screen_name} "
+                                f"(existing={data.get('existing', False)})")
+                    return {"screen": screen_name, "created": True}
+                else:
+                    logger.error(f"[{sweep_id}] Screen creation failed: {resp.status_code} {resp.text[:200]}")
+                    return {"screen": screen_name, "created": False, "error": resp.text[:200]}
+        except Exception as e:
+            logger.error(f"[{sweep_id}] Screen creation error: {e}")
+            return {"screen": screen_name, "created": False, "error": str(e)}
+
+    async def dispatch_fixes(state: SweepState) -> dict:
+        """Node 4: Create Claude Code screen sessions for fix_now findings."""
         sweep_id = state["sweep_id"]
         fix_now = state.get("fix_now", [])
         screens = []
 
         for finding in fix_now[:MAX_FIX_SCREENS]:
-            logger.info(f"[{sweep_id}] [PHASE2-STUB] Would dispatch fix screen for: "
-                        f"{finding['check_name']} on {finding.get('cluster')}/{finding.get('resource')}")
-            # Phase 2: create incident + screen session here
+            check = finding.get("check_name", "?")
+            resource = finding.get("resource", "?")
+            logger.info(f"[{sweep_id}] Dispatching fix screen for: {check} on {resource}")
+
+            result = await _create_fix_screen(finding, sweep_id)
+            screen_name = result.get("screen", "")
+
             # Mark as dispatched so dedup skips on next sweep
             try:
                 await pg_execute(
-                    "UPDATE error_hunter_findings SET status = 'dispatched' WHERE fingerprint = $1 AND status = 'new'",
-                    finding["fingerprint"]
+                    "UPDATE error_hunter_findings SET status = 'dispatched', screen_session = $2 "
+                    "WHERE fingerprint = $1 AND status = 'new'",
+                    finding["fingerprint"], screen_name,
                 )
             except Exception as e:
                 logger.warning(f"Failed to mark finding dispatched: {e}")
+
             screens.append({
-                "finding": finding["check_name"],
-                "resource": finding.get("resource"),
-                "status": "dispatched",
+                "finding": check,
+                "resource": resource,
+                "screen": screen_name,
+                "created": result.get("created", False),
             })
 
         return {"screens_created": screens}
@@ -1740,7 +1822,7 @@ spec:
             - name: AFFERENT_URL
               value: "http://10.20.0.40:30456"
             - name: SYNAPSE_URL
-              value: "http://10.10.0.22:3456"
+              value: "http://10.10.0.22:3460"
             - name: A2A_API_TOKEN
               valueFrom:
                 secretKeyRef:
