@@ -457,10 +457,10 @@ data:
     # ============================================================================
 
     async def notify_afferent_ingest(incident_row: dict, extra: dict = None):
-        """POST incident to Afferent /webhook/ingest."""
-        if not AFFERENT_URL:
+        """POST incident to Kernow Hub /webhook/ingest."""
+        if not AFFERENT_WEBHOOK_URL:
             return
-        url = f"{AFFERENT_URL}/webhook/ingest"
+        url = AFFERENT_WEBHOOK_URL
         payload = {
             "id": incident_row.get("id"),
             "external_id": incident_row.get("external_id"),
@@ -483,10 +483,11 @@ data:
                 logger.error(f"Afferent notification error: {e}")
 
     async def notify_afferent_update(incident_id: int, status: str, note: str = None):
-        """POST status update to Afferent /webhook/incident-update."""
-        if not AFFERENT_URL:
+        """POST status update to Kernow Hub /webhook/incident-update."""
+        webhook_base = AFFERENT_WEBHOOK_URL.rsplit("/", 1)[0] if AFFERENT_WEBHOOK_URL else ""
+        if not webhook_base:
             return
-        url = f"{AFFERENT_URL}/webhook/incident-update"
+        url = f"{webhook_base}/incident-update"
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 await client.post(url, json={
@@ -2321,7 +2322,7 @@ spec:
                 secretKeyRef:
                   name: incident-db-credentials
                   key: DATABASE_URL
-            # Screen creation → Synapse directly (port 3460)
+            # Screen creation → Synapse directly (port 3460 = synapse.service)
             - name: AFFERENT_URL
               value: "http://10.10.0.22:3460"
             # Webhook notifications → Kernow Hub (push, WS broadcast)
