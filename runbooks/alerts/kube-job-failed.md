@@ -196,11 +196,15 @@ kubectl get jobs -n <namespace> -w
 ### huntarr-start / huntarr-stop (media namespace)
 - **Schedule:** Start at 00:00 UTC, Stop at 08:00 UTC
 - **Purpose:** Scale up/down Huntarr deployment for missing media discovery
+- **Image:** `registry.k8s.io/kubectl:v1.34`
 - **Common Issues:**
-  - **activeDeadlineSeconds timeout (120s) too short** ⚠️
+  - **Image tag not found** — non-existent tags (e.g. `bitnami/kubectl:1.31`) cause ErrImagePull
+    - Solution: Use `registry.k8s.io/kubectl:v1.34` (official K8s kubectl image)
+  - **activeDeadlineSeconds timeout too short**
     - kubectl scale command needs time for image pull + pod startup
     - Solution: Increase `activeDeadlineSeconds` to 300+ seconds
-    - Config: `/home/prod_homelab/kubernetes/applications/media/huntarr/schedule.yaml`
+  - **RBAC insufficient** — Role needs `deployments` and `deployments/scale` resources with `get`, `patch`, `update` verbs
+  - Config: `/home/prod_homelab/kubernetes/applications/media/huntarr/schedule.yaml`
 
 ## Cleaning Up Failed Jobs
 
@@ -247,6 +251,12 @@ If jobs repeatedly fail:
 - `KubeContainerWaiting` - Job pod can't start
 
 ## Historical Incidents
+
+### February 2026 - huntarr-stop Image Pull Failure
+- **Job:** huntarr-stop-29526240
+- **Cause:** CronJob used `bitnami/kubectl:1.31` which doesn't exist (tag not found on Docker Hub)
+- **Resolution:** Updated image to `registry.k8s.io/kubectl:v1.34`, expanded RBAC to include `deployments` resource with `get/patch/update` verbs, increased `activeDeadlineSeconds` to 300 and `backoffLimit` to 3, added shell wrapper with error reporting
+- **Lesson:** Use official `registry.k8s.io/kubectl` images with specific semver tags; avoid third-party kubectl images with unreliable tags
 
 ### January 2026 - claude-validator-daily Failed
 - **Job:** claude-validator-daily-29474280
