@@ -376,21 +376,36 @@ data:
 
     def normalize_pulse(body: dict) -> dict:
         """Normalize Pulse webhook payload.
-        Pulse uses: id, level, type, resourceName, resourceId, resourceType, node, message, value, threshold.
+        Native format: id, level, type, resourceName, resourceId, resourceType, node, message.
+        Custom template format: title, text, resource, severity, node, duration.
         """
-        alert_type = body.get("type", "check")
-        resource_name = body.get("resourceName") or body.get("resourceId", "unknown")
-        alert_name = f"{alert_type} - {resource_name}" if resource_name else alert_type
+        if "type" in body:
+            # Native Pulse format
+            alert_type = body.get("type", "check")
+            resource_name = body.get("resourceName") or body.get("resourceId", "unknown")
+            alert_name = f"{alert_type} - {resource_name}" if resource_name and resource_name != "unknown" else alert_type
+            severity = body.get("level") or "warning"
+            description = body.get("message") or ""
+            fingerprint = body.get("id") or f"pulse-{alert_name}"
+        else:
+            # Custom template format: title like "memory: plex on Ruapehu"
+            title = body.get("title", "")
+            resource_name = body.get("resource", "unknown")
+            alert_type = title.split(":")[0].strip() if ":" in title else (title or "check")
+            alert_name = f"{alert_type} - {resource_name}" if resource_name and resource_name != "unknown" else alert_type
+            severity = body.get("severity", "warning")
+            description = body.get("text") or ""
+            fingerprint = f"pulse-{alert_name}".replace(" ", "-").lower()
         return {
             "source": "pulse",
             "alert_name": alert_name,
-            "severity": body.get("level") or body.get("severity") or "warning",
-            "description": body.get("message") or body.get("description") or "",
-            "fingerprint": body.get("id") or f"pulse-{alert_name}",
+            "severity": severity,
+            "description": description,
+            "fingerprint": fingerprint,
             "labels": {
                 "resource_type": body.get("resourceType"),
                 "node": body.get("node"),
-                "resource_id": body.get("resourceId"),
+                "resource_id": body.get("resourceId") or body.get("resource"),
             },
             "raw_payload": body,
         }
@@ -2322,6 +2337,8 @@ spec:
       labels:
         app: langgraph
         component: orchestrator
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2026-02-22T22:00:00Z"
     spec:
       initContainers:
         - name: install-deps
