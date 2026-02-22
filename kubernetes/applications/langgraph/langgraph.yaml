@@ -1077,7 +1077,7 @@ data:
             data = {}
             try:
                 anomalies = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_recent_anomalies",
-                                                 {"params": {"hours": 6}})
+                                                 {"hours": 6})
                 if anomalies:
                     # Text response like "No anomalies" is wrapped as {"text": "..."}
                     if isinstance(anomalies, dict) and anomalies.get("text"):
@@ -1090,14 +1090,14 @@ data:
                 svc_id = f"{namespace}:{service}" if namespace and service else (service or namespace)
                 try:
                     deps = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_dependencies",
-                                                {"params": {"service_id": svc_id}})
+                                                {"app_id": svc_id})
                     if deps and not (isinstance(deps, dict) and deps.get("text")):
                         data["service_dependencies"] = deps
                 except:
                     pass
                 try:
                     metrics = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_service_metrics",
-                                                   {"params": {"service_id": svc_id, "period": "1h"}})
+                                                   {"app_id": svc_id})
                     if metrics and not (isinstance(metrics, dict) and metrics.get("text")):
                         data["service_metrics"] = metrics
                 except:
@@ -2015,7 +2015,7 @@ data:
         if any(kw in prompt_lower for kw in ["metric", "alert", "anomaly", "monitoring", "health"]):
             try:
                 anomalies = await call_mcp_tool(OBSERVABILITY_MCP_URL, "coroot_get_recent_anomalies",
-                                                 {"params": {"hours": 24}})
+                                                 {"hours": 24})
                 if anomalies:
                     context["coroot_anomalies"] = anomalies
             except:
