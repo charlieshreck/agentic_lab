@@ -24,7 +24,7 @@ This alert fires when a Kubernetes Job has failed to complete successfully. Jobs
 
 ```bash
 # From alert labels
-# Example: job_name=claude-validator-daily-29474280, namespace=ai-platform
+# Example: job_name=my-batch-job-29474280, namespace=default
 
 kubectl get job <job-name> -n <namespace>
 kubectl describe job <job-name> -n <namespace>
@@ -160,7 +160,7 @@ kubectl delete job <job-name> -n <namespace>
 kubectl create job --from=cronjob/<cronjob-name> <new-job-name> -n <namespace>
 
 # Example
-kubectl create job --from=cronjob/claude-validator-daily claude-validator-manual -n ai-platform
+kubectl create job --from=cronjob/my-daily-job my-job-manual -n default
 ```
 
 ### Step 6: Verify next run succeeds
@@ -171,14 +171,6 @@ kubectl get jobs -n <namespace> -w
 ```
 
 ## Common Jobs in Kernow Homelab
-
-### claude-validator-daily
-- **Schedule:** Daily at 06:00 UTC
-- **Purpose:** Validates AI agent outputs from previous day
-- **Common Issues:**
-  - ConfigMap syntax errors
-  - Missing secrets
-  - Claude API rate limits
 
 ### configarr (media namespace)
 - **Schedule:** Daily

@@ -693,10 +693,10 @@ data:
 
         Args:
             event_type: Type of event (agent.chat.start, agent.chat.complete,
-                       agent.tool.call, agent.error, validation.complete,
-                       runbook.executed, feedback.received, pattern.detected, autonomy.upgrade)
+                       agent.tool.call, agent.error, pattern.detected,
+                       runbook.executed, autonomy.upgrade)
             description: Natural language description of the event
-            source_agent: Source (claude-agent, claude-validator, langgraph)
+            source_agent: Source (claude-agent, langgraph, pattern-detector)
             metadata: Additional context (task_id, model, latency_ms, tools_used)
             resolution: Outcome (completed, failed, pending)
 

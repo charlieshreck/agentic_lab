@@ -1,5 +1,5 @@
 #!/bin/bash
-# Verification script for Gemini + Claude Validator architecture deployment
+# Verification script for agentic platform deployment
 # Run this after ArgoCD has synced all applications
 
 set -e
@@ -39,7 +39,6 @@ check_service "LiteLLM" "http://litellm:4000" "/health" || true
 check_service "Qdrant" "http://qdrant:6333" "/" || true
 check_service "LangGraph" "http://langgraph:8000" "/health" || true
 check_service "Claude Agent" "http://claude-agent:8000" "/health" || true
-check_service "Claude Validator" "http://claude-validator:8000" "/health" || true
 
 # MCP Servers
 echo ""
@@ -88,7 +87,6 @@ echo ""
 echo "=== Secrets Check ==="
 echo "Verify these secrets exist in Kubernetes:"
 echo "  kubectl get secret -n ai-platform gemini-credentials"
-echo "  kubectl get secret -n ai-platform claude-validator-credentials"
 echo "  kubectl get secret -n ai-platform matrix-bot-credentials"
 
 echo ""

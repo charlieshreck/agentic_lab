@@ -20,7 +20,7 @@ This alert fires when a container has been stuck in a waiting state for more tha
 
 ```bash
 # From alert labels
-# Example: container=claude-validator, pod=claude-validator-55bd4dfcc8-9q9rf, reason=CreateContainerConfigError
+# Example: pod=some-app-55bd4dfcc8-9q9rf, reason=CreateContainerConfigError
 
 kubectl get pod <pod-name> -n <namespace>
 kubectl describe pod <pod-name> -n <namespace>
@@ -232,13 +232,6 @@ If container remains waiting:
 - `KubePodCrashLooping` - Container crashing
 
 ## Historical Incidents
-
-### January 2026 - claude-validator CreateContainerConfigError
-- **Affected:** claude-validator pod in prod cluster (orphaned)
-- **Reason:** `CreateContainerConfigError`
-- **Cause:** Missing `ANTHROPIC_API_KEY` in secret - pod was orphaned in wrong cluster
-- **Resolution:** Deleted orphaned deployment from prod cluster
-- **Lesson:** ArgoCD app destination must match where workload should run
 
 ### Common Pattern - Infisical Secret Sync Delay
 - **Symptom:** Pod starts before InfisicalSecret creates the actual Secret

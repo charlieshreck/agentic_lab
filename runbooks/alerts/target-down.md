@@ -225,7 +225,6 @@ mcp__monitoring__create_silence alertname=TargetDown comment="Investigating" dur
 | Job | Target | Expected |
 |-----|--------|----------|
 | claude-agent | 10.20.0.40:30200 | YES |
-| claude-validator | 10.20.0.40:30201 | YES |
 
 ## Escalation
 

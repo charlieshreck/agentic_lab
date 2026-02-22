@@ -24,7 +24,7 @@ This alert fires when a Kubernetes Deployment's rollout is not making progress. 
 
 ```bash
 # From alert labels, get deployment name and namespace
-# Example: deployment=claude-validator, namespace=ai-platform
+# Example: deployment=my-app, namespace=ai-platform
 
 # Check deployment status
 kubectl get deployment <deployment-name> -n <namespace> -o wide
@@ -271,14 +271,4 @@ If deployment remains stuck after troubleshooting:
 
 ## Historical Incidents
 
-### January 2026 - claude-validator YAML Syntax Error
-- **Cause:** Multiline Python f-strings in ConfigMap YAML had insufficient indentation
-- **Symptom:** ArgoCD showed "Unknown" status, MalformedYAMLError
-- **Resolution:** Fixed indentation to maintain 4-space minimum in literal blocks
-- **Lesson:** Always validate YAML changes with `kustomize build` before committing
-
-### January 2026 - claude-validator in Wrong Cluster
-- **Cause:** Orphaned deployment in prod cluster (should be agentic only)
-- **Symptom:** CreateContainerConfigError - missing ANTHROPIC_API_KEY secret
-- **Resolution:** Deleted orphaned deployment from prod cluster
-- **Lesson:** Verify ArgoCD app destination matches actual deployment location
+(No historical incidents documented)

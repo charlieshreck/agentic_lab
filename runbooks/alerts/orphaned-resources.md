@@ -61,10 +61,6 @@ If the resource exists in a different cluster than its ArgoCD app destination, i
 
 ### 1. Agentic Workloads in Prod Cluster
 
-**Examples:**
-- claude-validator deployment in prod
-- AI platform components in prod
-
 **Why it happens:**
 - ArgoCD apps point to agentic cluster (10.20.0.40)
 - But old resources exist in prod from previous deployments
@@ -202,12 +198,6 @@ metadata:
 If all checks pass, the resource can be safely deleted.
 
 ## Historical Incidents
-
-### January 2026 - claude-validator in Prod Cluster
-- **Issue:** claude-validator deployment existed in prod cluster
-- **Root Cause:** ArgoCD app targets agentic, but old deployment remained in prod
-- **Symptom:** CreateContainerConfigError (missing ANTHROPIC_API_KEY secret)
-- **Resolution:** Deleted deployment from prod cluster
 
 ### January 2026 - Monitoring Stack in Prod Cluster
 - **Issue:** Full kube-prometheus-stack in prod (prometheus, alertmanager, grafana, gatus)

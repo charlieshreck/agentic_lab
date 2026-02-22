@@ -7,7 +7,7 @@
 | **System** | Forever Learning System |
 | **Cluster** | Agentic (10.20.0.0/24) |
 | **Namespace** | ai-platform |
-| **Components** | claude-agent, claude-validator, knowledge-mcp, pattern-detector |
+| **Components** | claude-agent, knowledge-mcp, pattern-detector |
 | **Dependencies** | Qdrant, Redis |
 
 ---
@@ -21,7 +21,6 @@ export KUBECONFIG=/home/agentic_lab/infrastructure/terraform/talos-cluster/gener
 # Check all components
 echo "=== Claude Agent ===" && kubectl get pods -n ai-platform -l app=claude-agent
 echo "=== Knowledge MCP ===" && curl -s http://10.20.0.40:31084/health | jq
-echo "=== Claude Validator ===" && curl -s http://10.20.0.40:30201/health | jq
 echo "=== Pattern Detector ===" && kubectl get cronjob pattern-detector -n ai-platform
 echo "=== Qdrant ===" && kubectl get pods -n ai-platform -l app=qdrant
 echo "=== Event Count (7d) ===" && curl -s "http://10.20.0.40:31084/api/events?days=7&limit=1" | jq '.count'
@@ -47,27 +46,7 @@ echo "=== Event Count (7d) ===" && curl -s "http://10.20.0.40:31084/api/events?d
 - ConfigMap: `/home/agentic_lab/kubernetes/applications/claude-agent/configmap.yaml`
 - Deployment: `/home/agentic_lab/kubernetes/applications/claude-agent/deployment.yaml`
 
-### 2. claude-validator
-
-**Purpose**: Validates outputs, collects feedback, analyzes skill gaps
-
-| Resource | Value |
-|----------|-------|
-| Replicas | 1 |
-| Port | 8000 (HTTP) |
-| NodePort | 30201 |
-| Health | `/health` |
-| Metrics | `/metrics` |
-
-**Key Endpoints**:
-- `POST /feedback` - Submit feedback for an event
-- `POST /analyze-skill-gaps` - Run skill gap analysis
-- `POST /self-improve` - Trigger self-improvement
-
-**Key Files**:
-- ConfigMap: `/home/agentic_lab/kubernetes/applications/claude-validator/configmap.yaml`
-
-### 3. knowledge-mcp
+### 2. knowledge-mcp
 
 **Purpose**: MCP server providing access to Qdrant knowledge base
 
@@ -90,7 +69,7 @@ echo "=== Event Count (7d) ===" && curl -s "http://10.20.0.40:31084/api/events?d
 **Key Files**:
 - ConfigMap: `/home/agentic_lab/kubernetes/applications/mcp-servers/knowledge-mcp.yaml`
 
-### 4. pattern-detector
+### 3. pattern-detector
 
 **Purpose**: Daily CronJob analyzing patterns and suggesting improvements
 
@@ -121,33 +100,6 @@ curl "http://10.20.0.40:31084/api/events?max_score=0.5&limit=20" | jq
 
 # Pattern analysis events
 curl "http://10.20.0.40:31084/api/events?event_types=pattern.analysis&limit=5" | jq
-```
-
-### Submit Feedback
-
-```bash
-curl -X POST http://10.20.0.40:30201/feedback \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event_id": "EVENT_UUID_HERE",
-    "score": 0.85,
-    "feedback": "Response was accurate and helpful",
-    "outcome": "resolved"
-  }'
-```
-
-### Run Skill Gap Analysis
-
-```bash
-# Basic analysis
-curl -X POST http://10.20.0.40:30201/analyze-skill-gaps \
-  -H "Content-Type: application/json" \
-  -d '{"days": 7, "min_pattern_count": 3}'
-
-# Extended analysis (30 days)
-curl -X POST http://10.20.0.40:30201/analyze-skill-gaps \
-  -H "Content-Type: application/json" \
-  -d '{"days": 30, "min_pattern_count": 5, "similarity_threshold": 0.9}'
 ```
 
 ### Trigger Pattern Detector Manually
@@ -199,29 +151,6 @@ curl -X POST http://10.20.0.40:31084/api/log_event \
 1. If knowledge-mcp unhealthy: `kubectl rollout restart deployment/knowledge-mcp -n ai-platform`
 2. If claude-agent not logging: Check configmap for `log_to_knowledge()` function
 3. If Qdrant issue: Check Qdrant pod logs
-
-### Feedback Not Updating Events
-
-**Symptoms**: Score stays null after feedback submission
-
-**Diagnosis**:
-```bash
-# Test feedback endpoint
-curl -X POST http://10.20.0.40:30201/feedback \
-  -H "Content-Type: application/json" \
-  -d '{"event_id": "test-uuid", "score": 0.5, "feedback": "test", "outcome": "partial"}'
-
-# Check validator logs
-kubectl logs -n ai-platform -l app=claude-validator --tail=100 | grep -i feedback
-
-# Verify update_event in knowledge-mcp
-curl http://10.20.0.40:31084/health
-```
-
-**Resolution**:
-1. Check event_id exists in agent_events collection
-2. Restart validator: `kubectl rollout restart deployment/claude-validator -n ai-platform`
-3. Check knowledge-mcp for update_event errors
 
 ### Pattern Detector Not Running
 
@@ -296,9 +225,6 @@ curl http://10.20.0.40:31084/api/collections | jq
 |--------|------|-------------|
 | `claude_agent_tasks_total` | Counter | Total tasks by status/model |
 | `claude_agent_task_duration_seconds` | Histogram | Task execution time |
-| `claude_validator_feedback_total` | Counter | Feedback submissions |
-| `claude_validator_feedback_score` | Histogram | Score distribution |
-| `claude_validator_skill_gaps_detected_total` | Counter | Skill gaps found |
 
 ### Alerts
 
@@ -308,16 +234,6 @@ curl http://10.20.0.40:31084/api/collections | jq
   expr: time() - max(claude_agent_last_event_timestamp) > 86400
   annotations:
     summary: "No events logged in 24 hours"
-
-- alert: FeedbackLoopBroken
-  expr: increase(claude_validator_feedback_total[7d]) == 0
-  annotations:
-    summary: "No feedback in 7 days"
-
-- alert: LowFeedbackScore
-  expr: avg(claude_validator_feedback_score) < 0.6
-  annotations:
-    summary: "Average feedback below 60%"
 ```
 
 ### Dashboard
@@ -374,18 +290,15 @@ curl http://10.20.0.40:31084/api/collections/agent_events | jq
 ```bash
 # Restart all learning system components
 kubectl rollout restart deployment/claude-agent -n ai-platform
-kubectl rollout restart deployment/claude-validator -n ai-platform
 kubectl rollout restart deployment/knowledge-mcp -n ai-platform
 
 # Wait for rollout
 kubectl rollout status deployment/claude-agent -n ai-platform
-kubectl rollout status deployment/claude-validator -n ai-platform
 kubectl rollout status deployment/knowledge-mcp -n ai-platform
 
 # Verify health
 curl http://10.20.0.40:31084/health
 curl http://10.20.0.40:30200/health
-curl http://10.20.0.40:30201/health
 ```
 
 ### ConfigMap Update Deployment
@@ -395,9 +308,6 @@ After editing a ConfigMap:
 ```bash
 # knowledge-mcp
 kubectl rollout restart deployment/knowledge-mcp -n ai-platform
-
-# claude-validator
-kubectl rollout restart deployment/claude-validator -n ai-platform
 
 # claude-agent
 kubectl rollout restart deployment/claude-agent -n ai-platform
@@ -422,7 +332,6 @@ kubectl rollout restart deployment/claude-agent -n ai-platform
 - Architecture: `/home/agentic_lab/docs/FOREVER-LEARNING-SYSTEM.md`
 - Plan: `/root/.claude/plans/steady-foraging-kite.md`
 - knowledge-mcp: `/home/agentic_lab/kubernetes/applications/mcp-servers/knowledge-mcp.yaml`
-- claude-validator: `/home/agentic_lab/kubernetes/applications/claude-validator/configmap.yaml`
 
 ---
 
