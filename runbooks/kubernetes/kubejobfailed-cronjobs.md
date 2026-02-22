@@ -170,6 +170,30 @@ To prevent future occurrences:
 
 ---
 
+## Resolution for Incident #146
+
+**Job**: `apps/matter-hub-health-check-29529770`, `29529780`, `29529790`
+**Cause**:
+- `activeDeadlineSeconds: 60` too short for image pull + health check operations
+- No retry logic for flaky TCP connections
+- `imagePullPolicy: Always` causes busybox to be pulled on every run (~10-15s)
+- `nc -z -w5` timeout insufficient if Matter Server under load
+
+**Fix**:
+- Increased `activeDeadlineSeconds` from 60s to 120s (2 minutes)
+- Added `imagePullPolicy: IfNotPresent` to avoid re-pulling busybox
+- Increased netcat timeout from 5s to 10s
+- Added retry logic (3 attempts with 2-second backoff) for Matter Server TCP check
+- Increased `backoffLimit` from 1 to 2 for more resilience
+
+**Commit**: `prod_homelab/68431b9` - "fix: improve matter-hub health check job timeout and reliability"
+
+**Pattern**: Health check scripts running every 10 minutes need generous timeouts and retry logic. Even with SLA targets, brief service restarts or network hiccups can cause transient failures.
+
+**Next occurrence**: Next CronJob run (every 10 minutes) will use new 2-minute deadline + retry logic
+
+---
+
 ## Related Links
 - [Kubernetes Job Timeout](https://kubernetes.io/docs/concepts/workloads/controllers/job/#job-termination-and-cleanup)
 - [Image Pull Policy](https://kubernetes.io/docs/concepts/containers/images/#image-pull-policy)
