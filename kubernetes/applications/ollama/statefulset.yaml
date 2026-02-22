@@ -51,7 +51,7 @@ spec:
             memory: "2Gi"
       containers:
       - name: ollama
-        image: ollama/ollama:0.5.4
+        image: ollama/ollama:0.5.4-rocm
         ports:
         - containerPort: 11434
           name: http
@@ -64,17 +64,25 @@ spec:
         - name: OLLAMA_KEEP_ALIVE
           value: "5m"
         - name: OLLAMA_NUM_PARALLEL
-          value: "2"
+          value: "4"
+        - name: HSA_OVERRIDE_GFX_VERSION
+          value: "10.3.0"
+        - name: OLLAMA_GPU_LAYERS
+          value: "999"
+        securityContext:
+          privileged: true
         resources:
           requests:
-            cpu: "250m"
-            memory: "4Gi"
-          limits:
             cpu: "2000m"
             memory: "8Gi"
+          limits:
+            cpu: "8000m"
+            memory: "16Gi"
         volumeMounts:
         - name: ollama-models
           mountPath: /root/.ollama
+        - name: dri
+          mountPath: /dev/dri
         readinessProbe:
           httpGet:
             path: /
@@ -89,6 +97,11 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
+      volumes:
+      - name: dri
+        hostPath:
+          path: /dev/dri
+          type: Directory
   volumeClaimTemplates:
   - metadata:
       name: ollama-models
