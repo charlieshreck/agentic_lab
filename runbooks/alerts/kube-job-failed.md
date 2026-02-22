@@ -244,6 +244,13 @@ If jobs repeatedly fail:
 
 ## Historical Incidents
 
+### February 2026 - claude-validator-daily Orphaned Resource
+- **Job:** claude-validator-daily-29529000
+- **Cluster:** production (prod)
+- **Cause:** CronJob and Service existed in cluster but not in git. Service had no backing pods (missing Deployment). Violates GitOps principle that all resources must be defined in IaC.
+- **Resolution:** Deleted orphaned CronJob and Service from cluster. No git-tracked manifests existed for this resource set.
+- **Lesson:** Resources created outside git/ArgoCD will eventually fail. GitOps requires all persistent resources to be defined in version control. Use ArgoCD Application resources for any long-running workloads.
+
 ### February 2026 - huntarr-stop Image Pull Failure
 - **Job:** huntarr-stop-29526240
 - **Cause:** CronJob used `bitnami/kubectl:1.31` which doesn't exist (tag not found on Docker Hub)
