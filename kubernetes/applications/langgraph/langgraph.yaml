@@ -375,14 +375,23 @@ data:
         }
 
     def normalize_pulse(body: dict) -> dict:
-        """Normalize Pulse agent webhook payload."""
+        """Normalize Pulse webhook payload.
+        Pulse uses: id, level, type, resourceName, resourceId, resourceType, node, message, value, threshold.
+        """
+        alert_type = body.get("type", "check")
+        resource_name = body.get("resourceName") or body.get("resourceId", "unknown")
+        alert_name = f"{alert_type} - {resource_name}" if resource_name else alert_type
         return {
             "source": "pulse",
-            "alert_name": body.get("check_name") or body.get("name") or "Pulse Check",
-            "severity": body.get("severity") or "warning",
+            "alert_name": alert_name,
+            "severity": body.get("level") or body.get("severity") or "warning",
             "description": body.get("message") or body.get("description") or "",
-            "fingerprint": body.get("fingerprint") or f"pulse-{body.get('check_name', 'unknown')}",
-            "labels": body.get("labels", {}),
+            "fingerprint": body.get("id") or f"pulse-{alert_name}",
+            "labels": {
+                "resource_type": body.get("resourceType"),
+                "node": body.get("node"),
+                "resource_id": body.get("resourceId"),
+            },
             "raw_payload": body,
         }
 
