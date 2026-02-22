@@ -1,0 +1,1535 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-validator-code
+  namespace: ai-platform
+  labels:
+    app: claude-validator
+data:
+  main.py: |
+    #!/usr/bin/env python3
+    """
+    Claude Validator Service - Enhanced
+
+    Full-capability validator that uses Claude CLI tools to:
+    - Read/write files directly
+    - Query knowledge base for context
+    - Fix issues automatically
+    - Generate and test skills/MCPs
+    - Self-correct and verify changes
+
+    Uses Max subscription via claude-agent (no API costs).
+    """
+    import os
+    import json
+    import logging
+    from datetime import datetime, timedelta
+    from typing import List, Optional, Dict, Any
+    from uuid import uuid4
+    from pathlib import Path
+    import httpx
+    from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
+    from pydantic import BaseModel
+    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
+    # ============================================================================
+    # Prometheus Metrics (Forever Learning System - Phase 4)
+    # ============================================================================
+
+    VALIDATIONS_TOTAL = Counter(
+        'claude_validator_validations_total',
+        'Total validations performed',
+        ['target_type', 'approved']
+    )
+    FEEDBACK_RECEIVED = Counter(
+        'claude_validator_feedback_total',
+        'Feedback submissions received',
+        ['outcome']
+    )
+    FEEDBACK_SCORE = Histogram(
+        'claude_validator_feedback_score',
+        'Distribution of feedback scores',
+        buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    )
+    AUTO_FIXES_TOTAL = Counter(
+        'claude_validator_auto_fixes_total',
+        'Automatic fixes applied by validator'
+    )
+    SKILL_GAPS_DETECTED = Counter(
+        'claude_validator_skill_gaps_detected_total',
+        'Skill gaps identified for potential skill generation',
+        ['gap_type']  # repeated_query, multi_step_operation, capability_gap
+    )
+    SKILLS_GENERATED = Counter(
+        'claude_validator_skills_generated_total',
+        'Skills generated from detected patterns'
+    )
+    MCPS_SUGGESTED = Counter(
+        'claude_validator_mcps_suggested_total',
+        'MCP servers suggested from capability gaps'
+    )
+    SKILLS_APPROVED = Counter(
+        'claude_validator_skills_approved_total',
+        'Skills approved and deployed'
+    )
+    SKILLS_REJECTED = Counter(
+        'claude_validator_skills_rejected_total',
+        'Skills rejected during review'
+    )
+
+    # In-memory pending skills queue (Phase 5.2 Enhancement)
+    # Format: {skill_id: {name, path, description, created_at, pattern_key, status}}
+    PENDING_SKILLS: Dict[str, dict] = {}
+
+    # ============================================================================
+    # Configuration
+    # ============================================================================
+
+    CLAUDE_AGENT_URL = os.environ.get("CLAUDE_AGENT_URL", "http://claude-agent:8000")
+    KNOWLEDGE_MCP_URL = os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000")
+    MATRIX_BOT_URL = os.environ.get("MATRIX_BOT_URL", "http://matrix-bot:8000")
+    LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "24"))
+
+    # Workspace paths (mounted volumes)
+    WORKSPACE = Path("/workspace")
+    RUNBOOKS_DIR = WORKSPACE / "runbooks"
+    SKILLS_DIR = WORKSPACE / "skills"
+    MCP_DIR = WORKSPACE / "mcp-servers"
+
+    # Tool sets for different operations
+    TOOLS_VALIDATION = [
+        "Read", "Write", "Glob", "Grep",
+        "mcp__knowledge__search_runbooks",
+        "mcp__knowledge__search_documentation",
+        "mcp__knowledge__get_runbook",
+        "mcp__infrastructure__kubectl_get_pods",
+        "mcp__infrastructure__kubectl_get_deployments",
+    ]
+
+    TOOLS_GENERATION = [
+        "Read", "Write", "Glob", "Grep", "Bash",
+        "mcp__knowledge__search_runbooks",
+        "mcp__knowledge__search_documentation",
+        "mcp__knowledge__add_runbook",
+        "WebSearch", "WebFetch",
+    ]
+
+    TOOLS_FULL = [
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash",
+        "mcp__knowledge__search_runbooks",
+        "mcp__knowledge__search_documentation",
+        "mcp__knowledge__search_entities",
+        "mcp__knowledge__get_runbook",
+        "mcp__knowledge__add_runbook",
+        "mcp__knowledge__add_decision",
+        "mcp__infrastructure__kubectl_get_pods",
+        "mcp__infrastructure__kubectl_logs",
+        "mcp__infrastructure__kubectl_describe",
+        "WebSearch", "WebFetch",
+    ]
+
+    app = FastAPI(title="Claude Validator (Enhanced)", version="2.0.0")
+
+    # ============================================================================
+    # Models
+    # ============================================================================
+
+    class ValidationRequest(BaseModel):
+        target_type: str  # runbook, decision, code, mcp
+        target_id: str
+        target_path: Optional[str] = None  # File path if available
+        auto_fix: bool = True  # Auto-fix issues if found
+        priority: str = "normal"
+
+    class ValidationResult(BaseModel):
+        id: str
+        target_type: str
+        target_id: str
+        approved: bool
+        confidence: float
+        issues_found: List[str]
+        issues_fixed: List[str]
+        suggestions: List[str]
+        changes_made: List[str]
+        validated_at: str
+        model_used: str
+
+    class SkillGap(BaseModel):
+        description: str
+        triggering_patterns: List[str]
+        type: str  # repeated_query, multi_step_operation, new_service, gemini_request
+        output_path: Optional[str] = None  # Where to write the skill
+
+    class MCPGap(BaseModel):
+        description: str
+        tools_needed: List[str]
+        triggering_alerts: List[str]
+        service_name: str  # Name for the new MCP
+
+    class ContextUpdateRequest(BaseModel):
+        include_recent_decisions: bool = True
+        include_pending_validations: bool = True
+        include_system_health: bool = True
+
+    class SkillGapAnalysisRequest(BaseModel):
+        """Request for skill gap analysis (Phase 5.2)."""
+        days: int = 7              # Look back period
+        min_pattern_count: int = 3  # Minimum occurrences to suggest skill
+        similarity_threshold: float = 0.85  # Embedding similarity threshold
+        auto_generate: bool = False  # Auto-generate skills for top candidates
+
+    class SkillGapAnalysisResult(BaseModel):
+        """Result of skill gap analysis."""
+        id: str
+        analyzed_at: str
+        events_analyzed: int
+        patterns_found: List[dict]
+        capability_gaps: List[dict]
+        skills_suggested: List[dict]
+        skills_generated: List[dict]
+        mcps_suggested: List[dict]
+
+    class SkillCandidate(BaseModel):
+        """A candidate for skill generation."""
+        pattern_key: str
+        occurrence_count: int
+        representative_prompt: str
+        avg_score: Optional[float]
+        suggested_skill_name: str
+        suggested_description: str
+        priority: str  # high, medium, low
+
+    class FeedbackRequest(BaseModel):
+        """Request to submit feedback on a previous execution (Forever Learning System)."""
+        event_id: str           # ID from agent_events
+        score: float            # 0.0-1.0 (0=failed, 1=perfect)
+        feedback: str           # Human feedback text
+        outcome: str            # resolved, partial, failed, escalated
+
+    class FeedbackResponse(BaseModel):
+        status: str
+        event_id: str
+        message: str
+
+    # ============================================================================
+    # Claude Agent Integration
+    # ============================================================================
+
+    async def call_claude(
+        prompt: str,
+        tools: List[str] = None,
+        model: str = "opus",
+        timeout: int = 300,
+        async_mode: bool = False,
+        priority: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Call Claude Agent with full tool access.
+
+        Returns dict with:
+        - success: bool
+        - result: str (Claude's response)
+        - task_id: str (if async_mode)
+        - error: str (if failed)
+        """
+        async with httpx.AsyncClient(timeout=float(timeout + 30)) as client:
+            try:
+                payload = {
+                    "prompt": prompt,
+                    "allowed_tools": tools or TOOLS_VALIDATION,
+                    "model": model,
+                    "working_directory": str(WORKSPACE),
+                    "timeout": timeout,
+                    "async_mode": async_mode,
+                }
+
+                if async_mode:
+                    # Use priority queue for async tasks
+                    response = await client.post(
+                        f"{CLAUDE_AGENT_URL}/queue/submit",
+                        json={**payload, "priority": priority}
+                    )
+                else:
+                    response = await client.post(
+                        f"{CLAUDE_AGENT_URL}/agent/run",
+                        json=payload
+                    )
+
+                response.raise_for_status()
+                return response.json()
+
+            except httpx.TimeoutException:
+                logger.error(f"Claude agent timed out after {timeout}s")
+                return {"success": False, "error": f"Timeout after {timeout}s"}
+            except Exception as e:
+                logger.error(f"Claude agent call failed: {e}")
+                return {"success": False, "error": str(e)}
+
+    async def query_knowledge(query: str, collection: str = "runbooks", limit: int = 5) -> List[dict]:
+        """Query knowledge-mcp for context."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                if collection == "runbooks":
+                    response = await client.post(
+                        f"{KNOWLEDGE_MCP_URL}/tools/search_runbooks",
+                        json={"query": query, "limit": limit}
+                    )
+                elif collection == "documentation":
+                    response = await client.post(
+                        f"{KNOWLEDGE_MCP_URL}/tools/search_documentation",
+                        json={"query": query, "limit": limit}
+                    )
+                else:
+                    response = await client.post(
+                        f"{KNOWLEDGE_MCP_URL}/tools/search_all",
+                        json={"query": query, "limit": limit}
+                    )
+                response.raise_for_status()
+                return response.json().get("results", [])
+            except Exception as e:
+                logger.error(f"Knowledge query failed: {e}")
+                return []
+
+    async def notify_matrix(message: str, room: str = "#claude-validator"):
+        """Send notification to Matrix room."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                await client.post(
+                    f"{MATRIX_BOT_URL}/notify",
+                    json={"message": message, "room": room}
+                )
+            except Exception as e:
+                logger.warning(f"Matrix notification failed: {e}")
+
+    async def store_validation_result(result: ValidationResult):
+        """Store validation result in knowledge base."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/tools/log_event",
+                    json={
+                        "event_type": "validation",
+                        "description": f"Validated {result.target_type}: {result.target_id}",
+                        "metadata": result.model_dump(),
+                        "resolution": "approved" if result.approved else "needs_review"
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to store validation result: {e}")
+
+    # ============================================================================
+    # Skill Gap Detection Helpers (Phase 5.2 - Forever Learning System)
+    # ============================================================================
+
+    async def get_recent_events(days: int = 7, event_types: List[str] = None) -> List[dict]:
+        """Fetch recent events from knowledge-mcp for pattern analysis."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                params = {"days": days}
+                if event_types:
+                    params["event_types"] = ",".join(event_types)
+                response = await client.get(
+                    f"{KNOWLEDGE_MCP_URL}/api/events",
+                    params=params
+                )
+                if response.status_code == 200:
+                    return response.json().get("events", [])
+                logger.warning(f"Failed to fetch events: {response.status_code}")
+                return []
+            except Exception as e:
+                logger.error(f"Error fetching recent events: {e}")
+                return []
+
+    async def find_similar_prompts(threshold: float = 0.85, min_count: int = 3) -> List[dict]:
+        """Find groups of similar prompts that could become skills."""
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                response = await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/find_similar_prompts",
+                    json={"threshold": threshold, "min_count": min_count}
+                )
+                if response.status_code == 200:
+                    return response.json().get("groups", [])
+                logger.warning(f"Similar prompts query failed: {response.status_code}")
+                return []
+            except Exception as e:
+                logger.error(f"Error finding similar prompts: {e}")
+                return []
+
+    async def get_failed_events(days: int = 7) -> List[dict]:
+        """Get events that resulted in failures or errors."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.get(
+                    f"{KNOWLEDGE_MCP_URL}/api/events",
+                    params={
+                        "days": days,
+                        "event_types": "agent.error,task.failed",
+                        "resolution": "failed,error"
+                    }
+                )
+                if response.status_code == 200:
+                    return response.json().get("events", [])
+                return []
+            except Exception as e:
+                logger.error(f"Error fetching failed events: {e}")
+                return []
+
+    async def get_low_score_events(days: int = 30, max_score: float = 0.5) -> List[dict]:
+        """Get events that received low feedback scores."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.get(
+                    f"{KNOWLEDGE_MCP_URL}/api/events",
+                    params={
+                        "days": days,
+                        "max_score": max_score
+                    }
+                )
+                if response.status_code == 200:
+                    return response.json().get("events", [])
+                return []
+            except Exception as e:
+                logger.error(f"Error fetching low score events: {e}")
+                return []
+
+    def analyze_prompt_patterns(events: List[dict]) -> List[dict]:
+        """
+        Analyze events to find repeated prompt patterns.
+
+        Groups events by semantic similarity and identifies candidates for skills.
+        Returns list of pattern groups with counts and representative prompts.
+        """
+        from collections import defaultdict
+        import hashlib
+
+        # Simple pattern extraction: group by prompt prefix
+        patterns = defaultdict(list)
+        for event in events:
+            desc = event.get("description", "")
+            metadata = event.get("metadata", {})
+            prompt = metadata.get("prompt", desc)[:200]
+
+            # Create a normalized key for grouping
+            # (In production, use embedding similarity)
+            key = hashlib.md5(prompt.lower()[:100].encode()).hexdigest()[:8]
+            patterns[key].append({
+                "event_id": event.get("id"),
+                "prompt": prompt,
+                "event_type": event.get("event_type"),
+                "resolution": event.get("resolution"),
+                "score": event.get("score")
+            })
+
+        # Filter to patterns with multiple occurrences
+        result = []
+        for key, group in patterns.items():
+            if len(group) >= 2:
+                # Calculate average score if available
+                scores = [e["score"] for e in group if e["score"] is not None]
+                avg_score = sum(scores) / len(scores) if scores else None
+
+                result.append({
+                    "pattern_key": key,
+                    "count": len(group),
+                    "representative_prompt": group[0]["prompt"],
+                    "avg_score": avg_score,
+                    "event_ids": [e["event_id"] for e in group[:10]]
+                })
+
+        return sorted(result, key=lambda x: x["count"], reverse=True)
+
+    def identify_capability_gaps(failed_events: List[dict]) -> List[dict]:
+        """
+        Analyze failed events to identify missing capabilities.
+
+        Returns list of potential capability gaps with suggestions.
+        """
+        gaps = []
+
+        # Group failures by type/pattern
+        from collections import Counter
+        error_patterns = Counter()
+
+        for event in failed_events:
+            desc = event.get("description", "")
+            metadata = event.get("metadata", {})
+            error = metadata.get("error", desc)
+
+            # Extract key phrases that indicate capability gaps
+            if "not found" in error.lower() or "missing" in error.lower():
+                error_patterns["missing_resource"] += 1
+            elif "permission" in error.lower() or "denied" in error.lower():
+                error_patterns["permission_issue"] += 1
+            elif "timeout" in error.lower():
+                error_patterns["timeout_issue"] += 1
+            elif "unknown tool" in error.lower() or "no such tool" in error.lower():
+                error_patterns["missing_tool"] += 1
+            else:
+                error_patterns["other"] += 1
+
+        for pattern, count in error_patterns.most_common(10):
+            if count >= 2:
+                gaps.append({
+                    "gap_type": pattern,
+                    "occurrence_count": count,
+                    "suggested_action": get_gap_suggestion(pattern)
+                })
+
+        return gaps
+
+    def get_gap_suggestion(gap_type: str) -> str:
+        """Get suggested action for a capability gap type."""
+        suggestions = {
+            "missing_resource": "Create runbook for resource provisioning",
+            "permission_issue": "Review RBAC and create permission escalation runbook",
+            "timeout_issue": "Investigate slow operations, consider async handling",
+            "missing_tool": "Generate new MCP server for missing capability",
+            "other": "Manual review required to identify pattern"
+        }
+        return suggestions.get(gap_type, "Manual review required")
+
+    # ============================================================================
+    # Endpoints
+    # ============================================================================
+
+    @app.get("/health")
+    async def health():
+        """Health check with dependency status."""
+        claude_ok = False
+        knowledge_ok = False
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                r = await client.get(f"{CLAUDE_AGENT_URL}/health")
+                claude_ok = r.status_code == 200
+            except:
+                pass
+            try:
+                r = await client.get(f"{KNOWLEDGE_MCP_URL}/health")
+                knowledge_ok = r.status_code == 200
+            except:
+                pass
+
+        return {
+            "status": "healthy" if claude_ok else "degraded",
+            "service": "claude-validator",
+            "version": "2.0.0",
+            "dependencies": {
+                "claude_agent": claude_ok,
+                "knowledge_mcp": knowledge_ok
+            }
+        }
+
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus metrics endpoint."""
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    @app.post("/feedback", response_model=FeedbackResponse)
+    async def submit_feedback(request: FeedbackRequest, background_tasks: BackgroundTasks):
+        """
+        Submit feedback for a previous execution (Forever Learning System).
+
+        This allows humans to:
+        - Rate how well a task was completed (0.0-1.0)
+        - Provide text feedback on what worked or didn't
+        - Mark the final outcome (resolved, partial, failed, escalated)
+
+        Feedback updates the event in Qdrant and contributes to learning metrics.
+        """
+        logger.info(f"Received feedback for event {request.event_id}: score={request.score}, outcome={request.outcome}")
+
+        # Validate score range
+        if not 0.0 <= request.score <= 1.0:
+            raise HTTPException(status_code=400, detail="Score must be between 0.0 and 1.0")
+
+        # Validate outcome
+        valid_outcomes = {"resolved", "partial", "failed", "escalated"}
+        if request.outcome not in valid_outcomes:
+            raise HTTPException(status_code=400, detail=f"Outcome must be one of: {valid_outcomes}")
+
+        # Update event in knowledge-mcp
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/update_event",
+                    json={
+                        "event_id": request.event_id,
+                        "score": request.score,
+                        "feedback": request.feedback,
+                        "resolution": request.outcome
+                    }
+                )
+
+                if response.status_code != 200:
+                    logger.error(f"Failed to update event: {response.text}")
+                    raise HTTPException(status_code=500, detail="Failed to update event in knowledge base")
+
+                result = response.json()
+                if result.get("status") != "ok":
+                    raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+
+            except httpx.RequestError as e:
+                logger.error(f"Request to knowledge-mcp failed: {e}")
+                raise HTTPException(status_code=502, detail="Could not reach knowledge service")
+
+        # Record Prometheus metrics
+        FEEDBACK_RECEIVED.labels(outcome=request.outcome).inc()
+        FEEDBACK_SCORE.observe(request.score)
+
+        # Log a feedback.received event
+        background_tasks.add_task(
+            log_feedback_event,
+            request.event_id,
+            request.score,
+            request.outcome
+        )
+
+        # Notify Matrix for low scores (potential learning opportunity)
+        if request.score < 0.5:
+            background_tasks.add_task(
+                notify_matrix,
+                f"⚠️ Low feedback score ({request.score:.1f}) for event `{request.event_id}`\n"
+                f"Outcome: {request.outcome}\n"
+                f"Feedback: {request.feedback[:200] if request.feedback else 'None'}"
+            )
+
+        return FeedbackResponse(
+            status="recorded",
+            event_id=request.event_id,
+            message=f"Feedback recorded: score={request.score}, outcome={request.outcome}"
+        )
+
+    async def log_feedback_event(event_id: str, score: float, outcome: str):
+        """Log a feedback.received event to the knowledge base."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/log_event",
+                    json={
+                        "event_type": "feedback.received",
+                        "description": f"Feedback received for event {event_id}: score={score}, outcome={outcome}",
+                        "source_agent": "claude-validator",
+                        "metadata": {
+                            "original_event_id": event_id,
+                            "score": score,
+                            "outcome": outcome
+                        },
+                        "resolution": outcome
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"Failed to log feedback event: {e}")
+
+    @app.post("/validate", response_model=ValidationResult)
+    async def validate_item(request: ValidationRequest, background_tasks: BackgroundTasks):
+        """
+        Validate a runbook, decision, or code change.
+
+        Claude will:
+        1. Read the actual file/content
+        2. Query knowledge base for similar items
+        3. Check for issues (logic, security, completeness)
+        4. Auto-fix if enabled and issues are minor
+        5. Return detailed validation report
+        """
+        validation_id = f"val-{uuid4().hex[:8]}"
+        logger.info(f"[{validation_id}] Starting validation of {request.target_type}: {request.target_id}")
+
+        # Build context-aware prompt based on target type
+        if request.target_type == "runbook":
+            prompt = f"""You are validating a runbook. Your task:
+
+    1. First, search for similar runbooks in the knowledge base:
+    - Use mcp__knowledge__search_runbooks with query "{request.target_id}"
+    - Note any patterns or standards from similar runbooks
+
+    2. Read the runbook file:
+    - Path: {request.target_path or f'/workspace/runbooks/{request.target_id}.md'}
+    - If file doesn't exist, check /workspace/runbooks/ for similar names
+
+    3. Validate the runbook for:
+    - Logic correctness: Will the diagnosis steps catch the right cases?
+    - Completeness: Are all steps documented? Is there a rollback procedure?
+    - Security: Are there any dangerous commands without safeguards?
+    - Clarity: Can someone unfamiliar execute this successfully?
+    - kubectl/CLI commands: Are they syntactically correct?
+
+    4. {"If you find issues, FIX THEM directly in the file." if request.auto_fix else "List issues but do not modify the file."}
+
+    5. Return a JSON summary:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": ["list of issues found"],
+    "issues_fixed": ["list of issues you fixed"],
+    "suggestions": ["recommendations for improvement"],
+    "changes_made": ["list of changes made to the file"]
+    }}
+    ```
+
+    Be thorough but practical. Minor style issues don't need fixing."""
+
+        elif request.target_type == "decision":
+            prompt = f"""You are auditing an architectural decision. Your task:
+
+    1. Search for related decisions and context:
+    - Use mcp__knowledge__search_documentation with query "{request.target_id}"
+    - Look for prior decisions on similar topics
+
+    2. Read the decision document:
+    - Path: {request.target_path or f'/workspace/decisions/{request.target_id}.md'}
+
+    3. Evaluate the decision:
+    - Is the rationale sound?
+    - Were alternatives considered?
+    - Are there risks not addressed?
+    - Does it conflict with existing architecture?
+
+    4. Return a JSON summary:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": ["concerns with the decision"],
+    "issues_fixed": [],
+    "suggestions": ["recommendations"],
+    "changes_made": []
+    }}
+    ```"""
+
+        elif request.target_type == "mcp":
+            prompt = f"""You are reviewing an MCP server implementation. Your task:
+
+    1. Read the MCP server code:
+    - Path: {request.target_path or f'/workspace/mcp-servers/{request.target_id}/src/main.py'}
+
+    2. Validate:
+    - Does it follow FastMCP patterns?
+    - Are there security issues (command injection, path traversal)?
+    - Is error handling adequate?
+    - Does it have a /health endpoint?
+    - Are tools properly typed with Pydantic models?
+
+    3. {"Fix any issues directly in the file." if request.auto_fix else "List issues without modifying."}
+
+    4. Test syntax by running: python -m py_compile <file>
+
+    5. Return JSON summary:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": ["issues found"],
+    "issues_fixed": ["issues fixed"],
+    "suggestions": ["improvements"],
+    "changes_made": ["changes made"]
+    }}
+    ```"""
+
+        else:
+            prompt = f"""Review and validate this item:
+    - Type: {request.target_type}
+    - ID: {request.target_id}
+    - Path: {request.target_path or 'unknown'}
+
+    Read the content, check for issues, and return JSON:
+    ```json
+    {{
+    "approved": true/false,
+    "confidence": 0.0-1.0,
+    "issues_found": [],
+    "issues_fixed": [],
+    "suggestions": [],
+    "changes_made": []
+    }}
+    ```"""
+
+        # Call Claude with appropriate tools
+        tools = TOOLS_FULL if request.auto_fix else TOOLS_VALIDATION
+        response = await call_claude(prompt, tools=tools, model="opus", timeout=300)
+
+        # Parse response
+        if not response.get("success"):
+            logger.error(f"[{validation_id}] Claude call failed: {response.get('error')}")
+            raise HTTPException(status_code=500, detail=response.get("error", "Validation failed"))
+
+        result_text = response.get("result", "")
+
+        # Extract JSON from response
+        try:
+            # Find JSON block in response
+            import re
+            json_match = re.search(r'```json\s*(.*?)\s*```', result_text, re.DOTALL)
+            if json_match:
+                result_data = json.loads(json_match.group(1))
+            else:
+                # Try parsing the whole response as JSON
+                result_data = json.loads(result_text)
+        except json.JSONDecodeError:
+            logger.warning(f"[{validation_id}] Could not parse JSON from response, using defaults")
+            result_data = {
+                "approved": False,
+                "confidence": 0.5,
+                "issues_found": ["Could not parse validation response"],
+                "issues_fixed": [],
+                "suggestions": [result_text[:500]],
+                "changes_made": []
+            }
+
+        result = ValidationResult(
+            id=validation_id,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            approved=result_data.get("approved", False),
+            confidence=result_data.get("confidence", 0.5),
+            issues_found=result_data.get("issues_found", []),
+            issues_fixed=result_data.get("issues_fixed", []),
+            suggestions=result_data.get("suggestions", []),
+            changes_made=result_data.get("changes_made", []),
+            validated_at=datetime.utcnow().isoformat(),
+            model_used="opus"
+        )
+
+        # Store result and notify
+        background_tasks.add_task(store_validation_result, result)
+
+        if result.issues_found and not result.approved:
+            background_tasks.add_task(
+                notify_matrix,
+                f"⚠️ Validation issues in {request.target_type} `{request.target_id}`:\n" +
+                "\n".join(f"- {issue}" for issue in result.issues_found[:5])
+            )
+        elif result.changes_made:
+            background_tasks.add_task(
+                notify_matrix,
+                f"✅ Auto-fixed {len(result.changes_made)} issues in {request.target_type} `{request.target_id}`"
+            )
+
+        logger.info(f"[{validation_id}] Completed: approved={result.approved}, issues={len(result.issues_found)}, fixed={len(result.issues_fixed)}")
+        return result
+
+    @app.post("/generate-skill")
+    async def generate_skill(gap: SkillGap, background_tasks: BackgroundTasks):
+        """
+        Generate a Claude Code skill from a capability gap.
+
+        Claude will:
+        1. Research similar skills and patterns
+        2. Generate the skill markdown
+        3. Write it to the skills directory
+        4. Validate the syntax
+        """
+        logger.info(f"Generating skill for: {gap.description}")
+
+        # Determine output path
+        skill_name = gap.description.lower().replace(" ", "-")[:30]
+        output_path = gap.output_path or f"/workspace/skills/{skill_name}.md"
+
+        prompt = f"""Generate a Claude Code skill for this capability gap:
+
+    **Description**: {gap.description}
+    **Triggering patterns**: {', '.join(gap.triggering_patterns)}
+    **Type**: {gap.type}
+
+    Your task:
+    1. Search for similar skills or documentation:
+    - Use mcp__knowledge__search_documentation with relevant queries
+    - Look for patterns in existing skills
+
+    2. Generate a comprehensive skill markdown file with:
+    - Clear title and description
+    - Step-by-step instructions
+    - Example usage
+    - Available tools/MCPs to use
+    - Error handling guidance
+
+    3. Write the skill to: {output_path}
+    - Use the Write tool to create the file
+    - Follow Claude Code skill format
+
+    4. Verify the file was created correctly by reading it back
+
+    5. Return JSON summary:
+    ```json
+    {{
+    "status": "generated",
+    "skill_name": "name",
+    "output_path": "{output_path}",
+    "description": "brief description",
+    "tools_used": ["list of tools referenced in skill"]
+    }}
+    ```"""
+
+        response = await call_claude(prompt, tools=TOOLS_GENERATION, model="opus", timeout=180)
+
+        if not response.get("success"):
+            return {"status": "failed", "error": response.get("error")}
+
+        result_text = response.get("result", "")
+
+        # Queue skill for human approval (Phase 5.2 Enhancement)
+        skill_id = f"skill-{uuid4().hex[:8]}"
+        PENDING_SKILLS[skill_id] = {
+            "name": skill_name,
+            "description": gap.description[:200],
+            "path": output_path,
+            "pattern_key": gap.triggering_patterns[0][:50] if gap.triggering_patterns else None,
+            "created_at": datetime.utcnow().isoformat(),
+            "status": "pending",
+            "type": gap.type
+        }
+
+        # Notify about generated skill awaiting approval
+        background_tasks.add_task(
+            notify_matrix,
+            f"🔧 Skill generated and queued for approval:\n"
+            f"- Name: `{skill_name}`\n"
+            f"- ID: `{skill_id}`\n"
+            f"- Path: {output_path}\n"
+            f"Approve: POST /skills/approve/{skill_id}\n"
+            f"Reject: POST /skills/reject/{skill_id}"
+        )
+
+        return {
+            "status": "generated",
+            "skill_id": skill_id,
+            "skill_name": skill_name,
+            "output_path": output_path,
+            "approval_status": "pending",
+            "response_preview": result_text[:500]
+        }
+
+    @app.post("/generate-mcp")
+    async def generate_mcp(gap: MCPGap, background_tasks: BackgroundTasks):
+        """
+        Generate a new MCP server from a capability gap.
+
+        Claude will:
+        1. Research similar MCPs and patterns
+        2. Generate the MCP server code
+        3. Write all necessary files
+        4. Validate syntax
+        """
+        logger.info(f"Generating MCP for: {gap.description}")
+
+        mcp_dir = f"/workspace/mcp-servers/{gap.service_name}"
+
+        prompt = f"""Generate a new MCP server for this capability gap:
+
+    **Description**: {gap.description}
+    **Required tools**: {', '.join(gap.tools_needed)}
+    **Triggering alerts**: {', '.join(gap.triggering_alerts)}
+    **Service name**: {gap.service_name}
+
+    Your task:
+    1. Research existing MCP patterns:
+    - Search documentation for "MCP server" patterns
+    - Look at how similar tools are implemented
+
+    2. Create the MCP server structure:
+    - {mcp_dir}/src/main.py - FastMCP server code
+    - {mcp_dir}/requirements.txt - Dependencies
+    - {mcp_dir}/Dockerfile - Container build
+    - {mcp_dir}/README.md - Documentation
+
+    3. The MCP server must:
+    - Use FastMCP framework
+    - Include /health endpoint
+    - Use Pydantic models for inputs/outputs
+    - Have proper error handling
+    - Include docstrings for all tools
+
+    4. Validate syntax:
+    - Run: python -m py_compile {mcp_dir}/src/main.py
+
+    5. Return JSON summary:
+    ```json
+    {{
+    "status": "generated",
+    "service_name": "{gap.service_name}",
+    "output_dir": "{mcp_dir}",
+    "tools_implemented": ["list of tool names"],
+    "files_created": ["list of files"]
+    }}
+    ```"""
+
+        response = await call_claude(prompt, tools=TOOLS_FULL, model="opus", timeout=300)
+
+        if not response.get("success"):
+            return {"status": "failed", "error": response.get("error")}
+
+        result_text = response.get("result", "")
+
+        background_tasks.add_task(
+            notify_matrix,
+            f"🔧 Generated MCP: `{gap.service_name}`\nPath: {mcp_dir}\nReview, test, and deploy via GitOps."
+        )
+
+        return {
+            "status": "generated",
+            "service_name": gap.service_name,
+            "output_dir": mcp_dir,
+            "response_preview": result_text[:500]
+        }
+
+    @app.post("/daily-validation")
+    async def run_daily_validation(background_tasks: BackgroundTasks):
+        """
+        Run daily batch validation of recent items.
+
+        Queues validations in claude-agent's priority queue.
+        """
+        logger.info("Starting daily validation run")
+
+        # Get recent items from knowledge base
+        recent_runbooks = await query_knowledge("recent runbooks", "runbooks", limit=20)
+        recent_decisions = await query_knowledge("recent decisions", "documentation", limit=10)
+
+        queued = 0
+
+        for item in recent_runbooks:
+            if item.get("created_at", "") >= (datetime.utcnow() - timedelta(hours=LOOKBACK_HOURS)).isoformat():
+                # Queue validation with low priority (background task)
+                prompt = f"Validate runbook: {item.get('id', 'unknown')}"
+                await call_claude(
+                    prompt,
+                    tools=TOOLS_VALIDATION,
+                    model="sonnet",  # Use Sonnet for batch (faster)
+                    async_mode=True,
+                    priority=4  # Low priority
+                )
+                queued += 1
+
+        background_tasks.add_task(
+            notify_matrix,
+            f"📋 Daily validation started: {queued} items queued"
+        )
+
+        return {"status": "started", "items_queued": queued}
+
+    @app.post("/update-context")
+    async def update_context(request: ContextUpdateRequest = None):
+        """
+        Update ambient context file for Claude Code sessions.
+
+        Claude will gather current state and write a context summary.
+        """
+        request = request or ContextUpdateRequest()
+
+        prompt = f"""Update the ambient context file for Claude Code sessions.
+
+    Your task:
+    1. Gather current system state:
+    {"- Query recent decisions from knowledge base" if request.include_recent_decisions else ""}
+    {"- Check for pending validations" if request.include_pending_validations else ""}
+    {"- Get cluster health from infrastructure-mcp" if request.include_system_health else ""}
+
+    2. Write a context summary to /workspace/.claude/context/latest.md with:
+    - Current timestamp
+    - Recent activity summary
+    - Pending items requiring attention
+    - System health status
+    - Quick reference links
+
+    3. Format for easy scanning by Claude Code sessions.
+
+    4. Return JSON:
+    ```json
+    {{
+    "status": "updated",
+    "items_included": {{
+    "decisions": 0,
+    "pending_validations": 0,
+    "health_checks": 0
+    }}
+    }}
+    ```"""
+
+        response = await call_claude(prompt, tools=TOOLS_VALIDATION, model="sonnet", timeout=120)
+
+        return {
+            "status": "updated" if response.get("success") else "failed",
+            "response_preview": response.get("result", "")[:300]
+        }
+
+    @app.post("/analyze-skill-gaps", response_model=SkillGapAnalysisResult)
+    async def analyze_skill_gaps(
+        request: SkillGapAnalysisRequest = None,
+        background_tasks: BackgroundTasks = None
+    ):
+        """
+        Analyze execution patterns to identify skill generation opportunities.
+
+        Phase 5.2 of Forever Learning System:
+        1. Fetch recent events from agent_events collection
+        2. Find repeated prompts using embedding similarity
+        3. Identify capability gaps from failed events
+        4. Suggest (or auto-generate) skills for high-frequency patterns
+        5. Suggest MCP servers for missing tool capabilities
+
+        Returns detailed analysis with actionable suggestions.
+        """
+        request = request or SkillGapAnalysisRequest()
+        analysis_id = f"gap-{uuid4().hex[:8]}"
+        logger.info(f"[{analysis_id}] Starting skill gap analysis (days={request.days})")
+
+        # Fetch all recent events
+        all_events = await get_recent_events(days=request.days)
+        failed_events = await get_failed_events(days=request.days)
+        low_score_events = await get_low_score_events(days=30, max_score=0.5)
+
+        logger.info(f"[{analysis_id}] Found {len(all_events)} events, {len(failed_events)} failures, {len(low_score_events)} low scores")
+
+        # Analyze patterns
+        patterns = analyze_prompt_patterns(all_events)
+        capability_gaps = identify_capability_gaps(failed_events)
+
+        # Generate skill suggestions from patterns
+        skills_suggested = []
+        for pattern in patterns[:10]:  # Top 10 patterns
+            if pattern["count"] >= request.min_pattern_count:
+                # Determine priority based on count and score
+                if pattern["count"] >= 10 or (pattern.get("avg_score") and pattern["avg_score"] < 0.6):
+                    priority = "high"
+                elif pattern["count"] >= 5:
+                    priority = "medium"
+                else:
+                    priority = "low"
+
+                # Suggest a skill name from the prompt
+                prompt_preview = pattern["representative_prompt"][:50].lower()
+                skill_name = "-".join(prompt_preview.split()[:4])
+                skill_name = "".join(c if c.isalnum() or c == "-" else "" for c in skill_name)
+
+                skills_suggested.append({
+                    "pattern_key": pattern["pattern_key"],
+                    "occurrence_count": pattern["count"],
+                    "representative_prompt": pattern["representative_prompt"],
+                    "avg_score": pattern.get("avg_score"),
+                    "suggested_skill_name": skill_name or f"skill-{pattern['pattern_key']}",
+                    "priority": priority
+                })
+
+                # Track metric
+                SKILL_GAPS_DETECTED.labels(gap_type="repeated_query").inc()
+
+        # Generate MCP suggestions from capability gaps
+        mcps_suggested = []
+        for gap in capability_gaps:
+            if gap["gap_type"] == "missing_tool":
+                mcps_suggested.append({
+                    "gap_type": gap["gap_type"],
+                    "occurrence_count": gap["occurrence_count"],
+                    "suggested_action": gap["suggested_action"],
+                    "priority": "high" if gap["occurrence_count"] >= 5 else "medium"
+                })
+                SKILL_GAPS_DETECTED.labels(gap_type="capability_gap").inc()
+
+        # Auto-generate top skills if requested
+        skills_generated = []
+        if request.auto_generate and skills_suggested:
+            for skill in skills_suggested[:3]:  # Top 3 only
+                if skill["priority"] == "high":
+                    try:
+                        result = await generate_skill(SkillGap(
+                            description=f"Automate: {skill['representative_prompt'][:100]}",
+                            triggering_patterns=[skill["representative_prompt"]],
+                            type="repeated_query",
+                            output_path=f"/workspace/skills/{skill['suggested_skill_name']}.md"
+                        ), background_tasks)
+                        if result.get("status") == "generated":
+                            skills_generated.append({
+                                "skill_name": skill["suggested_skill_name"],
+                                "output_path": result.get("output_path"),
+                                "status": "generated"
+                            })
+                            SKILLS_GENERATED.inc()
+                    except Exception as e:
+                        logger.error(f"Failed to generate skill {skill['suggested_skill_name']}: {e}")
+
+        # Notify about findings
+        if skills_suggested or mcps_suggested:
+            notification = f"📊 Skill Gap Analysis [{analysis_id}]\n"
+            notification += f"- Events analyzed: {len(all_events)}\n"
+            notification += f"- Patterns found: {len(patterns)}\n"
+            notification += f"- Skills suggested: {len(skills_suggested)}\n"
+            notification += f"- MCPs suggested: {len(mcps_suggested)}\n"
+            if skills_generated:
+                notification += f"- Skills auto-generated: {len(skills_generated)}"
+
+            background_tasks.add_task(notify_matrix, notification)
+
+        result = SkillGapAnalysisResult(
+            id=analysis_id,
+            analyzed_at=datetime.utcnow().isoformat(),
+            events_analyzed=len(all_events),
+            patterns_found=patterns[:20],
+            capability_gaps=capability_gaps,
+            skills_suggested=skills_suggested,
+            skills_generated=skills_generated,
+            mcps_suggested=mcps_suggested
+        )
+
+        logger.info(f"[{analysis_id}] Analysis complete: {len(skills_suggested)} skills, {len(mcps_suggested)} MCPs suggested")
+        return result
+
+    @app.post("/self-improve")
+    async def trigger_self_improvement(background_tasks: BackgroundTasks):
+        """
+        Comprehensive self-improvement analysis combining:
+        1. Skill gap detection (Phase 5.2)
+        2. Runbook validation and fixes
+        3. Capability gap identification
+        4. Auto-generation of improvements
+
+        This is the main entry point for the Forever Learning System's
+        self-evolution capabilities.
+        """
+        analysis_id = f"improve-{uuid4().hex[:8]}"
+        logger.info(f"[{analysis_id}] Starting comprehensive self-improvement")
+
+        # Step 1: Run skill gap analysis
+        gap_analysis = await analyze_skill_gaps(
+            SkillGapAnalysisRequest(days=7, min_pattern_count=3, auto_generate=False),
+            background_tasks
+        )
+
+        # Step 2: Use Claude to review patterns and suggest improvements
+        prompt = f"""Analyze the system for improvement opportunities.
+
+    ## Skill Gap Analysis Results
+    - Events analyzed: {gap_analysis.events_analyzed}
+    - Patterns found: {len(gap_analysis.patterns_found)}
+    - Skills suggested: {len(gap_analysis.skills_suggested)}
+    - Capability gaps: {len(gap_analysis.capability_gaps)}
+
+    Top patterns requiring skills:
+    {json.dumps(gap_analysis.skills_suggested[:5], indent=2)}
+
+    Capability gaps found:
+    {json.dumps(gap_analysis.capability_gaps[:5], indent=2)}
+
+    ## Your Tasks
+
+    1. **Review skill suggestions**: For the top 3 patterns, decide if a skill would be valuable.
+       Consider: frequency, complexity, potential for automation.
+
+    2. **Search for existing solutions**: Before generating new skills, search:
+       - Use mcp__knowledge__search_runbooks for similar runbooks
+       - Use mcp__knowledge__search_documentation for existing guides
+
+    3. **Generate improvements**:
+       - For high-priority patterns: Draft skill markdown files
+       - For capability gaps: Suggest MCP server specifications
+       - For failing runbooks: Propose fixes
+
+    4. **Write files** to appropriate locations:
+       - Skills: /workspace/skills/<name>.md
+       - Runbook fixes: Update existing runbook files
+       - MCP specs: /workspace/mcp-specs/<name>.yaml
+
+    5. Return JSON summary:
+    ```json
+    {{
+        "analysis_id": "{analysis_id}",
+        "improvements_identified": 0,
+        "improvements_implemented": 0,
+        "skills_created": [
+            {{"name": "...", "path": "...", "description": "..."}}
+        ],
+        "runbooks_fixed": [
+            {{"id": "...", "fix": "..."}}
+        ],
+        "mcps_specified": [
+            {{"name": "...", "tools": ["..."]}}
+        ],
+        "recommendations": [
+            "Human action needed for..."
+        ]
+    }}
+    ```
+
+    Be thorough but focused. Only implement improvements that have clear value."""
+
+        response = await call_claude(
+            prompt,
+            tools=TOOLS_FULL,
+            model="opus",
+            timeout=600,
+            async_mode=True,
+            priority=4
+        )
+
+        if response.get("task_id"):
+            return {
+                "status": "queued",
+                "analysis_id": analysis_id,
+                "task_id": response.get("task_id"),
+                "gap_analysis": {
+                    "events_analyzed": gap_analysis.events_analyzed,
+                    "skills_suggested": len(gap_analysis.skills_suggested),
+                    "capability_gaps": len(gap_analysis.capability_gaps)
+                },
+                "message": "Self-improvement analysis queued with skill gap data. Poll /task/{task_id} for results."
+            }
+
+        return {
+            "status": "started",
+            "analysis_id": analysis_id,
+            "gap_analysis_id": gap_analysis.id,
+            "response": response
+        }
+
+    # ============================================================================
+    # Skill Queue Management (Phase 5.2 Enhancement)
+    # ============================================================================
+
+    class PendingSkillResponse(BaseModel):
+        skill_id: str
+        name: str
+        description: str
+        path: str
+        pattern_key: Optional[str]
+        created_at: str
+        status: str
+
+    class SkillApprovalRequest(BaseModel):
+        deploy_path: Optional[str] = None  # Override deployment location
+        notify: bool = True  # Send notification on deploy
+
+    @app.get("/skills/pending")
+    async def list_pending_skills():
+        """
+        List all skills awaiting human approval.
+
+        Part of Phase 5.2 - Skills generated by analyze-skill-gaps or
+        self-improve are queued here for human review before deployment.
+        """
+        pending = [
+            PendingSkillResponse(
+                skill_id=skill_id,
+                name=data.get("name", "unknown"),
+                description=data.get("description", ""),
+                path=data.get("path", ""),
+                pattern_key=data.get("pattern_key"),
+                created_at=data.get("created_at", ""),
+                status=data.get("status", "pending")
+            )
+            for skill_id, data in PENDING_SKILLS.items()
+            if data.get("status") == "pending"
+        ]
+        return {
+            "count": len(pending),
+            "skills": pending
+        }
+
+    @app.post("/skills/queue")
+    async def queue_skill_for_approval(
+        name: str,
+        description: str,
+        path: str,
+        pattern_key: Optional[str] = None
+    ):
+        """
+        Add a generated skill to the approval queue.
+
+        Called internally by generate_skill() and analyze-skill-gaps
+        when auto_generate produces a new skill.
+        """
+        skill_id = f"skill-{uuid4().hex[:8]}"
+        PENDING_SKILLS[skill_id] = {
+            "name": name,
+            "description": description,
+            "path": path,
+            "pattern_key": pattern_key,
+            "created_at": datetime.utcnow().isoformat(),
+            "status": "pending"
+        }
+        logger.info(f"Queued skill for approval: {skill_id} ({name})")
+        return {"skill_id": skill_id, "status": "queued"}
+
+    @app.post("/skills/approve/{skill_id}")
+    async def approve_skill(
+        skill_id: str,
+        request: SkillApprovalRequest = None,
+        background_tasks: BackgroundTasks = None
+    ):
+        """
+        Approve a pending skill and deploy it.
+
+        Deployment copies the skill from /workspace/skills/ to the
+        actual Claude Code skills directory for use in sessions.
+        """
+        request = request or SkillApprovalRequest()
+
+        if skill_id not in PENDING_SKILLS:
+            raise HTTPException(status_code=404, detail=f"Skill {skill_id} not found")
+
+        skill = PENDING_SKILLS[skill_id]
+        if skill.get("status") != "pending":
+            raise HTTPException(status_code=400, detail=f"Skill {skill_id} is not pending (status: {skill.get('status')})")
+
+        # Mark as approved
+        skill["status"] = "approved"
+        skill["approved_at"] = datetime.utcnow().isoformat()
+
+        # Determine deployment path
+        deploy_path = request.deploy_path or f"/home/agentic_lab/.claude/skills/{skill['name']}.md"
+
+        # Copy skill to deployment location
+        try:
+            source_path = skill["path"]
+            # Read source
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Use claude-agent to copy the file (has file access)
+                copy_result = await client.post(
+                    f"{CLAUDE_AGENT_URL}/agent/run",
+                    json={
+                        "prompt": f"Copy the file from {source_path} to {deploy_path}. Use the Read tool to read the source, then Write tool to write to destination. Return JSON with status and paths.",
+                        "model": "haiku",
+                        "timeout": 30,
+                        "tools": ["Read", "Write"]
+                    },
+                    timeout=60.0
+                )
+                if copy_result.status_code == 200:
+                    skill["deployed_path"] = deploy_path
+                    skill["status"] = "deployed"
+                    SKILLS_APPROVED.inc()
+                    logger.info(f"Deployed skill {skill_id} to {deploy_path}")
+                else:
+                    logger.warning(f"Copy may have failed: {copy_result.status_code}")
+
+        except Exception as e:
+            logger.error(f"Failed to deploy skill {skill_id}: {e}")
+            skill["status"] = "approved"  # Still approved, just not auto-deployed
+            skill["deploy_error"] = str(e)
+
+        # Notify
+        if request.notify and background_tasks:
+            background_tasks.add_task(
+                notify_matrix,
+                f"✅ Skill approved and deployed: `{skill['name']}`\nPath: {skill.get('deployed_path', deploy_path)}"
+            )
+
+        # Log to knowledge base
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/log_event",
+                    json={
+                        "event_type": "skill.approved",
+                        "description": f"Skill approved: {skill['name']}",
+                        "source_agent": "claude-validator",
+                        "metadata": {
+                            "skill_id": skill_id,
+                            "skill_name": skill["name"],
+                            "pattern_key": skill.get("pattern_key"),
+                            "deployed_path": skill.get("deployed_path")
+                        },
+                        "resolution": "deployed"
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"Failed to log skill approval: {e}")
+
+        return {
+            "skill_id": skill_id,
+            "status": skill["status"],
+            "deployed_path": skill.get("deployed_path"),
+            "message": f"Skill '{skill['name']}' approved and deployed"
+        }
+
+    @app.post("/skills/reject/{skill_id}")
+    async def reject_skill(
+        skill_id: str,
+        reason: str = "Not specified",
+        background_tasks: BackgroundTasks = None
+    ):
+        """
+        Reject a pending skill.
+
+        The skill remains in the queue with rejected status for reference.
+        """
+        if skill_id not in PENDING_SKILLS:
+            raise HTTPException(status_code=404, detail=f"Skill {skill_id} not found")
+
+        skill = PENDING_SKILLS[skill_id]
+        if skill.get("status") != "pending":
+            raise HTTPException(status_code=400, detail=f"Skill {skill_id} is not pending")
+
+        skill["status"] = "rejected"
+        skill["rejected_at"] = datetime.utcnow().isoformat()
+        skill["rejection_reason"] = reason
+        SKILLS_REJECTED.inc()
+
+        logger.info(f"Rejected skill {skill_id}: {reason}")
+
+        # Log to knowledge base
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{KNOWLEDGE_MCP_URL}/api/log_event",
+                    json={
+                        "event_type": "skill.rejected",
+                        "description": f"Skill rejected: {skill['name']} - {reason}",
+                        "source_agent": "claude-validator",
+                        "metadata": {
+                            "skill_id": skill_id,
+                            "skill_name": skill["name"],
+                            "rejection_reason": reason
+                        },
+                        "resolution": "rejected"
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"Failed to log skill rejection: {e}")
+
+        if background_tasks:
+            background_tasks.add_task(
+                notify_matrix,
+                f"❌ Skill rejected: `{skill['name']}`\nReason: {reason}"
+            )
+
+        return {
+            "skill_id": skill_id,
+            "status": "rejected",
+            "reason": reason
+        }
+
+    @app.get("/skills/history")
+    async def get_skill_history(limit: int = 20):
+        """
+        Get history of all skills (pending, approved, rejected).
+        """
+        all_skills = [
+            {
+                "skill_id": skill_id,
+                **data
+            }
+            for skill_id, data in PENDING_SKILLS.items()
+        ]
+        # Sort by created_at descending
+        all_skills.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return {
+            "total": len(all_skills),
+            "skills": all_skills[:limit]
+        }
+
+    if __name__ == "__main__":
+        import uvicorn
+        port = int(os.environ.get("PORT", "8000"))
+        uvicorn.run(app, host="0.0.0.0", port=port)
+
+  requirements.txt: |
+    fastapi>=0.115.0
+    uvicorn>=0.34.0
+    httpx>=0.27.0
+    pydantic>=2.11.0
+    prometheus-client>=0.19.0
