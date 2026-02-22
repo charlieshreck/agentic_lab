@@ -53,7 +53,22 @@ params
   Unexpected keyword argument [type=unexpected_keyword_argument, input_value={...}, ...]
 ```
 
-### 3. Extra unsupported parameters
+### 3. Tool implementation missing parameter
+
+The tool definition is missing a parameter that callers need. This requires **fixing the MCP tool source code**, not the caller.
+
+```
+hours
+  Unexpected keyword argument [type=unexpected_keyword_argument, input_value=24, input_type=int]
+```
+
+At first glance this looks like an extra/unsupported parameter (see #4 below), but the key distinction is:
+- **Tool is wrong**: callers like KAO LangGraph are using a parameter that makes semantic sense (`hours` for time filtering) but the tool was never implemented to support it
+- **Fix**: Add the parameter to the tool function in `/home/mcp-servers/domains/<domain>/src/<domain>_mcp/tools/*.py`, commit, push — CI rebuilds the image, ArgoCD syncs and restarts the pod
+
+**Example (incident #153)**: `list_recent_events` in `knowledge-mcp` didn't accept `hours`, but KAO was calling it with `hours=24`. Fixed by adding `hours: Optional[int] = None` to the tool.
+
+### 4. Extra unsupported parameters
 
 Passing a param the tool no longer accepts:
 ```
@@ -107,6 +122,15 @@ kubectl_restart_deployment namespace=ai-platform name=langgraph cluster=agentic
 ```
 
 ## Incident History
+
+- **2026-02-22**: Incident #153 — `knowledge-mcp` reporting 28 errors. Root causes:
+  1. `list_recent_events` tool missing `hours` parameter — KAO was calling with `hours=24`
+     causing Pydantic validation failure → 500 on `/api/call`. Fixed by adding `hours: Optional[int]`
+     to the tool in `qdrant.py`.
+  2. SilverBullet sync webhook returning 500 due to stale cached auth cookie returning 401.
+     Fixed by clearing `_session_cookie = None` on 401 in `silverbullet.py` to force re-auth
+     on next attempt.
+  Both fixes committed to `mcp-servers` repo and deployed via ArgoCD/CI.
 
 - **2026-02-22**: Incident #144 — coroot tools in KAO were using old `service_id` param
   (should be `app_id`) and wrapping flat-kwargs tools in `{"params": {...}}`. Fixed by
