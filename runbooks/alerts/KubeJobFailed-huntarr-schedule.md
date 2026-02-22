@@ -4,7 +4,8 @@
 **Namespace**: `media`
 **Root Causes**:
 1. ~~CronJob containers using unreachable container image~~ (FIXED - 2026-02-21)
-2. RBAC permissions missing for kubectl scale operations (FIXED - 2026-02-21)
+2. ~~RBAC permissions missing for kubectl scale operations~~ (FIXED - 2026-02-21)
+3. activeDeadlineSeconds too aggressive (FIXED - 2026-02-22)
 **Status**: FULLY RESOLVED
 
 ## Symptoms
@@ -125,6 +126,21 @@ kubectl -n media get pods -l batch.kubernetes.io/cronjob-name=huntarr-stop
 - ArgoCD Application: `prod_homelab/kubernetes/argocd-apps/applications/huntarr-app.yaml`
 - Deployment: `prod_homelab/kubernetes/applications/media/huntarr/deployment.yaml`
 
+## Issue 3: Aggressive activeDeadlineSeconds Timeout (RESOLVED - 2026-02-22)
+
+After image and RBAC fixes were applied, a new failure occurred on 2026-02-22:
+- **Job**: `huntarr-stop-29529120` (and related start jobs)
+- **Failure**: `DeadlineExceeded` — job was active longer than specified deadline
+- **Root Cause**: `activeDeadlineSeconds: 600` (10 minutes) was too aggressive
+- **Why it happened**:
+  - Pod startup time (image pull from registry.k8s.io, container initialization)
+  - kubectl command execution time
+  - Deployment scaling operation (especially graceful termination of existing pods)
+  - Combined, these operations exceeded 10-minute deadline
+- **Fix**: Increased `activeDeadlineSeconds` from 600 to 1200 seconds (20 minutes)
+  - Provides sufficient buffer for normal scaling operations
+  - Prevents false timeouts on slow cluster operations
+
 ## Timeline
 
 - **Issue Detected**: Multiple failed jobs over ~2 weeks (various failure times)
@@ -137,6 +153,12 @@ kubectl -n media get pods -l batch.kubernetes.io/cronjob-name=huntarr-stop
   - Both issues already fixed in git (commit: 6a75395)
   - ArgoCD synced to production
   - Old failed jobs cleaned up
+- **Third Issue Detected**: 2026-02-22 08:00 UTC
+  - `huntarr-stop-29529120` failed with `DeadlineExceeded`
+  - Root cause: 600-second timeout too aggressive
+- **Fix Applied**: 2026-02-22
+  - Increased activeDeadlineSeconds to 1200 seconds (commit: 1fa198d)
+  - Pushed to prod_homelab repo, ArgoCD will auto-sync
 - **Status**: FULLY RESOLVED - Ready for production use
-  - Next huntarr-start job: 2026-02-22 00:00 UTC
-  - Next huntarr-stop job: 2026-02-21 08:00 UTC (or 2026-02-22 08:00 UTC)
+  - Next huntarr-start job: 2026-02-23 00:00 UTC
+  - Next huntarr-stop job: 2026-02-23 08:00 UTC
