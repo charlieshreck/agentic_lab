@@ -72,6 +72,11 @@ Fix the calling code (error-hunter, alerting-pipeline, etc.) to use the correct 
 - All `argocd_*` tools
 - `get_scrape_targets`, `query_metrics`, `list_alerts`
 
+**Auto-unwrap fix (2026-02-22):** The REST bridge now auto-detects both directions:
+- If a flat-kwargs tool is called with `{"params": {...}}`, the bridge catches `unexpected_keyword_argument` and retries by unwrapping
+- If a Pydantic model tool is called without wrapping, the bridge catches `Field required` and retries by wrapping
+- This makes the bridge self-healing for parameter format mismatches
+
 ### 2. Backend API Unavailable
 
 **Symptoms:**
