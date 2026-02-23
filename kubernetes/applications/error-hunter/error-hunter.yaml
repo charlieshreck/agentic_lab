@@ -364,7 +364,9 @@ data:
         namespaces = []
         if ns_result:
             for ns in extract_list(ns_result, "namespaces"):
-                name = ns.get("name", ns) if isinstance(ns, dict) else str(ns)
+                name = ns.get("name") if isinstance(ns, dict) else str(ns)
+                if not name or not isinstance(name, str):
+                    continue
                 if name not in skip_ns:
                     namespaces.append(name)
         if not namespaces:
@@ -629,7 +631,9 @@ data:
         ns_result = await call_mcp_tool_safe(infra, "kubectl_get_namespaces", {"cluster": ctx})
         namespaces = []
         for ns in extract_list(ns_result, "namespaces"):
-            name = ns.get("name", ns) if isinstance(ns, dict) else str(ns)
+            name = ns.get("name") if isinstance(ns, dict) else str(ns)
+            if not name or not isinstance(name, str):
+                continue
             if name not in skip_ns:
                 namespaces.append(name)
         if not namespaces:
@@ -2815,7 +2819,7 @@ data:
             except Exception:
                 pass
 
-        screen_name = f"sweep-{sweep_id}"
+        screen_name = "patrol"
         prompt = _build_sweep_prompt(sweep_id, fix_now, create_rule, log_only)
 
         synapse_url = SYNAPSE_URL.rstrip("/")
