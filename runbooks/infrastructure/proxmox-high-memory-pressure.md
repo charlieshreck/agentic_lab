@@ -16,6 +16,9 @@
 2. **Memory Leak in Guest OS**: Individual VM consuming more than allocated
    - Use `ssh root@<vm-ip>` and run `free -h` to check guest memory usage
    - Check kernel messages: `dmesg | tail -20` for OOM killer activity
+   - **PBS Backup OOM**: PBS (Proxmox Backup Server) needs extra memory during large backups
+     - Standard allocation: 2GB (minimum for installation)
+     - Recommended for backups: 4GB (Incident #156, #163)
 
 3. **Host Overhead**: Proxmox system services consuming memory
    - Check: `free -h` on Proxmox host
@@ -64,7 +67,9 @@ Memory allocations are managed in GitOps (Terraform):
   - `var.plex_vm.memory` - Plex VM allocation
   - `var.unifi_vm.memory` - UniFi VM allocation
 
-### Current Safe Allocations (Incident #160 fix)
+### Current Safe Allocations
+
+**Ruapehu Host** (Incident #160 fix - Feb 23, 2026):
 ```hcl
 control_plane.memory = 5120   # 5GB
 workers[*].memory    = 9216   # 9GB each (3 × 9GB = 27GB)
@@ -74,6 +79,15 @@ truenas.memory       = 16384  # 16GB (TrueNAS VM, separate)
 
 Total = 5 + 27 + 7 + 2 + 16 = 57GB allocated
 Available for host overhead = 62.6GB - 57GB = 5.6GB (acceptable)
+```
+
+**Pihanga Host** (Incident #156 fix - Feb 23, 2026):
+```hcl
+pbs.memory           = 4096   # 4GB (increased from 2GB due to OOM during backups)
+talos-monitor.memory = 20480  # 20GB (K8s control plane, single-node monit cluster)
+
+Total = 4 + 20 = 24GB allocated
+Available for host overhead = 30.27GB - 24GB = 6.27GB (acceptable)
 ```
 
 ### To Apply Fix
