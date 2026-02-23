@@ -1302,26 +1302,29 @@ data:
     # AFFERENT SCREEN SESSION
     # ============================================================================
 
-    async def create_afferent_screen(incident_id: int, payload_data: dict,
-                                      enrichment: dict, runbook_matches: list,
-                                      model: str) -> Optional[str]:
-        """Create a Claude screen session on Afferent for this incident."""
-        context_prompt = build_incident_prompt(incident_id, payload_data, enrichment, runbook_matches)
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{AFFERENT_URL}/api/incidents/{incident_id}/claude-session",
-                    json={"model": model, "context": context_prompt},
-                    headers={"X-Internal-Token": AFFERENT_AUTH_TOKEN}
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data.get("session")
-                else:
-                    logger.error(f"Afferent screen creation returned {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            logger.error(f"Failed to create Afferent screen: {e}")
-        return None
+    # NOTE: create_afferent_screen() commented out — screen dispatch replaced by
+    # error-hunter pickup. Kept as fallback if direct screen dispatch is re-enabled.
+    #
+    # async def create_afferent_screen(incident_id: int, payload_data: dict,
+    #                                   enrichment: dict, runbook_matches: list,
+    #                                   model: str) -> Optional[str]:
+    #     """Create a Claude screen session on Afferent for this incident."""
+    #     context_prompt = build_incident_prompt(incident_id, payload_data, enrichment, runbook_matches)
+    #     try:
+    #         async with httpx.AsyncClient(timeout=30) as client:
+    #             resp = await client.post(
+    #                 f"{AFFERENT_URL}/api/incidents/{incident_id}/claude-session",
+    #                 json={"model": model, "context": context_prompt},
+    #                 headers={"X-Internal-Token": AFFERENT_AUTH_TOKEN}
+    #             )
+    #             if resp.status_code == 200:
+    #                 data = resp.json()
+    #                 return data.get("session")
+    #             else:
+    #                 logger.error(f"Afferent screen creation returned {resp.status_code}: {resp.text[:200]}")
+    #     except Exception as e:
+    #         logger.error(f"Failed to create Afferent screen: {e}")
+    #     return None
 
     def build_incident_prompt(incident_id: int, payload_data: dict, enrichment: dict, runbook_matches: list) -> str:
         """Build context prompt for Claude screen session."""
@@ -1547,41 +1550,31 @@ data:
             }
 
     async def create_screen(state: IncidentState) -> dict:
-        """Node 4: Create a Claude screen session for the incident (via Afferent)."""
+        """Node 4: Mark incident as ready for error-hunter pickup (no screen dispatch)."""
         if state.get("status") == "false_positive":
             return {"screen_session": "", "status": "false_positive"}
 
-        incident_id = state["incident_id"]
-        recommended_model = state.get("recommended_model", "sonnet")
-        enrichment = state.get("enrichment", {})
-        runbook_matches = enrichment.get("runbook_matches", [])
+        incident_id = state.get("incident_id")
+        if not incident_id:
+            return {"screen_session": "", "status": "error"}
 
-        # Try to create screen session via Afferent
-        session = await create_afferent_screen(
-            incident_id,
-            {"alert_name": state["alert_name"], "source": state["source"],
-             "severity": state["severity"], "description": state.get("description", ""),
-             "labels": state.get("labels", {})},
-            enrichment,
-            runbook_matches,
-            recommended_model
-        )
+        try:
+            # Mark as awaiting_review — error-hunter sweep will pick it up
+            await pg_update_incident(incident_id, status="awaiting_review",
+                                      model_used=state.get("recommended_model", "sonnet"))
 
-        if session:
-            await pg_update_incident(incident_id, status="investigating", screen_session=session,
-                                      model_used=recommended_model)
-            await notify_afferent_update(incident_id, "investigating",
-                                          f"Screen session created: {session}")
-            return {"status": "investigating", "screen_session": session}
+            # Still notify Afferent/Tamar for real-time UI updates
+            try:
+                await notify_afferent_update(incident_id, "awaiting_review",
+                                              "Queued for error-hunter remediation")
+            except Exception as e:
+                logger.warning(f"Failed to notify UI: {e}")
 
-        # Fallback: just set awaiting_review
-        await pg_update_incident(incident_id, status="awaiting_review", model_used=recommended_model)
-        await pg_insert_transition(incident_id, "investigating", "awaiting_review", "langgraph",
-                                    f"Awaiting human review. Recommended model: {recommended_model}")
-        await notify_afferent_update(incident_id, "awaiting_review",
-                                      f"Ready for review. Recommended: {recommended_model}")
-
-        return {"status": "awaiting_review", "screen_session": ""}
+            logger.info(f"Incident {incident_id} marked awaiting_review for error-hunter pickup")
+            return {"status": "awaiting_review", "screen_session": ""}
+        except Exception as e:
+            logger.error(f"Failed to update incident {incident_id}: {e}")
+            return {"screen_session": "", "status": "error"}
 
     async def record_outcome(state: IncidentState) -> dict:
         """Node 5: Record outcome to knowledge-mcp."""

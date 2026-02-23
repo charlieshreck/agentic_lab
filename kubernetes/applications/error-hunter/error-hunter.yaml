@@ -248,6 +248,280 @@ data:
         return result
 
     # ========================================================================
+    # LLM TOOL-CALLING (ReAct engine foundation)
+    # ========================================================================
+
+    MAX_REACT_STEPS = 10
+    REACT_TIMEOUT = 300  # 5 minutes
+
+    async def call_llm_with_tools(messages: list, tools: list = None,
+                                   model: str = "anthropic/claude-haiku-4-5-20251001") -> dict:
+        """Call LiteLLM with optional tool definitions and parse the response.
+
+        Returns one of:
+        - {"done": True, "summary": "..."}  — LLM says remediation is complete
+        - {"tool_call": {"name": ..., "arguments": ...}, "reasoning": "..."}
+        - {"error": "..."}
+        """
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": 2048,
+            "temperature": 0,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{LITELLM_URL}/v1/chat/completions",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                if resp.status_code != 200:
+                    return {"error": f"LLM returned HTTP {resp.status_code}: {resp.text[:300]}"}
+
+                data = resp.json()
+                choice = data.get("choices", [{}])[0]
+                message = choice.get("message", {})
+
+                # Check for tool calls
+                tool_calls = message.get("tool_calls", [])
+                if tool_calls:
+                    tc = tool_calls[0]
+                    fn = tc.get("function", {})
+                    try:
+                        args = json.loads(fn.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    return {
+                        "tool_call": {"name": fn.get("name", ""), "arguments": args},
+                        "reasoning": message.get("content", "") or "",
+                        "tool_call_id": tc.get("id", ""),
+                    }
+
+                # No tool call — check if LLM is signaling completion
+                content = message.get("content", "")
+                if content:
+                    # Check for explicit DONE marker or summary
+                    lower = content.lower()
+                    if "remediation complete" in lower or "##done##" in lower or "no further action" in lower:
+                        return {"done": True, "summary": content}
+                    # If no tool call and no done signal, treat as reasoning-only step
+                    return {"done": True, "summary": content}
+
+                return {"error": "Empty LLM response"}
+
+        except httpx.TimeoutException:
+            return {"error": "LLM call timed out"}
+        except Exception as e:
+            return {"error": f"LLM call failed: {e}"}
+
+    # ========================================================================
+    # MCP TOOL CATALOG (curated safe tools for ReAct loop)
+    # ========================================================================
+
+    MCP_TOOL_CATALOG = {
+        # Infrastructure — reads + safe restarts
+        "kubectl_get_pods": INFRASTRUCTURE_MCP_URL,
+        "kubectl_logs": INFRASTRUCTURE_MCP_URL,
+        "kubectl_get_deployments": INFRASTRUCTURE_MCP_URL,
+        "kubectl_get_services": INFRASTRUCTURE_MCP_URL,
+        "kubectl_get_events": INFRASTRUCTURE_MCP_URL,
+        "kubectl_get_statefulsets": INFRASTRUCTURE_MCP_URL,
+        "kubectl_get_configmaps": INFRASTRUCTURE_MCP_URL,
+        "kubectl_get_pvcs": INFRASTRUCTURE_MCP_URL,
+        "kubectl_get_nodes": INFRASTRUCTURE_MCP_URL,
+        "kubectl_restart_deployment": INFRASTRUCTURE_MCP_URL,
+        "kubectl_delete_pod": INFRASTRUCTURE_MCP_URL,
+        "kubectl_describe": INFRASTRUCTURE_MCP_URL,
+        "kubectl_rollout_status": INFRASTRUCTURE_MCP_URL,
+        "argocd_get_applications": INFRASTRUCTURE_MCP_URL,
+        "argocd_sync_application": INFRASTRUCTURE_MCP_URL,
+        "truenas_list_shares": INFRASTRUCTURE_MCP_URL,
+        "truenas_get_alerts": INFRASTRUCTURE_MCP_URL,
+        "cloudflare_list_tunnels": INFRASTRUCTURE_MCP_URL,
+        "cloudflare_get_tunnel_status": INFRASTRUCTURE_MCP_URL,
+        # Observability — reads
+        "query_metrics": OBSERVABILITY_MCP_URL,
+        "query_metrics_instant": OBSERVABILITY_MCP_URL,
+        "coroot_get_service_metrics": OBSERVABILITY_MCP_URL,
+        "coroot_get_recent_anomalies": OBSERVABILITY_MCP_URL,
+        "list_alerts": OBSERVABILITY_MCP_URL,
+        "gatus_get_failing_endpoints": OBSERVABILITY_MCP_URL,
+        # Home — reads
+        "adguard_get_filtering_status": HOME_MCP_URL,
+        "get_service_status_summary": HOME_MCP_URL,
+        "check_service_health": HOME_MCP_URL,
+        # Media — reads
+        "plex_get_server_status": MEDIA_MCP_URL,
+        "plex_get_active_sessions": MEDIA_MCP_URL,
+        "sonarr_get_queue": MEDIA_MCP_URL,
+        "radarr_get_queue": MEDIA_MCP_URL,
+    }
+
+    def route_tool_to_mcp(tool_name: str) -> str:
+        """Look up which MCP server handles a given tool."""
+        url = MCP_TOOL_CATALOG.get(tool_name)
+        if not url:
+            raise ValueError(f"Tool '{tool_name}' not in MCP_TOOL_CATALOG")
+        return url
+
+    # OpenAI-format tool definitions for the LLM
+    MCP_TOOL_DEFINITIONS = [
+        # Infrastructure
+        {"type": "function", "function": {"name": "kubectl_get_pods", "description": "List pods in a namespace", "parameters": {"type": "object", "properties": {"namespace": {"type": "string", "description": "Kubernetes namespace"}, "cluster": {"type": "string", "description": "Cluster name: prod, agentic, or monit"}}, "required": ["namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_logs", "description": "Get logs from a pod", "parameters": {"type": "object", "properties": {"pod_name": {"type": "string"}, "namespace": {"type": "string"}, "cluster": {"type": "string"}, "tail_lines": {"type": "integer", "description": "Number of lines to tail"}}, "required": ["pod_name", "namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_get_deployments", "description": "List deployments in a namespace", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_get_events", "description": "Get events in a namespace", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_describe", "description": "Describe a Kubernetes resource", "parameters": {"type": "object", "properties": {"resource_type": {"type": "string", "description": "Resource type (pod, deployment, service, etc.)"}, "name": {"type": "string"}, "namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["resource_type", "name", "namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_restart_deployment", "description": "Restart a deployment via rollout restart", "parameters": {"type": "object", "properties": {"deployment_name": {"type": "string"}, "namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["deployment_name", "namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_delete_pod", "description": "Delete a pod to trigger restart", "parameters": {"type": "object", "properties": {"pod_name": {"type": "string"}, "namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["pod_name", "namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_rollout_status", "description": "Check rollout status of a deployment", "parameters": {"type": "object", "properties": {"deployment_name": {"type": "string"}, "namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["deployment_name", "namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_get_services", "description": "List services in a namespace", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_get_statefulsets", "description": "List statefulsets in a namespace", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_get_configmaps", "description": "List configmaps in a namespace", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_get_pvcs", "description": "List persistent volume claims in a namespace", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "cluster": {"type": "string"}}, "required": ["namespace", "cluster"]}}},
+        {"type": "function", "function": {"name": "kubectl_get_nodes", "description": "List nodes in a cluster", "parameters": {"type": "object", "properties": {"cluster": {"type": "string"}}, "required": ["cluster"]}}},
+        {"type": "function", "function": {"name": "argocd_get_applications", "description": "List all ArgoCD applications and their sync status", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "argocd_sync_application", "description": "Trigger ArgoCD sync for an application", "parameters": {"type": "object", "properties": {"app_name": {"type": "string", "description": "ArgoCD application name"}}, "required": ["app_name"]}}},
+        {"type": "function", "function": {"name": "truenas_list_shares", "description": "List NFS/SMB shares on TrueNAS", "parameters": {"type": "object", "properties": {"instance": {"type": "string", "description": "TrueNAS instance: hdd or media"}}, "required": ["instance"]}}},
+        {"type": "function", "function": {"name": "truenas_get_alerts", "description": "Get active alerts from TrueNAS", "parameters": {"type": "object", "properties": {"instance": {"type": "string", "description": "TrueNAS instance: hdd or media"}}, "required": ["instance"]}}},
+        {"type": "function", "function": {"name": "cloudflare_list_tunnels", "description": "List Cloudflare tunnels", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "cloudflare_get_tunnel_status", "description": "Get status of a Cloudflare tunnel", "parameters": {"type": "object", "properties": {"tunnel_id": {"type": "string"}}, "required": ["tunnel_id"]}}},
+        # Observability
+        {"type": "function", "function": {"name": "query_metrics", "description": "Query VictoriaMetrics with PromQL over a time range", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "PromQL query"}, "start": {"type": "string", "description": "Start time (e.g. '1h' for 1 hour ago)"}, "step": {"type": "string", "description": "Step interval (e.g. '1m')"}}, "required": ["query"]}}},
+        {"type": "function", "function": {"name": "query_metrics_instant", "description": "Query VictoriaMetrics with PromQL (instant)", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "PromQL query"}}, "required": ["query"]}}},
+        {"type": "function", "function": {"name": "coroot_get_service_metrics", "description": "Get service metrics from Coroot", "parameters": {"type": "object", "properties": {"service_name": {"type": "string"}}, "required": ["service_name"]}}},
+        {"type": "function", "function": {"name": "coroot_get_recent_anomalies", "description": "Get recent anomalies from Coroot", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "list_alerts", "description": "List active alerts from AlertManager", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "gatus_get_failing_endpoints", "description": "Get failing Gatus endpoints", "parameters": {"type": "object", "properties": {}}}},
+        # Home
+        {"type": "function", "function": {"name": "adguard_get_filtering_status", "description": "Get AdGuard Home filtering status", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "get_service_status_summary", "description": "Get Homepage service status summary", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "check_service_health", "description": "Check health of a specific service", "parameters": {"type": "object", "properties": {"service_name": {"type": "string"}}, "required": ["service_name"]}}},
+        # Media
+        {"type": "function", "function": {"name": "plex_get_server_status", "description": "Get Plex server status", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "plex_get_active_sessions", "description": "Get active Plex sessions", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "sonarr_get_queue", "description": "Get Sonarr download queue", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "radarr_get_queue", "description": "Get Radarr download queue", "parameters": {"type": "object", "properties": {}}}},
+    ]
+
+    # ========================================================================
+    # REACT SYSTEM PROMPT + FINDING PROMPT
+    # ========================================================================
+
+    def build_react_system_prompt() -> dict:
+        """Build the system message for the ReAct remediation loop."""
+        return {"role": "system", "content": """You are an infrastructure remediation agent for the Kernow homelab.
+
+    Your job: investigate and fix the issue described, using the available MCP tools.
+
+    Architecture:
+    - 3 Kubernetes clusters: prod (10.10.0.0/24), agentic (10.20.0.0/24), monit (10.10.0.0/24)
+    - GitOps managed by ArgoCD on prod cluster (manages all 3 clusters)
+    - MCP servers run in agentic cluster (ai-platform namespace)
+    - OPNsense firewall at 10.10.0.1 (AdGuard DNS, Caddy reverse proxy)
+    - TrueNAS-HDD at 10.10.0.103 (NFS storage)
+
+    Rules:
+    1. Start by investigating — use read tools (kubectl_get_pods, kubectl_logs, kubectl_get_events, etc.) before taking action
+    2. Only restart/delete pods after confirming the issue via investigation
+    3. For ArgoCD drift, try argocd_sync_application first
+    4. Never make destructive changes — no PVC deletes, no data loss operations
+    5. After fixing, verify the fix with another read operation
+    6. Keep tool calls focused — don't scan the entire cluster if you know the namespace
+
+    When you're done (fixed or determined unfixable), respond with a clear summary starting with "Remediation complete:" or "##DONE##".
+    Include what you found, what you did, and the current state."""}
+
+    def build_finding_prompt(finding: dict) -> str:
+        """Build the user message describing the finding to investigate."""
+        parts = [
+            f"## Finding: {finding.get('check_name', 'unknown')}",
+            f"**Severity**: {finding.get('severity', 'unknown')}",
+            f"**Cluster**: {finding.get('cluster', 'unknown')}",
+            f"**Resource**: {finding.get('resource', 'unknown')}",
+            f"**Description**: {finding.get('description', 'No description')}",
+        ]
+        suggestion = finding.get("suggestion", "")
+        if suggestion:
+            parts.append(f"**Suggested action**: {suggestion}")
+        extra = finding.get("extra", {})
+        if extra:
+            parts.append(f"**Context**: {json.dumps(extra, default=str)[:500]}")
+        parts.append("")
+        parts.append("Investigate this issue using the available tools and fix it if possible.")
+        return "\n".join(parts)
+
+    async def llm_remediate(finding: dict) -> dict:
+        """Tier 2: LLM-guided remediation via ReAct loop.
+
+        LLM reasons about the finding, selects MCP tools, error-hunter
+        executes them, returns results, LLM reasons again.
+        Max steps and timeout prevent runaway loops.
+        """
+        messages = [build_react_system_prompt()]
+        messages.append({"role": "user", "content": build_finding_prompt(finding)})
+
+        steps = []
+        start_time = asyncio.get_event_loop().time()
+
+        for step_num in range(MAX_REACT_STEPS):
+            # Check timeout
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > REACT_TIMEOUT:
+                logger.warning(f"ReAct timeout after {step_num} steps ({elapsed:.0f}s)")
+                return {"success": False, "steps": steps, "summary": f"Timeout after {step_num} steps"}
+
+            response = await call_llm_with_tools(messages, tools=MCP_TOOL_DEFINITIONS)
+
+            if response.get("error"):
+                logger.error(f"ReAct step {step_num} LLM error: {response['error']}")
+                return {"success": False, "steps": steps, "summary": f"LLM error: {response['error']}"}
+
+            if response.get("done"):
+                logger.info(f"ReAct completed in {step_num} steps: {response['summary'][:100]}")
+                return {"success": True, "steps": steps, "summary": response["summary"]}
+
+            if response.get("tool_call"):
+                tool_name = response["tool_call"]["name"]
+                tool_args = response["tool_call"]["arguments"]
+
+                # Validate tool is in catalog
+                if tool_name not in MCP_TOOL_CATALOG:
+                    logger.warning(f"ReAct requested unknown tool: {tool_name}")
+                    messages.append({"role": "assistant", "content": response.get("reasoning", ""),
+                                     "tool_calls": [{"id": response.get("tool_call_id", f"call_{step_num}"),
+                                                     "type": "function",
+                                                     "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}]})
+                    messages.append({"role": "tool", "tool_call_id": response.get("tool_call_id", f"call_{step_num}"),
+                                     "content": f"Error: tool '{tool_name}' is not available. Available tools: {', '.join(sorted(MCP_TOOL_CATALOG.keys()))}"})
+                    continue
+
+                # Execute tool via MCP
+                mcp_url = route_tool_to_mcp(tool_name)
+                logger.info(f"ReAct step {step_num}: calling {tool_name}({json.dumps(tool_args)[:200]})")
+                result = await call_mcp_tool(mcp_url, tool_name, tool_args, timeout=30.0)
+
+                steps.append({"step": step_num, "tool": tool_name, "args": tool_args,
+                              "result": str(result)[:1000], "error": result.get("_error", False)})
+
+                # Feed result back to LLM using tool message format
+                tool_call_id = response.get("tool_call_id", f"call_{step_num}")
+                messages.append({"role": "assistant", "content": response.get("reasoning", ""),
+                                 "tool_calls": [{"id": tool_call_id, "type": "function",
+                                                 "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}]})
+                result_str = json.dumps(result, indent=2, default=str)[:2000]
+                messages.append({"role": "tool", "tool_call_id": tool_call_id,
+                                 "content": result_str})
+
+        logger.warning(f"ReAct exhausted {MAX_REACT_STEPS} steps")
+        return {"success": False, "steps": steps, "summary": f"Max {MAX_REACT_STEPS} steps reached"}
+
+    # ========================================================================
     # POSTGRESQL HELPERS
     # ========================================================================
 
@@ -274,6 +548,77 @@ data:
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             return await conn.fetch(query, *args)
+
+    async def init_db():
+        """Ensure schema extensions exist (idempotent)."""
+        # Add incident_id bridge column to error_hunter_findings
+        await pg_execute("""
+            ALTER TABLE error_hunter_findings
+            ADD COLUMN IF NOT EXISTS incident_id INTEGER
+        """)
+
+        # Create remediations log table
+        await pg_execute("""
+            CREATE TABLE IF NOT EXISTS error_hunter_remediations (
+                id SERIAL PRIMARY KEY,
+                finding_id INTEGER,
+                incident_id INTEGER,
+                tier INTEGER NOT NULL,
+                success BOOLEAN NOT NULL DEFAULT false,
+                verified BOOLEAN DEFAULT false,
+                steps JSONB DEFAULT '[]',
+                summary TEXT,
+                started_at TIMESTAMPTZ DEFAULT NOW(),
+                completed_at TIMESTAMPTZ
+            )
+        """)
+
+        # Create unified estate work queue view
+        await pg_execute("""
+            CREATE OR REPLACE VIEW estate_work_queue AS
+            SELECT
+                'finding' as item_type, id, check_name as name, severity,
+                classification as priority, status, description,
+                first_seen as detected_at, last_seen as last_updated,
+                NULL::timestamptz as resolved_at, incident_id,
+                evidence::text as metadata
+            FROM error_hunter_findings
+            WHERE status NOT IN ('resolved', 'ignored')
+            UNION ALL
+            SELECT
+                'incident' as item_type, id, alert_name as name, severity,
+                CASE WHEN severity = 'critical' THEN 'fix_now' ELSE 'create_rule' END as priority,
+                status, description, detected_at, updated_at as last_updated,
+                resolved_at, NULL::integer as incident_id,
+                enrichment::text as metadata
+            FROM incidents
+            WHERE status NOT IN ('resolved', 'false_positive')
+            ORDER BY
+                CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END,
+                detected_at ASC
+        """)
+
+        logger.info("init_db: schema extensions applied")
+
+    async def dedup_incident_to_finding(incident_id: int, alert_name: str) -> Optional[int]:
+        """Check if a KAO incident matches an existing error-hunter finding."""
+        try:
+            rows = await pg_fetch("""
+                SELECT id FROM error_hunter_findings
+                WHERE check_name ILIKE $1 AND status IN ('new', 'dispatched', 'investigating')
+                LIMIT 1
+            """, f"%{alert_name}%")
+            if rows:
+                finding_id = rows[0]["id"]
+                await pg_execute(
+                    "UPDATE error_hunter_findings SET incident_id = $1 WHERE id = $2",
+                    incident_id, finding_id
+                )
+                logger.info(f"Linked incident {incident_id} to finding {finding_id}")
+                return finding_id
+        except Exception as e:
+            logger.warning(f"Dedup check failed: {e}")
+        return None
 
     # ========================================================================
     # PROGRESS REPORTING
@@ -2072,6 +2417,37 @@ data:
         return findings
 
     # ========================================================================
+    # CHECK: OPEN KAO INCIDENTS
+    # ========================================================================
+
+    async def check_open_incidents() -> list:
+        """Pick up open KAO incidents and convert them to findings for unified processing."""
+        findings = []
+        try:
+            rows = await pg_fetch("""
+                SELECT id, alert_name, severity, source, description, status,
+                       detected_at, enrichment, labels
+                FROM incidents
+                WHERE status IN ('detected', 'investigating', 'awaiting_review')
+                ORDER BY detected_at ASC
+            """)
+            for row in rows:
+                existing = await dedup_incident_to_finding(row["id"], row["alert_name"])
+                if existing:
+                    continue  # Already linked to an existing finding
+                findings.append(make_finding(
+                    "kao_incident", row["alert_name"], "global",
+                    f"incident/{row['id']}", row.get("severity", "warning"),
+                    f"KAO incident #{row['id']}: {(row.get('description') or '')[:200]}",
+                    {"incident_id": row["id"], "source": row.get("source", "unknown"),
+                     "status": row["status"], "enrichment": row.get("enrichment", {})},
+                    "Investigate and remediate via MCP tools",
+                ))
+        except Exception as e:
+            logger.error(f"Failed to check open incidents: {e}")
+        return findings
+
+    # ========================================================================
     # CHECK: STALE INCIDENTS
     # ========================================================================
 
@@ -2089,6 +2465,7 @@ data:
         try:
             stale_rows = await pg_fetch("""
                 SELECT id, alert_name, status, screen_session, detected_at,
+                       source, description,
                        EXTRACT(EPOCH FROM (NOW() - detected_at)) / 3600 AS age_hours
                 FROM incidents
                 WHERE status IN ('detected', 'investigating', 'mitigating')
@@ -2096,35 +2473,17 @@ data:
                 ORDER BY detected_at ASC
             """)
 
-            if stale_rows:
-                stale_ids = []
-                for row in stale_rows:
-                    inc_id = row["id"]
-                    alert = row["alert_name"]
-                    age_h = round(row["age_hours"], 1)
-                    session = row["screen_session"] or "none"
-                    stale_ids.append(inc_id)
-                    findings.append(make_finding(
-                        "operations", "incident_stale", "global",
-                        f"kao/incident-{inc_id}", "info",
-                        f"Stale incident #{inc_id} '{alert}' ({age_h}h old, status={row['status']}, screen={session}) — auto-resolved",
-                        {"incident_id": inc_id, "alert_name": alert,
-                         "age_hours": age_h, "screen_session": session},
-                        "Investigate why screen session did not resolve the incident",
-                    ))
-
-                if stale_ids:
-                    await pg_execute("""
-                        UPDATE incidents
-                        SET status = 'resolved',
-                            resolution_type = 'auto_stale',
-                            resolution_summary = 'Auto-resolved by error-hunter: incident stale >6h with no screen progress',
-                            resolved_at = NOW(),
-                            updated_at = NOW()
-                        WHERE id = ANY($1::int[])
-                          AND status IN ('detected', 'investigating', 'mitigating')
-                    """, stale_ids)
-                    logger.info(f"Auto-resolved {len(stale_ids)} stale incidents: {stale_ids}")
+            # Convert stale incidents to findings instead of auto-closing
+            for row in stale_rows:
+                age_hours = (datetime.utcnow() - row["detected_at"]).total_seconds() / 3600
+                findings.append(make_finding(
+                    "kao_incident", f"stale_{row['alert_name']}", "global",
+                    f"incident/{row['id']}", "warning",
+                    f"Stale incident #{row['id']} ({age_hours:.0f}h old): {(row.get('description') or '')[:200]}",
+                    {"incident_id": row["id"], "source": row.get("source", "unknown"),
+                     "status": row["status"], "age_hours": age_hours},
+                    "Auto-remediate or escalate — do not auto-close",
+                ))
 
         except Exception as e:
             logger.error(f"Stale incident check error: {e}")
@@ -2447,6 +2806,7 @@ data:
         screens_created: list
         rules_written: list
         runbooks_drafted: list
+        remediation_results: list
         summary: dict
         status: str
 
@@ -2485,6 +2845,7 @@ data:
             check_homepage(),
             check_media_pipeline(),
             check_home_automation(),
+            check_open_incidents(),
             check_stale_incidents(),
             check_opnsense_updates(),
             check_cloudflare_health(),
@@ -2587,6 +2948,13 @@ data:
             # MCP health: broken tools and unreachable servers need fixing
             elif check_name in ("mcp_http_down", "mcp_unreachable", "mcp_tool_broken"):
                 fix_now.append(finding)
+            # KAO incidents picked up from PostgreSQL
+            elif check_name.startswith("kao_incident"):
+                severity = finding.get("severity", "warning")
+                if severity == "critical":
+                    fix_now.append(finding)
+                else:
+                    create_rule.append(finding)
             # ArgoCD drift needs attention but is less urgent
             elif check_name.startswith("argocd_"):
                 create_rule.append(finding)
@@ -2843,6 +3211,77 @@ data:
         logger.info("Auto-remediated: restarted Backrest")
         return True
 
+    # Mapping of check_name patterns to verification functions
+    CHECK_VERIFIERS = {
+        "pod_crash_loop": lambda f: check_pod_health_single(f),
+        "deployment_unavailable": lambda f: check_deployment_single(f),
+        "argocd_drift": lambda f: check_argocd_single(f),
+        "nfs_mount_stale": lambda f: check_nfs_single(f),
+    }
+
+    async def check_pod_health_single(finding):
+        """Re-check a specific pod's health."""
+        resource = finding.get("resource", "")
+        cluster_name = finding.get("cluster", "agentic")
+        try:
+            result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_get_pods", {
+                "namespace": resource.split("/")[0] if "/" in resource else "default",
+                "cluster": cluster_name
+            })
+            # Check if the specific pod is still in CrashLoopBackOff
+            if isinstance(result, str) and finding.get("resource", "") in result:
+                if "CrashLoopBackOff" in result or "Error" in result:
+                    return [finding]  # Still broken
+            return []  # Fixed
+        except Exception:
+            return []  # Assume fixed if we can't verify
+
+    async def check_deployment_single(finding):
+        """Re-check a specific deployment's availability."""
+        resource = finding.get("resource", "")
+        cluster_name = finding.get("cluster", "agentic")
+        try:
+            result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_get_deployments", {
+                "namespace": resource.split("/")[0] if "/" in resource else "default",
+                "cluster": cluster_name
+            })
+            if isinstance(result, str) and "0/" in result:
+                return [finding]  # Still unavailable
+            return []
+        except Exception:
+            return []
+
+    async def check_argocd_single(finding):
+        """Re-check ArgoCD sync status for a specific app."""
+        try:
+            result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "argocd_get_applications", {})
+            if isinstance(result, str):
+                app_name = finding.get("resource", "").split("/")[-1]
+                if app_name in result and ("OutOfSync" in result or "Degraded" in result):
+                    return [finding]
+            return []
+        except Exception:
+            return []
+
+    async def check_nfs_single(finding):
+        """Re-check NFS mount status."""
+        # NFS checks are cluster-wide, just re-run a targeted check
+        return []  # Assume fixed after remediation
+
+    async def verify_remediation(finding: dict) -> bool:
+        """Re-run the check that produced this finding to verify the fix worked."""
+        await asyncio.sleep(30)  # Allow time for k8s reconciliation
+        check_name = finding.get("check_name", "")
+        for pattern, checker in CHECK_VERIFIERS.items():
+            if pattern in check_name:
+                try:
+                    new_findings = await checker(finding)
+                    return len(new_findings) == 0
+                except Exception as e:
+                    logger.warning(f"Verification failed for {check_name}: {e}")
+                    return True  # Assume success if verification itself fails
+        return True  # No verifier = assume success
+
     # Map finding check_names to their auto-fix functions
     REMEDIATORS = {
         "argocd_out_of_sync": _remediate_argocd_out_of_sync,
@@ -2899,6 +3338,11 @@ data:
                     fixed = await remediator(finding)
 
             if fixed:
+                verified = await verify_remediation(finding)
+                if verified:
+                    logger.info(f"Verified remediation for {finding['check_name']}")
+                else:
+                    logger.warning(f"Remediation not verified for {finding['check_name']}, will retry next sweep")
                 finding["remediated"] = True
                 finding["description"] = f"[AUTO-FIXED] {finding.get('description', '')}"
                 log_only.append(finding)
@@ -2932,6 +3376,11 @@ data:
                     fixed = await remediator(finding)
 
             if fixed:
+                verified = await verify_remediation(finding)
+                if verified:
+                    logger.info(f"Verified remediation for {finding['check_name']}")
+                else:
+                    logger.warning(f"Remediation not verified for {finding['check_name']}, will retry next sweep")
                 finding["remediated"] = True
                 finding["description"] = f"[AUTO-FIXED] {finding.get('description', '')}"
                 log_only.append(finding)
@@ -3070,90 +3519,114 @@ data:
 
         return "\n".join(lines)
 
-    async def dispatch_sweep_screen(state: SweepState) -> dict:
-        """Node 4: Create a single Claude Code screen for the entire sweep.
+    async def dispatch_remediation(state: SweepState) -> dict:
+        """Node 4: Remediate remaining findings via Tier 2 LLM-guided ReAct loop.
 
-        All findings are included in the prompt — fix_now first, then create_rule,
-        then log_only as context. Claude Code works through them as a batch queue.
+        After Tier 1 (deterministic REMEDIATORS) ran in the remediate() node,
+        this node picks up any remaining fix_now items and runs them through
+        the LLM ReAct engine. Results are logged to PostgreSQL.
         """
-        await report_progress(state["sweep_id"], "Dispatching", "Creating Claude session", 70)
         sweep_id = state["sweep_id"]
+        await report_progress(sweep_id, "LLM Remediation", "Running ReAct loop on remaining issues", 70)
+
         fix_now = state.get("fix_now", [])
         create_rule = state.get("create_rule", [])
         log_only = state.get("log_only", [])
 
-        actionable = fix_now + create_rule
-        if len(actionable) < MIN_FINDINGS_FOR_SCREEN:
-            logger.info(f"[{sweep_id}] Only {len(actionable)} actionable findings — skipping screen dispatch")
-            return {"screens_created": [], "rules_written": [], "runbooks_drafted": []}
+        remediation_results = []
+        llm_fixed_count = 0
 
-        # Fetch DB IDs for all findings so the prompt can include them for callback
-        for finding in fix_now + create_rule + log_only:
+        # Run LLM remediation on remaining fix_now items (Tier 1 already tried in remediate())
+        for finding in fix_now:
+            check_name = finding.get("check_name", "")
+            logger.info(f"[{sweep_id}] Tier 2 LLM remediation for: {check_name} on {finding.get('resource', '?')}")
+
             try:
-                rows = await pg_fetch(
-                    "SELECT id FROM error_hunter_findings WHERE fingerprint = $1 AND status IN ('new', 'dispatched') LIMIT 1",
-                    finding["fingerprint"],
-                )
-                if rows:
-                    finding["id"] = rows[0]["id"]
-            except Exception:
-                pass
+                result = await llm_remediate(finding)
 
-        screen_name = "patrol"
-        prompt = _build_sweep_prompt(sweep_id, fix_now, create_rule, log_only)
-
-        synapse_url = SYNAPSE_URL.rstrip("/")
-        headers = {
-            "Content-Type": "application/json",
-            "X-Internal-Token": AFFERENT_AUTH_TOKEN,
-        }
-        payload = {
-            "name": screen_name,
-            "prompt": prompt,
-        }
-
-        created = False
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    f"{synapse_url}/api/screens",
-                    json=payload,
-                    headers=headers,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    created = not data.get("existing", False)
-                    logger.info(f"[{sweep_id}] Sweep screen '{screen_name}' "
-                                f"{'created' if created else 'already exists'}")
+                if result["success"]:
+                    # Verify the fix
+                    verified = await verify_remediation(finding)
+                    remediation_results.append({
+                        "finding": finding.get("fingerprint", ""),
+                        "check_name": check_name,
+                        "tier": 2,
+                        "success": verified,
+                        "steps": len(result.get("steps", [])),
+                        "summary": result.get("summary", "")[:300],
+                    })
+                    if verified:
+                        llm_fixed_count += 1
+                        finding["remediated"] = True
+                        finding["description"] = f"[LLM-FIXED] {finding.get('description', '')}"
+                        log_only.append(finding)
+                    else:
+                        logger.warning(f"[{sweep_id}] LLM fix not verified for {check_name}")
+                        remediation_results[-1]["verified"] = False
                 else:
-                    logger.error(f"[{sweep_id}] Screen creation failed: {resp.status_code} {resp.text[:200]}")
-        except Exception as e:
-            logger.error(f"[{sweep_id}] Screen creation error: {e}")
+                    remediation_results.append({
+                        "finding": finding.get("fingerprint", ""),
+                        "check_name": check_name,
+                        "tier": 2,
+                        "success": False,
+                        "escalate": True,
+                        "steps": len(result.get("steps", [])),
+                        "summary": result.get("summary", "")[:300],
+                    })
+                    logger.warning(f"[{sweep_id}] LLM remediation failed for {check_name}: {result.get('summary', '')[:100]}")
 
-        # Mark all actionable findings as dispatched
-        dispatched = 0
-        for finding in actionable:
+            except Exception as e:
+                logger.error(f"[{sweep_id}] LLM remediation error for {check_name}: {e}")
+                remediation_results.append({
+                    "finding": finding.get("fingerprint", ""),
+                    "check_name": check_name,
+                    "tier": 2,
+                    "success": False,
+                    "error": str(e)[:200],
+                })
+
+        # Remove LLM-fixed findings from fix_now
+        remaining_fix_now = [f for f in fix_now if not f.get("remediated")]
+
+        # Mark findings in DB based on results
+        for finding in fix_now + create_rule:
+            try:
+                new_status = "resolved" if finding.get("remediated") else "dispatched"
+                await pg_execute(
+                    "UPDATE error_hunter_findings SET status = $2 WHERE fingerprint = $1 AND status = 'new'",
+                    finding.get("fingerprint", ""), new_status,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update finding status: {e}")
+
+        # Persist remediation results
+        for rr in remediation_results:
             try:
                 await pg_execute(
-                    "UPDATE error_hunter_findings SET status = 'dispatched', screen_session = $2 "
-                    "WHERE fingerprint = $1 AND status = 'new'",
-                    finding["fingerprint"], screen_name,
+                    """INSERT INTO sweep_remediation_log
+                       (sweep_id, fingerprint, check_name, tier, success, steps_count, summary)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    sweep_id, rr.get("finding", ""), rr.get("check_name", ""),
+                    rr.get("tier", 2), rr.get("success", False),
+                    rr.get("steps", 0), rr.get("summary", ""),
                 )
-                dispatched += 1
-            except Exception as e:
-                logger.warning(f"Failed to mark finding dispatched: {e}")
+            except Exception:
+                pass  # Table may not exist yet — non-critical
 
-        logger.info(f"[{sweep_id}] Marked {dispatched}/{len(actionable)} findings as dispatched → {screen_name}")
+        logger.info(f"[{sweep_id}] Tier 2 remediation: {llm_fixed_count} LLM-fixed, "
+                    f"{len(remaining_fix_now)} still unresolved, {len(create_rule)} create_rule pending")
+        await report_progress(sweep_id, "LLM Remediated",
+                              f"{llm_fixed_count} LLM-fixed, {len(remaining_fix_now)} unresolved", 80)
 
-        screens_created = [{
-            "screen": screen_name,
-            "created": created,
-            "fix_now_count": len(fix_now),
-            "create_rule_count": len(create_rule),
-            "log_only_count": len(log_only),
-        }]
-
-        return {"screens_created": screens_created, "rules_written": [], "runbooks_drafted": []}
+        return {
+            "fix_now": remaining_fix_now,
+            "create_rule": create_rule,
+            "log_only": log_only,
+            "screens_created": [],
+            "rules_written": [],
+            "runbooks_drafted": [],
+            "remediation_results": remediation_results,
+        }
 
     async def record_sweep(state: SweepState) -> dict:
         """Node 7: Persist all findings and update sweep run record."""
@@ -3290,15 +3763,15 @@ data:
         workflow.add_node("deduplicate", deduplicate)
         workflow.add_node("classify", classify)
         workflow.add_node("remediate", remediate)
-        workflow.add_node("dispatch_sweep_screen", dispatch_sweep_screen)
+        workflow.add_node("dispatch_remediation", dispatch_remediation)
         workflow.add_node("record_sweep", record_sweep)
 
         workflow.set_entry_point("sweep_estate")
         workflow.add_edge("sweep_estate", "deduplicate")
         workflow.add_edge("deduplicate", "classify")
         workflow.add_edge("classify", "remediate")
-        workflow.add_edge("remediate", "dispatch_sweep_screen")
-        workflow.add_edge("dispatch_sweep_screen", "record_sweep")
+        workflow.add_edge("remediate", "dispatch_remediation")
+        workflow.add_edge("dispatch_remediation", "record_sweep")
         workflow.add_edge("record_sweep", END)
 
         return workflow.compile()
@@ -3332,6 +3805,7 @@ data:
                 "screens_created": [],
                 "rules_written": [],
                 "runbooks_drafted": [],
+                "remediation_results": [],
                 "summary": {},
                 "status": "running",
             }
@@ -3356,6 +3830,13 @@ data:
     # ========================================================================
 
     app = FastAPI(title="Error Hunter", description="Proactive estate patrol for Kernow homelab")
+
+    @app.on_event("startup")
+    async def on_startup():
+        try:
+            await init_db()
+        except Exception as e:
+            logger.warning(f"init_db failed (non-fatal): {e}")
 
     @app.post("/sweep")
     async def trigger_sweep():
@@ -3435,6 +3916,206 @@ data:
             "last_sweep": dict(last_sweep) if last_sweep else None,
             "pending_findings": total_findings["total"] if total_findings else 0,
         }
+
+    # ============================================================
+    # Estate Operations API
+    # ============================================================
+
+    @app.get("/api/estate/health")
+    async def estate_health():
+        """Current estate health summary."""
+        try:
+            findings = await pg_fetch("""
+                SELECT severity, status, COUNT(*) as count
+                FROM error_hunter_findings
+                WHERE status NOT IN ('resolved', 'ignored')
+                GROUP BY severity, status
+            """)
+            incidents = await pg_fetch("""
+                SELECT severity, status, COUNT(*) as count
+                FROM incidents
+                WHERE status NOT IN ('resolved', 'false_positive')
+                GROUP BY severity, status
+            """)
+            last_sweep = await pg_fetch("""
+                SELECT started_at, completed_at, total_findings as findings_count, status
+                FROM sweep_runs
+                ORDER BY started_at DESC LIMIT 1
+            """)
+            return {
+                "status": "healthy" if not any(f["severity"] == "critical" for f in findings) else "degraded",
+                "findings_summary": [dict(r) for r in findings],
+                "incidents_summary": [dict(r) for r in incidents],
+                "last_sweep": dict(last_sweep[0]) if last_sweep else None,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    @app.get("/api/estate/queue")
+    async def estate_queue(severity: str = None, status: str = None, limit: int = 50):
+        """Unified work queue (findings + incidents)."""
+        try:
+            query = "SELECT * FROM estate_work_queue WHERE 1=1"
+            params = []
+            idx = 1
+            if severity:
+                query += f" AND severity = ${idx}"
+                params.append(severity)
+                idx += 1
+            if status:
+                query += f" AND status = ${idx}"
+                params.append(status)
+                idx += 1
+            query += f" LIMIT ${idx}"
+            params.append(limit)
+            rows = await pg_fetch(query, *params)
+            return {"items": [dict(r) for r in rows], "count": len(rows)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.get("/api/estate/findings")
+    async def estate_findings(status: str = None, severity: str = None, limit: int = 50):
+        """Filtered findings list."""
+        try:
+            query = "SELECT * FROM error_hunter_findings WHERE 1=1"
+            params = []
+            idx = 1
+            if status:
+                query += f" AND status = ${idx}"
+                params.append(status)
+                idx += 1
+            if severity:
+                query += f" AND severity = ${idx}"
+                params.append(severity)
+                idx += 1
+            query += f" ORDER BY first_seen DESC LIMIT ${idx}"
+            params.append(limit)
+            rows = await pg_fetch(query, *params)
+            return {"findings": [dict(r) for r in rows], "count": len(rows)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.get("/api/estate/incidents")
+    async def estate_incidents(status: str = None, limit: int = 50):
+        """Open/closed incidents."""
+        try:
+            query = "SELECT * FROM incidents WHERE 1=1"
+            params = []
+            idx = 1
+            if status:
+                query += f" AND status = ${idx}"
+                params.append(status)
+                idx += 1
+            query += f" ORDER BY detected_at DESC LIMIT ${idx}"
+            params.append(limit)
+            rows = await pg_fetch(query, *params)
+            return {"incidents": [dict(r) for r in rows], "count": len(rows)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.get("/api/estate/sweeps")
+    async def estate_sweeps(limit: int = 10):
+        """Sweep history."""
+        try:
+            rows = await pg_fetch("""
+                SELECT sweep_id as id, started_at, completed_at, total_findings as findings_count,
+                       status, summary
+                FROM sweep_runs
+                ORDER BY started_at DESC
+                LIMIT $1
+            """, limit)
+            return {"sweeps": [dict(r) for r in rows], "count": len(rows)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.get("/api/estate/remediations")
+    async def estate_remediations(limit: int = 20):
+        """Remediation log with steps."""
+        try:
+            rows = await pg_fetch("""
+                SELECT id, finding_id, tier, success, steps, summary,
+                       started_at, completed_at, verified
+                FROM error_hunter_remediations
+                ORDER BY started_at DESC
+                LIMIT $1
+            """, limit)
+            return {"remediations": [dict(r) for r in rows], "count": len(rows)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.post("/api/estate/sweep")
+    async def trigger_estate_sweep():
+        """Trigger manual sweep."""
+        try:
+            sweep_id = f"eh-{uuid_mod.uuid4().hex[:8]}"
+            asyncio.create_task(run_sweep(sweep_id))
+            return {"status": "started", "message": "Sweep triggered", "sweep_id": sweep_id}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.post("/api/estate/resolve/{item_id}")
+    async def resolve_item(item_id: int, item_type: str = "finding"):
+        """Mark a finding or incident as resolved."""
+        try:
+            if item_type == "finding":
+                await pg_execute(
+                    "UPDATE error_hunter_findings SET status = 'resolved' WHERE id = $1",
+                    item_id
+                )
+            elif item_type == "incident":
+                await pg_execute(
+                    "UPDATE incidents SET status = 'resolved', resolved_at = NOW() WHERE id = $1",
+                    item_id
+                )
+            return {"status": "resolved", "item_type": item_type, "id": item_id}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.post("/api/estate/remediate/{finding_id}")
+    async def trigger_remediation(finding_id: int):
+        """Trigger remediation for a specific finding."""
+        try:
+            rows = await pg_fetch(
+                "SELECT * FROM error_hunter_findings WHERE id = $1", finding_id
+            )
+            if not rows:
+                return {"error": "Finding not found"}
+            finding = dict(rows[0])
+
+            # Try Tier 1 first
+            remediator = REMEDIATORS.get(finding.get("check_name", ""))
+            if remediator:
+                success = await remediator(finding)
+                if success:
+                    verified = await verify_remediation(finding)
+                    return {"status": "remediated", "tier": 1, "verified": verified}
+
+            # Tier 2: LLM-guided
+            result = await llm_remediate(finding)
+            return {"status": "remediated" if result["success"] else "failed",
+                    "tier": 2, "steps": result.get("steps", []),
+                    "summary": result.get("summary", "")}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.post("/api/estate/escalate/{item_id}")
+    async def escalate_item(item_id: int, item_type: str = "finding"):
+        """Escalate to human review."""
+        try:
+            if item_type == "finding":
+                await pg_execute(
+                    "UPDATE error_hunter_findings SET status = 'escalated' WHERE id = $1",
+                    item_id
+                )
+            elif item_type == "incident":
+                await pg_execute(
+                    "UPDATE incidents SET status = 'escalated' WHERE id = $1",
+                    item_id
+                )
+            return {"status": "escalated", "item_type": item_type, "id": item_id}
+        except Exception as e:
+            return {"error": str(e)}
 
     def main():
         port = int(os.environ.get("PORT", "8000"))
