@@ -1195,6 +1195,86 @@ data:
             return False
 
     # ========================================================================
+    # CHECK: BESZEL AGENT MONITORING
+    # ========================================================================
+
+    async def check_beszel() -> list:
+        """Check Beszel system monitoring — agent status and version drift."""
+        findings = []
+        beszel_url = os.environ.get("BESZEL_URL", "")
+        beszel_user = os.environ.get("BESZEL_USERNAME", "")
+        beszel_pass = os.environ.get("BESZEL_PASSWORD", "")
+
+        if not all([beszel_url, beszel_user, beszel_pass]):
+            logger.warning("Beszel credentials not configured, skipping check")
+            return findings
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                # Authenticate (PocketBase user auth)
+                auth_resp = await client.post(
+                    f"{beszel_url}/api/collections/users/auth-with-password",
+                    json={"identity": beszel_user, "password": beszel_pass},
+                )
+                if auth_resp.status_code != 200:
+                    findings.append(make_finding(
+                        "observability", "beszel_auth_failed", "global",
+                        "beszel/hub", "warning",
+                        f"Beszel hub auth failed: HTTP {auth_resp.status_code}",
+                    ))
+                    return findings
+
+                token = auth_resp.json().get("token", "")
+                headers = {"Authorization": token}
+
+                # Get hub version from key endpoint
+                hub_version = ""
+                try:
+                    key_resp = await client.get(f"{beszel_url}/api/beszel/getkey", headers=headers)
+                    if key_resp.status_code == 200:
+                        hub_version = key_resp.json().get("v", "")
+                except Exception:
+                    pass
+
+                # Get all systems
+                sys_resp = await client.get(
+                    f"{beszel_url}/api/collections/systems/records?perPage=50",
+                    headers=headers,
+                )
+                systems = sys_resp.json().get("items", [])
+
+                for system in systems:
+                    name = system.get("name", "unknown")
+                    status = system.get("status", "unknown")
+                    info = system.get("info", {})
+                    agent_version = info.get("v", "")
+
+                    # Check for down/pending agents
+                    if status != "up":
+                        findings.append(make_finding(
+                            "observability", "beszel_agent_down", "global",
+                            f"beszel/{name}", "warning",
+                            f"Beszel agent '{name}' status: {status}",
+                            {"host": system.get("host"), "status": status},
+                            "Check agent connectivity and SSH key",
+                        ))
+
+                    # Check for version drift (agent behind hub)
+                    if hub_version and agent_version and agent_version != hub_version:
+                        findings.append(make_finding(
+                            "observability", "beszel_agent_outdated", "global",
+                            f"beszel/{name}/version", "info",
+                            f"Beszel agent '{name}' version {agent_version} (hub: {hub_version})",
+                            {"agent_version": agent_version, "hub_version": hub_version},
+                            f"SSH to {system.get('host')} and run: beszel-agent update",
+                        ))
+
+        except Exception as e:
+            logger.error(f"Beszel check error: {e}")
+
+        return findings
+
+    # ========================================================================
     # LANGGRAPH STATE AND NODES
     # ========================================================================
 
@@ -1216,7 +1296,7 @@ data:
         """Node 1: Run all checks in parallel across the estate."""
         sweep_id = state["sweep_id"]
         logger.info(f"[{sweep_id}] Starting estate sweep...")
-        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 10 checks", 10)
+        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 11 checks", 10)
 
         # Record sweep start
         try:
@@ -1239,6 +1319,7 @@ data:
             check_logs("monitoring"),
             check_mcp_health(),
             check_renovate(),
+            check_beszel(),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1925,6 +2006,18 @@ spec:
                 secretKeyRef:
                   name: mcp-github
                   key: GITHUB_TOKEN
+            - name: BESZEL_URL
+              value: "https://beszel.kernow.io"
+            - name: BESZEL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: beszel-credentials
+                  key: USERNAME
+            - name: BESZEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: beszel-credentials
+                  key: PASSWORD
           volumeMounts:
             - name: code
               mountPath: /code
@@ -1971,3 +2064,25 @@ spec:
     - port: 8000
       targetPort: 8000
       name: http
+---
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: beszel-credentials
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /observability/beszel
+  managedSecretReference:
+    secretName: beszel-credentials
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
