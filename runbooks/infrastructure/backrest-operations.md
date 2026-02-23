@@ -2,14 +2,13 @@
 
 ## Overview
 
-Backrest provides a web UI for managing restic backups of VMs and LXC containers. It runs in the agentic cluster and stores backups in Garage S3.
+Backrest provides a web UI for managing restic backups of VMs and LXC containers. It runs in the **monit cluster** (`backrest` namespace) and stores backups in Garage S3.
 
 ## Access
 
 | Method | URL | Notes |
 |--------|-----|-------|
-| Traefik Ingress | https://backrest.kernow.io | Via Agentic Traefik LB (10.20.0.90) |
-| NodePort | http://10.20.0.40:31115 | Direct access / fallback |
+| Traefik Ingress | https://backrest.kernow.io | Via Monit Traefik LB (10.10.0.31) |
 
 **Authentication**: Username/password configured in Backrest UI on first login.
 
@@ -20,7 +19,7 @@ Backrest provides a web UI for managing restic backups of VMs and LXC containers
 │                              BACKREST BACKUP FLOW                                 │
 ├──────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                  │
-│   BACKREST (Agentic Cluster)                                                     │
+│   BACKREST (Monit Cluster)                                                       │
 │   Namespace: backrest                                                            │
 │   Pod: backrest-xxx                                                              │
 │   ┌────────────────────────────────────────────────────────────────────────┐    │
@@ -214,6 +213,33 @@ infrastructure-mcp: kubectl_logs(namespace="backrest", pod_name="backrest")
 
 ## Troubleshooting
 
+### Pod Restarting (SandboxChanged / Critical Alert)
+
+**Symptoms**: Coroot shows backrest as critical; pod has multiple restarts; pod events show `SandboxChanged`.
+
+**Root cause**: On the single-node monit cluster, Cilium CNI events (CNI restart, node-level network disruption) cause all pod network sandboxes to be recreated. This forces pod restarts with `Exit Code: 255, Reason: Unknown`. This is a transient infrastructure event, NOT a backrest application failure.
+
+**Diagnosis**:
+```bash
+# Check pod events
+kubectl get events -n backrest --sort-by='.lastTimestamp'
+# Look for: reason=SandboxChanged
+
+# Check restart count
+kubectl get pods -n backrest
+
+# Check if backups completed before restart
+kubectl logs -n backrest deployment/backrest --previous | grep -E "running task|failed"
+```
+
+**Resolution**:
+1. If pod is now running and healthy → incident is self-resolving (CNI recovered)
+2. Check that scheduled backups completed successfully (they may have been interrupted)
+3. If backups were interrupted, trigger manual runs via Backrest UI
+4. If restarts persist, investigate Cilium health on the monit node
+
+**Prevention**: Image pinned to specific version (`v1.12.0`) with `imagePullPolicy: IfNotPresent` — prevents pulling unexpected new versions on restart.
+
 ### SSH Connection Failed
 
 1. **Verify SSH key is installed on target**:
@@ -290,23 +316,23 @@ backrest
 ### Deployment
 ```yaml
 Name: backrest
-Image: garethgeorge/backrest:latest
+Cluster: monit
+Image: garethgeorge/backrest:v1.12.0
 Port: 9898
 ```
 
 ### Service
 ```yaml
 Name: backrest
-Type: NodePort
+Type: ClusterIP
 Port: 9898
-NodePort: 31115
 ```
 
 ### Ingress
 ```yaml
 Name: backrest
 Host: backrest.kernow.io
-IngressClass: traefik
+IngressClass: traefik-monit
 ```
 
 ### Secrets
@@ -347,7 +373,7 @@ ssh root@<new-host> "mkdir -p /root/.ssh && echo '$PUBLIC_KEY' >> /root/.ssh/aut
 
 ### 2. Update SSH Config Secret
 
-Edit `/home/agentic_lab/kubernetes/applications/backrest/ssh-secret.yaml`:
+Edit `/home/monit_homelab/kubernetes/applications/backrest/ssh-secret.yaml`:
 ```yaml
 # Add new host entry to config
 Host <new-host>
@@ -359,12 +385,10 @@ Host <new-host>
 ### 3. Commit and Sync
 
 ```bash
-/home/scripts/git-commit-submodule.sh agentic_lab "feat(backrest): add <new-host> SSH config"
+/home/scripts/git-commit-submodule.sh monit_homelab "feat(backrest): add <new-host> SSH config"
 
-# Sync ArgoCD
-KUBECONFIG=/home/prod_homelab/infrastructure/terraform/generated/kubeconfig \
-  kubectl patch application backrest -n argocd --type merge \
-  -p '{"operation": {"initiatedBy": {"username": "claude"}, "sync": {"prune": true}}}'
+# Sync via ArgoCD (runs on prod cluster)
+# ArgoCD auto-syncs — or trigger manually via ArgoCD UI
 ```
 
 ### 4. Create Backup Plan in UI
