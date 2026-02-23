@@ -1790,11 +1790,15 @@ data:
                 if isinstance(pod_list, list):
                     for pod in pod_list:
                         if isinstance(pod, dict) and not pod.get("ready", True):
+                            pod_status = pod.get("status", "")
+                            # Skip completed Job pods — Succeeded/Completed is normal
+                            if pod_status in ("Succeeded", "Completed"):
+                                continue
                             findings.append(make_finding(
                                 "backups", "velero_pod_unhealthy", cluster_name,
                                 f"velero/{pod.get('name', 'unknown')}", "warning",
-                                f"Velero pod unhealthy on {cluster_name}: {pod.get('name')} ({pod.get('status')})",
-                                {"pod": pod.get("name"), "status": pod.get("status")},
+                                f"Velero pod unhealthy on {cluster_name}: {pod.get('name')} ({pod_status})",
+                                {"pod": pod.get("name"), "status": pod_status},
                             ))
 
                 # Check for failed backup jobs
