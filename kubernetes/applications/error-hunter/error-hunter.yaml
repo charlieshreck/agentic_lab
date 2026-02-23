@@ -1198,8 +1198,49 @@ data:
     # CHECK: BESZEL AGENT MONITORING
     # ========================================================================
 
+    async def update_beszel_agent(host: str, name: str) -> tuple[bool, str]:
+        """SSH to a host and update the beszel-agent binary, then restart it."""
+        import asyncssh
+        ssh_password = os.environ.get("SSH_ROOT_PASSWORD", "")
+        if not ssh_password:
+            return False, "SSH_ROOT_PASSWORD not configured"
+
+        try:
+            async with asyncssh.connect(
+                host, username="root", password=ssh_password,
+                known_hosts=None, connect_timeout=15,
+            ) as conn:
+                # Find the agent binary from the systemd service
+                result = await conn.run(
+                    "grep -oP 'ExecStart=\\K\\S+' /etc/systemd/system/beszel-agent.service",
+                    check=False, timeout=10,
+                )
+                agent_path = result.stdout.strip()
+                if not agent_path:
+                    return False, "Could not find agent binary path in systemd service"
+
+                # Run the built-in update command
+                result = await conn.run(f"{agent_path} update", check=False, timeout=60)
+                update_output = result.stdout.strip() + result.stderr.strip()
+
+                # Restart the service
+                result = await conn.run(
+                    "systemctl restart beszel-agent", check=False, timeout=15,
+                )
+                if result.exit_status != 0:
+                    return False, f"Update succeeded but restart failed: {result.stderr.strip()}"
+
+                return True, update_output
+
+        except asyncssh.PermissionDenied:
+            return False, f"SSH auth failed for root@{host}"
+        except asyncssh.ConnectionLost:
+            return False, f"SSH connection lost to {host}"
+        except (OSError, asyncssh.Error) as e:
+            return False, f"SSH error: {e}"
+
     async def check_beszel() -> list:
-        """Check Beszel system monitoring — agent status and version drift."""
+        """Check Beszel system monitoring — agent status, version drift, and auto-update."""
         findings = []
         beszel_url = os.environ.get("BESZEL_URL", "")
         beszel_user = os.environ.get("BESZEL_USERNAME", "")
@@ -1248,6 +1289,7 @@ data:
                     status = system.get("status", "unknown")
                     info = system.get("info", {})
                     agent_version = info.get("v", "")
+                    host = system.get("host", "")
 
                     # Check for down/pending agents
                     if status != "up":
@@ -1255,19 +1297,31 @@ data:
                             "observability", "beszel_agent_down", "global",
                             f"beszel/{name}", "warning",
                             f"Beszel agent '{name}' status: {status}",
-                            {"host": system.get("host"), "status": status},
+                            {"host": host, "status": status},
                             "Check agent connectivity and SSH key",
                         ))
 
-                    # Check for version drift (agent behind hub)
+                    # Check for version drift and auto-update
                     if hub_version and agent_version and agent_version != hub_version:
-                        findings.append(make_finding(
-                            "observability", "beszel_agent_outdated", "global",
-                            f"beszel/{name}/version", "info",
-                            f"Beszel agent '{name}' version {agent_version} (hub: {hub_version})",
-                            {"agent_version": agent_version, "hub_version": hub_version},
-                            f"SSH to {system.get('host')} and run: beszel-agent update",
-                        ))
+                        logger.info(f"Beszel agent '{name}' at {host} outdated ({agent_version} -> {hub_version}), attempting update...")
+                        success, msg = await update_beszel_agent(host, name)
+
+                        if success:
+                            findings.append(make_finding(
+                                "observability", "beszel_agent_updated", "global",
+                                f"beszel/{name}/version", "info",
+                                f"Beszel agent '{name}' auto-updated from {agent_version} to {hub_version} on {host}",
+                                {"agent_version": agent_version, "hub_version": hub_version, "host": host},
+                            ))
+                            logger.info(f"Beszel agent '{name}' updated successfully: {msg}")
+                        else:
+                            findings.append(make_finding(
+                                "observability", "beszel_agent_update_failed", "global",
+                                f"beszel/{name}/version", "warning",
+                                f"Beszel agent '{name}' version {agent_version} (hub: {hub_version}) — auto-update failed: {msg}",
+                                {"agent_version": agent_version, "hub_version": hub_version, "host": host, "error": msg},
+                                f"SSH to {host} and run: beszel-agent update",
+                            ))
 
         except Exception as e:
             logger.error(f"Beszel check error: {e}")
@@ -1930,6 +1984,7 @@ data:
     uvicorn>=0.34.0
     httpx>=0.28.0
     pydantic>=2.11.0
+    asyncssh>=2.18.0
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -2018,6 +2073,11 @@ spec:
                 secretKeyRef:
                   name: beszel-credentials
                   key: PASSWORD
+            - name: SSH_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-opnsense
+                  key: ROOT_PASSWORD
           volumeMounts:
             - name: code
               mountPath: /code
