@@ -133,7 +133,20 @@ These are harmless old backup snapshots. They can be cleaned up from PBS if stor
 - PBS UI > Datastore > pbs-datastore > Content > select old group > Remove
 - Or leave them as archive — they don't affect active backups
 
-**Known Decommissioned IDs**: vm/330, vm/331, vm/332, vm/133, vm/104, ct/105, ct/139, ct/103
+**Known Decommissioned IDs** (cleaned from PBS on 2026-02-23): vm/330, vm/331, vm/332, vm/133, vm/104, ct/105, ct/139, ct/103
+
+**Cleanup via PBS API**:
+```bash
+# Get API ticket
+curl -s -k -X POST https://10.10.0.151:8007/api2/json/access/ticket \
+  -d "username=root@pam" -d "password=<password>" > /tmp/pbs_ticket.json
+PBS_TICKET=$(python3 -c 'import json; print(json.load(open("/tmp/pbs_ticket.json"))["data"]["ticket"])')
+PBS_CSRF=$(python3 -c 'import json; print(json.load(open("/tmp/pbs_ticket.json"))["data"]["CSRFPreventionToken"])')
+
+# Delete a group (example: vm/104)
+curl -s -k -X DELETE -b "PBSAuthCookie=$PBS_TICKET" -H "CSRFPreventionToken: $PBS_CSRF" \
+  "https://10.10.0.151:8007/api2/json/admin/datastore/pbs-datastore/groups?backup-type=vm&backup-id=104"
+```
 
 ## Proxmox Host to VM/LXC Mapping
 
@@ -158,6 +171,17 @@ These are harmless old backup snapshots. They can be cleaned up from PBS if stor
 | error-hunter sweep (PBS API) | Active — checks backup group ages periodically |
 | alert-forwarder CronJob | Active — forwards PBS alerts to LangGraph |
 | Proxmox email notifications | Active — vzdump sends email on failure |
+
+## Incident History
+
+### 2026-02-23: NFS Stale Handles (9-day Outage)
+
+- **Impact**: All backups across all three hosts failed for 9 days (Feb 14-23)
+- **Root Cause**: PBS services cached stale NFS file descriptors after a TrueNAS-HDD NFS disruption
+- **Error**: `unable to open chunk store at "/mnt/pbs-datastore/.chunks" - No such file or directory`
+- **Fix**: NFS mount was restored; PBS services restarted; manual backups triggered
+- **Cleanup**: 8 decommissioned backup groups removed from PBS (vm/104, vm/133, vm/330-332, ct/103, ct/105, ct/139)
+- **Prevention**: Documented stale NFS handle pattern in this runbook
 
 ## Related Runbooks
 
