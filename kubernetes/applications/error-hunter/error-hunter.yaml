@@ -2068,6 +2068,256 @@ data:
         return findings
 
     # ========================================================================
+    # CHECK: OPNSENSE UPDATES & SECURITY
+    # ========================================================================
+
+    async def check_opnsense_updates() -> list:
+        """Check OPNsense firmware updates, package security audit, and plugin updates."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # -- Firmware updates --
+        try:
+            fw = await call_mcp_tool_safe(infra, "check_firmware_updates", timeout=30.0)
+            if fw:
+                # Parse firmware update info
+                updates_avail = False
+                fw_text = ""
+                if isinstance(fw, dict):
+                    updates_avail = fw.get("updates_available", fw.get("needs_reboot", False))
+                    new_ver = fw.get("new_version", fw.get("upgrade_version", ""))
+                    cur_ver = fw.get("current_version", fw.get("product_version", ""))
+                    pkg_count = fw.get("updates_count", fw.get("package_updates", 0))
+                    fw_text = str(fw)
+                    if new_ver and new_ver != cur_ver:
+                        updates_avail = True
+                    if isinstance(pkg_count, int) and pkg_count > 0:
+                        updates_avail = True
+                elif isinstance(fw, str):
+                    fw_text = fw
+                    updates_avail = any(kw in fw.lower() for kw in ["update", "upgrade", "available"])
+
+                if updates_avail:
+                    findings.append(make_finding(
+                        "infrastructure", "opnsense_firmware_update", "global",
+                        "opnsense/firmware", "info",
+                        f"OPNsense firmware update available",
+                        {"raw": fw_text[:500]},
+                        "Apply firmware update via OPNsense UI → System → Firmware",
+                    ))
+        except Exception as e:
+            logger.error(f"OPNsense firmware check error: {e}")
+
+        # -- Package security audit --
+        try:
+            audit = await call_mcp_tool_safe(infra, "get_pkg_audit", timeout=30.0)
+            if audit:
+                vulns = []
+                if isinstance(audit, dict):
+                    vulns = audit.get("vulnerabilities", audit.get("audit", []))
+                    if isinstance(vulns, str) and "0 problem" in vulns:
+                        vulns = []
+                    elif isinstance(vulns, str):
+                        # Parse "N problem(s)" format
+                        import re
+                        m = re.search(r"(\d+)\s+problem", vulns)
+                        if m and int(m.group(1)) > 0:
+                            findings.append(make_finding(
+                                "infrastructure", "opnsense_pkg_vuln", "global",
+                                "opnsense/pkg-audit", "warning",
+                                f"OPNsense package security: {vulns[:200]}",
+                                {"raw": str(audit)[:500]},
+                                "Review pkg audit and update affected packages",
+                            ))
+                        vulns = []
+                if isinstance(vulns, list) and len(vulns) > 0:
+                    findings.append(make_finding(
+                        "infrastructure", "opnsense_pkg_vuln", "global",
+                        "opnsense/pkg-audit", "warning",
+                        f"OPNsense has {len(vulns)} package vulnerability(ies)",
+                        {"count": len(vulns), "vulns": str(vulns)[:500]},
+                        "Update vulnerable packages via OPNsense firmware page",
+                    ))
+        except Exception as e:
+            logger.error(f"OPNsense pkg audit check error: {e}")
+
+        # -- Installed plugins --
+        try:
+            plugins = await call_mcp_tool_safe(infra, "list_installed_plugins", timeout=30.0)
+            if plugins:
+                plugin_list = extract_list(plugins, "plugins", "result")
+                outdated = []
+                for p in plugin_list:
+                    if not isinstance(p, dict):
+                        continue
+                    name = p.get("name", "unknown")
+                    installed = p.get("installed_version", p.get("version", ""))
+                    available = p.get("available_version", p.get("latest", ""))
+                    needs_update = p.get("outdated", False)
+                    if needs_update or (available and installed and available != installed):
+                        outdated.append(name)
+                if outdated:
+                    findings.append(make_finding(
+                        "infrastructure", "opnsense_plugin_update", "global",
+                        "opnsense/plugins", "info",
+                        f"{len(outdated)} OPNsense plugin(s) have updates: {', '.join(outdated[:5])}",
+                        {"plugins": outdated},
+                        "Update plugins via OPNsense UI → System → Firmware → Plugins",
+                    ))
+        except Exception as e:
+            logger.error(f"OPNsense plugin check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: CLOUDFLARE HEALTH
+    # ========================================================================
+
+    async def check_cloudflare_health() -> list:
+        """Check Cloudflare tunnel connections and zone status."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # -- Tunnel connection details --
+        try:
+            tunnels_result = await call_mcp_tool_safe(infra, "cloudflare_list_tunnels",
+                                                       {"params": {"response_format": "json"}}, timeout=30.0)
+            tunnels = extract_list(tunnels_result, "tunnels")
+            for tunnel in tunnels:
+                if not isinstance(tunnel, dict):
+                    continue
+                t_id = tunnel.get("id", "")
+                t_name = tunnel.get("name", "unknown")
+                t_status = str(tunnel.get("status", "")).lower()
+
+                # If tunnel has an ID, get detailed connection info
+                if t_id and len(t_id) == 36:
+                    try:
+                        detail = await call_mcp_tool_safe(
+                            infra, "cloudflare_get_tunnel_status",
+                            {"params": {"tunnel_id": t_id}}, timeout=20.0)
+                        if detail and isinstance(detail, dict):
+                            conns = detail.get("connections", detail.get("conns", []))
+                            if isinstance(conns, list) and len(conns) == 0:
+                                findings.append(make_finding(
+                                    "infrastructure", "cloudflare_tunnel_no_connections", "global",
+                                    f"cloudflare/tunnel-{t_name}/conns", "warning",
+                                    f"Cloudflare tunnel '{t_name}' has 0 active connections",
+                                    {"tunnel": t_name, "tunnel_id": t_id},
+                                    "Check cloudflared pod in prod cluster",
+                                ))
+                    except Exception as e:
+                        logger.warning(f"Tunnel detail check error for {t_name}: {e}")
+        except Exception as e:
+            logger.error(f"Cloudflare tunnel detail check error: {e}")
+
+        # -- Zone status --
+        try:
+            zones_result = await call_mcp_tool_safe(infra, "cloudflare_list_zones",
+                                                     {"params": {"response_format": "json"}}, timeout=20.0)
+            zones = extract_list(zones_result, "zones")
+            for zone in zones:
+                if not isinstance(zone, dict):
+                    continue
+                z_name = zone.get("name", "unknown")
+                z_status = str(zone.get("status", "")).lower()
+                if z_status not in ("active", ""):
+                    findings.append(make_finding(
+                        "infrastructure", "cloudflare_zone_inactive", "global",
+                        f"cloudflare/zone-{z_name}", "warning",
+                        f"Cloudflare zone '{z_name}' status: {z_status}",
+                        {"zone": z_name, "status": z_status},
+                        "Check Cloudflare dashboard for zone issues",
+                    ))
+        except Exception as e:
+            logger.error(f"Cloudflare zone check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: PROXMOX CLUSTER HEALTH
+    # ========================================================================
+
+    async def check_proxmox_health() -> list:
+        """Check Proxmox cluster quorum, recent failed tasks, and node health."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # -- Cluster status / quorum --
+        try:
+            cluster = await call_mcp_tool_safe(
+                infra, "proxmox_get_cluster_status",
+                {"params": {"host": "all", "response_format": "json"}}, timeout=30.0)
+            if cluster and isinstance(cluster, dict):
+                nodes = extract_list(cluster, "nodes", "result")
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    name = node.get("name", "unknown")
+                    online = node.get("online", node.get("status", ""))
+                    if str(online) in ("0", "false", "offline", "False"):
+                        findings.append(make_finding(
+                            "infrastructure", "proxmox_node_offline", "global",
+                            f"proxmox/node-{name}", "critical",
+                            f"Proxmox node '{name}' is offline",
+                            {"node": name, "online": online},
+                            "Check physical host or VM hosting Proxmox",
+                        ))
+        except Exception as e:
+            logger.error(f"Proxmox cluster status check error: {e}")
+
+        # -- Recent failed tasks --
+        PROXMOX_HOSTS = ["ruapehu", "pihanga", "hikurangi"]
+
+        async def _check_tasks(host: str) -> list:
+            host_findings = []
+            try:
+                tasks = await call_mcp_tool_safe(
+                    infra, "proxmox_list_tasks",
+                    {"params": {"host": host, "response_format": "json"}}, timeout=30.0)
+                if not tasks:
+                    return host_findings
+                task_list = extract_list(tasks, "tasks", "result")
+                now_ts = datetime.utcnow().timestamp()
+                recent_failures = []
+                for t in task_list:
+                    if not isinstance(t, dict):
+                        continue
+                    status = str(t.get("status", "")).lower()
+                    if status not in ("error", "failed"):
+                        continue
+                    # Only last 24h
+                    end_time = t.get("endtime", t.get("end_time", 0))
+                    if isinstance(end_time, (int, float)) and (now_ts - end_time) < 86400:
+                        task_type = t.get("type", t.get("worker_type", "unknown"))
+                        vmid = t.get("id", t.get("upid", ""))
+                        recent_failures.append(f"{task_type}({vmid})")
+
+                if recent_failures:
+                    host_findings.append(make_finding(
+                        "infrastructure", "proxmox_task_failed", "global",
+                        f"proxmox/{host}/tasks", "warning",
+                        f"Proxmox {host}: {len(recent_failures)} failed task(s) in last 24h: {', '.join(recent_failures[:5])}",
+                        {"host": host, "failed_tasks": recent_failures[:10]},
+                        "Check Proxmox task log for details",
+                    ))
+            except Exception as e:
+                logger.error(f"Proxmox task check error for {host}: {e}")
+            return host_findings
+
+        task_results = await asyncio.gather(
+            *[_check_tasks(h) for h in PROXMOX_HOSTS],
+            return_exceptions=True,
+        )
+        for result in task_results:
+            if isinstance(result, list):
+                findings.extend(result)
+            elif isinstance(result, Exception):
+                logger.error(f"Proxmox task check failed: {result}")
+
+        return findings
+
+    # ========================================================================
     # LANGGRAPH STATE AND NODES
     # ========================================================================
 
@@ -2089,7 +2339,7 @@ data:
         """Node 1: Run all checks in parallel across the estate."""
         sweep_id = state["sweep_id"]
         logger.info(f"[{sweep_id}] Starting estate sweep...")
-        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 18 checks", 10)
+        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 21 checks", 10)
 
         # Record sweep start
         try:
@@ -2120,6 +2370,9 @@ data:
             check_homepage(),
             check_media_pipeline(),
             check_home_automation(),
+            check_opnsense_updates(),
+            check_cloudflare_health(),
+            check_proxmox_health(),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2267,11 +2520,24 @@ data:
                                 "ha_entities_unavailable", "adguard_filters_stale",
                                 "tasmota_device_offline"):
                 create_rule.append(finding)
+            # Proxmox node offline is critical
+            elif check_name == "proxmox_node_offline":
+                fix_now.append(finding)
+            # Cloudflare tunnel no connections is urgent
+            elif check_name == "cloudflare_tunnel_no_connections":
+                fix_now.append(finding)
+            # OPNsense security vulns need attention
+            elif check_name == "opnsense_pkg_vuln":
+                create_rule.append(finding)
+            # Proxmox failed tasks, zone inactive, LAG degrade
+            elif check_name in ("proxmox_task_failed", "cloudflare_zone_inactive"):
+                create_rule.append(finding)
             # Informational items
             elif check_name in ("dns_missing_route", "dns_duplicate_rewrite",
                                 "nfs_snapshot_stale", "backrest_unreachable",
                                 "pbs_unreachable", "velero_pod_unhealthy",
-                                "k8s_pvc_pending"):
+                                "k8s_pvc_pending", "opnsense_firmware_update",
+                                "opnsense_plugin_update"):
                 log_only.append(finding)
             # Informational
             elif severity == "info":
