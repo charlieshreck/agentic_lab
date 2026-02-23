@@ -58,7 +58,7 @@ data:
     )
 
     # Afferent PWA
-    AFFERENT_URL = os.environ.get("AFFERENT_URL", "http://10.10.0.22:3456")
+    AFFERENT_URL = os.environ.get("AFFERENT_URL", "http://10.10.0.22:3456")  # Tamar PWA
     AFFERENT_AUTH_TOKEN = os.environ.get("AFFERENT_AUTH_TOKEN", "")
     AFFERENT_WEBHOOK_URL = os.environ.get("AFFERENT_WEBHOOK_URL", f"{AFFERENT_URL}/webhook/ingest")
 
@@ -1550,7 +1550,7 @@ data:
             }
 
     async def create_screen(state: IncidentState) -> dict:
-        """Node 4: Mark incident as ready for error-hunter pickup (no screen dispatch)."""
+        """Node 4: Dispatch incident to Claude patrol screen for investigation."""
         if state.get("status") == "false_positive":
             return {"screen_session": "", "status": "false_positive"}
 
@@ -1559,19 +1559,87 @@ data:
             return {"screen_session": "", "status": "error"}
 
         try:
-            # Mark as awaiting_review — error-hunter sweep will pick it up
-            await pg_update_incident(incident_id, status="awaiting_review",
-                                      model_used=state.get("recommended_model", "sonnet"))
+            recommended_model = state.get("recommended_model", "sonnet")
+            severity = state.get("severity", "warning")
+            alert_name = state.get("alert_name", "Unknown")
+            description = state.get("description", "No description")
+            assessment = state.get("assessment", {})
 
-            # Still notify Afferent/Tamar for real-time UI updates
+            # Mark as investigating
+            await pg_update_incident(incident_id, status="investigating",
+                                      model_used=recommended_model,
+                                      screen_session="patrol")
+
+            # Build investigation prompt for Claude
+            prompt = f"""# Incident Investigation: {alert_name} (#{incident_id})
+
+**Severity**: {severity}
+**Source**: {state.get('source', 'unknown')}
+**Description**: {description}
+
+## AI Assessment
+{assessment.get('assessment', 'No assessment available')}
+Confidence: {assessment.get('confidence', 'unknown')}
+
+## Your Task
+
+1. **Investigate** — Use MCP tools to understand the root cause:
+   - Check pod/deployment status, logs, metrics
+   - Look at recent changes (ArgoCD sync status, recent commits)
+   - Check related services and dependencies
+
+2. **Fix** — Resolve the issue:
+   - Follow GitOps: edit manifests, commit, push (never kubectl apply)
+   - If it needs a restart: use MCP kubectl_restart_deployment or kubectl_delete_pod
+   - If it needs config change: edit the manifest in the right repo
+
+3. **Wider View** — What caused this? Can we prevent it?
+   - Is this a recurring issue? Check knowledge base for similar events
+   - Should an alert rule be added/updated?
+   - Is there a systemic issue (resource limits, stale config, missing dependency)?
+
+4. **Document** — Update runbooks and knowledge base:
+   - Write/update a runbook in `/home/agentic_lab/runbooks/`
+   - Log the resolution to knowledge-mcp
+
+5. **Resolve** — Mark the incident resolved:
+   ```bash
+   curl -s -X POST http://10.10.0.22:3456/webhook/screen-resolve \\
+     -H "Content-Type: application/json" \\
+     -d '{{"type":"incident","id":{incident_id},"summary":"<what you did>"}}'
+   ```
+
+## Repository Paths
+- Prod: `/home/prod_homelab/`
+- Agentic: `/home/agentic_lab/`
+- Monit: `/home/monit_homelab/`
+- Runbooks: `/home/agentic_lab/runbooks/`
+
+Use `git -C <path>` for all git commands. Never cd."""
+
+            # Dispatch to Claude patrol screen
+            model = "opus" if severity == "critical" else recommended_model
             try:
-                await notify_afferent_update(incident_id, "awaiting_review",
-                                              "Queued for error-hunter remediation")
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        f"{AFFERENT_URL}/webhook/dispatch-patrol",
+                        json={"prompt": prompt, "model": model, "incident_id": incident_id},
+                    )
+                    resp_data = resp.json()
+                    screen_name = resp_data.get("session", "patrol")
+                    logger.info(f"Incident {incident_id} dispatched to patrol screen ({model})")
+            except Exception as e:
+                screen_name = ""
+                logger.error(f"Failed to dispatch incident {incident_id} to patrol: {e}")
+
+            # Notify UI for real-time updates
+            try:
+                await notify_afferent_update(incident_id, "investigating",
+                                              f"Dispatched to Claude patrol screen ({model})")
             except Exception as e:
                 logger.warning(f"Failed to notify UI: {e}")
 
-            logger.info(f"Incident {incident_id} marked awaiting_review for error-hunter pickup")
-            return {"status": "awaiting_review", "screen_session": ""}
+            return {"status": "investigating", "screen_session": screen_name}
         except Exception as e:
             logger.error(f"Failed to update incident {incident_id}: {e}")
             return {"screen_session": "", "status": "error"}
@@ -2375,12 +2443,12 @@ spec:
                 secretKeyRef:
                   name: incident-db-credentials
                   key: DATABASE_URL
-            # Screen creation → Synapse directly (port 3460 = synapse.service)
+            # Tamar PWA (patrol dispatch + webhook notifications)
             - name: AFFERENT_URL
-              value: "http://10.10.0.22:3460"
-            # Webhook notifications → Kernow Hub (push, WS broadcast)
+              value: "http://10.10.0.22:3456"
+            # Webhook notifications → Tamar (push, WS broadcast)
             - name: AFFERENT_WEBHOOK_URL
-              value: "http://kernow-hub:3456/webhook/ingest"
+              value: "http://10.10.0.22:3456/webhook/ingest"
             - name: AFFERENT_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
