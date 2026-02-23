@@ -86,10 +86,18 @@ data:
         "pulse": [
             ["memory", "plex"],          # Proxmox reports allocated, not actual VM usage
             ["memory", "haos"],          # Home Assistant OS runs hot by design
+            ["memory", "pihanga"],       # Proxmox host — VMs fill allocated RAM, expected
+            ["memory", "ruapehu"],       # Proxmox host — VMs fill allocated RAM, expected
+            ["memory", "truenas"],       # TrueNAS uses all RAM for ZFS ARC cache, expected
+            ["memory", "talos"],         # Talos clusters sized to the box, always high
         ],
         "beszel": [
             ["memory", "plex"],          # Same — Beszel sees Proxmox allocation
             ["memory", "haos"],
+            ["memory", "pihanga"],       # Proxmox host
+            ["memory", "ruapehu"],       # Proxmox host
+            ["memory", "truenas"],       # ZFS ARC fills RAM by design
+            ["memory", "talos"],         # Talos clusters sized to box
         ],
     }
 
