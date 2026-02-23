@@ -2626,6 +2626,9 @@ data:
             # NFS — missing share or canary failure is urgent
             elif check_name in ("nfs_share_missing", "mount_canary_failed"):
                 fix_now.append(finding)
+            # Backrest unreachable — restart pod
+            elif check_name == "backrest_unreachable":
+                fix_now.append(finding)
             # Plex unreachable is urgent
             elif check_name == "plex_unreachable":
                 fix_now.append(finding)
@@ -2650,7 +2653,7 @@ data:
                 create_rule.append(finding)
             # Informational items
             elif check_name in ("dns_missing_route", "dns_duplicate_rewrite",
-                                "nfs_snapshot_stale", "backrest_unreachable",
+                                "nfs_snapshot_stale",
                                 "pbs_unreachable", "velero_pod_unhealthy",
                                 "k8s_pvc_pending", "opnsense_firmware_update",
                                 "opnsense_plugin_update", "incident_stale"):
@@ -2755,6 +2758,90 @@ data:
         logger.info(f"Auto-remediated: restarted {deploy_name} deployment (tool timeout)")
         return True
 
+    async def _remediate_deployment_unavailable(finding: dict) -> bool:
+        """Restart an unavailable deployment."""
+        ev = finding.get("evidence", {})
+        dep_name = ev.get("deployment", "")
+        namespace = ev.get("namespace", "")
+        cluster = finding.get("cluster", "")
+        ctx = CLUSTERS.get(cluster, cluster)
+        if not dep_name or not namespace:
+            return False
+        result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_restart_deployment", {
+            "deployment_name": dep_name, "namespace": namespace, "cluster": ctx,
+        })
+        if result.get("_error"):
+            logger.warning(f"Deployment restart failed for {namespace}/{dep_name}: {result.get('message')}")
+            return False
+        logger.info(f"Auto-remediated: restarted deployment {namespace}/{dep_name} on {cluster}")
+        return True
+
+    async def _remediate_pbs_backup_stale(finding: dict) -> bool:
+        """Trigger a PBS backup by running vzdump on the Proxmox host."""
+        resource = finding.get("resource", "")
+        # resource format: "pbs/<datastore>/<type>/<vmid>"
+        parts = resource.split("/")
+        if len(parts) < 4:
+            return False
+        datastore = parts[1]
+        vm_type = parts[2]  # "vm" or "ct"
+        vmid = parts[3]
+        if not vmid.isdigit():
+            return False
+        # Determine which Proxmox host owns this VM
+        # VMs 400-499 are on Ruapehu, 200 on Pihanga
+        vmid_int = int(vmid)
+        if vmid_int >= 400:
+            pve_host = "10.10.0.10"  # Ruapehu
+            pve_node = "ruapehu"
+        else:
+            pve_host = "10.10.0.20"  # Pihanga
+            pve_node = "pihanga"
+        pve_token_id = os.environ.get(f"PVE_{pve_node.upper()}_TOKEN_ID", "")
+        pve_token_secret = os.environ.get(f"PVE_{pve_node.upper()}_TOKEN_SECRET", "")
+        if not pve_token_id or not pve_token_secret:
+            logger.warning(f"No PVE_{pve_node.upper()}_TOKEN_ID/SECRET — cannot trigger backup")
+            return False
+        # PBS storage in Proxmox is "pbs-pihanga" (PBS runs on Pihanga host)
+        pbs_storage = "pbs-pihanga"
+        try:
+            async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
+                resp = await client.post(
+                    f"https://{pve_host}:8006/api2/json/nodes/{pve_node}/vzdump",
+                    headers={"Authorization": f"PVEAPIToken={pve_token_id}={pve_token_secret}"},
+                    data={
+                        "vmid": vmid,
+                        "storage": pbs_storage,
+                        "mode": "snapshot",
+                        "compress": "zstd",
+                        "notes-template": "auto-backup triggered by error-hunter",
+                    },
+                )
+                if resp.status_code == 200:
+                    logger.info(f"Auto-remediated: triggered PBS backup for VM {vmid} on {pve_node}")
+                    return True
+                else:
+                    logger.warning(f"PBS backup trigger failed for VM {vmid}: {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"PBS backup trigger error for VM {vmid}: {e}")
+        return False
+
+    async def _remediate_backrest_unreachable(finding: dict) -> bool:
+        """Restart the Backrest pod if it's unreachable."""
+        result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_restart_deployment", {
+            "deployment_name": "backrest", "namespace": "backrest", "cluster": "monit",
+        })
+        if result.get("_error"):
+            # Try statefulset
+            result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_restart_statefulset", {
+                "statefulset_name": "backrest", "namespace": "backrest", "cluster": "monit",
+            })
+            if result.get("_error"):
+                logger.warning(f"Backrest restart failed: {result.get('message')}")
+                return False
+        logger.info("Auto-remediated: restarted Backrest")
+        return True
+
     # Map finding check_names to their auto-fix functions
     REMEDIATORS = {
         "argocd_out_of_sync": _remediate_argocd_out_of_sync,
@@ -2762,6 +2849,9 @@ data:
         "adguard_filters_stale": _remediate_adguard_filters_stale,
         "pod_not_running": _remediate_pod_not_running,
         "mcp_tool_broken": _remediate_mcp_tool_broken,
+        "deployment_unavailable": _remediate_deployment_unavailable,
+        "pbs_backup_stale": _remediate_pbs_backup_stale,
+        "backrest_unreachable": _remediate_backrest_unreachable,
     }
 
     async def remediate(state: SweepState) -> dict:
@@ -3473,6 +3563,26 @@ spec:
                 secretKeyRef:
                   name: mcp-adguard
                   key: PASSWORD
+            - name: PVE_RUAPEHU_TOKEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-proxmox-ruapehu
+                  key: TOKEN_ID
+            - name: PVE_RUAPEHU_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-proxmox-ruapehu
+                  key: TOKEN_SECRET
+            - name: PVE_PIHANGA_TOKEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-proxmox-pihanga
+                  key: TOKEN_ID
+            - name: PVE_PIHANGA_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-proxmox-pihanga
+                  key: TOKEN_SECRET
           volumeMounts:
             - name: code
               mountPath: /code
