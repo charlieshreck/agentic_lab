@@ -66,14 +66,14 @@ Memory allocations are managed in GitOps (Terraform):
 
 ### Current Safe Allocations (Incident #160 fix)
 ```hcl
-control_plane.memory = 4096   # 4GB
+control_plane.memory = 5120   # 5GB
 workers[*].memory    = 9216   # 9GB each (3 × 9GB = 27GB)
 plex_vm.memory       = 7168   # 7GB
 unifi_vm.memory      = 2048   # 2GB
 truenas.memory       = 16384  # 16GB (TrueNAS VM, separate)
 
-Total = 4 + 27 + 7 + 2 + 16 = 56GB allocated
-Available for host overhead = 62.6GB - 56GB = 6.6GB (acceptable)
+Total = 5 + 27 + 7 + 2 + 16 = 57GB allocated
+Available for host overhead = 62.6GB - 57GB = 5.6GB (acceptable)
 ```
 
 ### To Apply Fix
