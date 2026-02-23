@@ -4185,7 +4185,7 @@ spec:
             - name: EXTERNAL_MCP_URL
               value: "http://external-mcp:8000"
             - name: AFFERENT_URL
-              value: "http://10.20.0.40:30456"
+              value: "http://10.10.0.22:3456"
             - name: SYNAPSE_URL
               value: "http://10.10.0.22:3460"
             - name: A2A_API_TOKEN
