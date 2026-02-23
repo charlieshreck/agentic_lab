@@ -2790,13 +2790,14 @@ data:
             return False
         # Determine which Proxmox host owns this VM
         # VMs 400-499 are on Ruapehu, 200 on Pihanga
+        # IMPORTANT: Node names are case-sensitive in the Proxmox API
         vmid_int = int(vmid)
         if vmid_int >= 400:
-            pve_host = "10.10.0.10"  # Ruapehu
-            pve_node = "ruapehu"
+            pve_host = "10.10.0.10"
+            pve_node = "Ruapehu"
         else:
-            pve_host = "10.10.0.20"  # Pihanga
-            pve_node = "pihanga"
+            pve_host = "10.10.0.20"
+            pve_node = "Pihanga"
         pve_token_id = os.environ.get(f"PVE_{pve_node.upper()}_TOKEN_ID", "")
         pve_token_secret = os.environ.get(f"PVE_{pve_node.upper()}_TOKEN_SECRET", "")
         if not pve_token_id or not pve_token_secret:
