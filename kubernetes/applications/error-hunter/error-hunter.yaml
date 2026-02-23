@@ -2072,13 +2072,16 @@ data:
     # ========================================================================
 
     async def check_stale_incidents() -> list:
-        """Find and auto-resolve KAO incidents stuck in non-terminal states.
+        """Find and auto-resolve stale KAO incidents AND stale error-hunter findings.
 
-        Incidents that have been in 'detected' or 'investigating' for >6 hours
-        are considered stale (screen session likely died). This check resolves
-        them automatically and reports a finding.
+        Incidents stuck in non-terminal states for >6h get auto-resolved.
+        Findings stuck as 'dispatched' for >4h get reset to 'new' so the
+        next sweep re-dispatches them. Findings stuck as 'new' for >2h
+        (missed dispatch) also get flagged.
         """
         findings = []
+
+        # -- Stale KAO incidents --
         try:
             stale_rows = await pg_fetch("""
                 SELECT id, alert_name, status, screen_session, detected_at,
@@ -2106,9 +2109,8 @@ data:
                         "Investigate why screen session did not resolve the incident",
                     ))
 
-                # Auto-resolve them
                 if stale_ids:
-                    await pg_execute(f"""
+                    await pg_execute("""
                         UPDATE incidents
                         SET status = 'resolved',
                             resolution_type = 'auto_stale',
@@ -2122,6 +2124,57 @@ data:
 
         except Exception as e:
             logger.error(f"Stale incident check error: {e}")
+
+        # -- Stale dispatched findings (screen died without resolving) --
+        try:
+            stale_dispatched = await pg_fetch("""
+                SELECT id, check_name, screen_session, description,
+                       EXTRACT(EPOCH FROM (NOW() - last_seen)) / 3600 AS age_hours
+                FROM error_hunter_findings
+                WHERE status = 'dispatched'
+                  AND last_seen < NOW() - INTERVAL '4 hours'
+                ORDER BY last_seen ASC
+            """)
+
+            if stale_dispatched:
+                reset_ids = [row["id"] for row in stale_dispatched]
+                await pg_execute("""
+                    UPDATE error_hunter_findings
+                    SET status = 'new', screen_session = NULL
+                    WHERE id = ANY($1::int[])
+                      AND status = 'dispatched'
+                """, reset_ids)
+                logger.info(f"Reset {len(reset_ids)} stale dispatched findings to 'new': {reset_ids}")
+                findings.append(make_finding(
+                    "operations", "findings_stale_dispatched", "global",
+                    "error-hunter/stale-dispatched", "info",
+                    f"Reset {len(reset_ids)} stale dispatched finding(s) to 'new' — screen sessions died without resolving",
+                    {"count": len(reset_ids), "ids": reset_ids[:20]},
+                    "Findings will be re-dispatched on next sweep",
+                ))
+
+        except Exception as e:
+            logger.error(f"Stale dispatched findings check error: {e}")
+
+        # -- Orphaned 'new' findings that missed dispatch --
+        try:
+            orphaned_new = await pg_fetch("""
+                SELECT id, check_name, classification, description,
+                       EXTRACT(EPOCH FROM (NOW() - first_seen)) / 3600 AS age_hours
+                FROM error_hunter_findings
+                WHERE status = 'new'
+                  AND first_seen < NOW() - INTERVAL '2 hours'
+                ORDER BY first_seen ASC
+            """)
+
+            if orphaned_new:
+                # These will be picked up by the current sweep's dispatch
+                # Just log awareness
+                names = [row["check_name"] for row in orphaned_new]
+                logger.info(f"Found {len(orphaned_new)} orphaned 'new' findings older than 2h: {names}")
+
+        except Exception as e:
+            logger.error(f"Orphaned findings check error: {e}")
 
         return findings
 
