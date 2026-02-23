@@ -1329,6 +1329,745 @@ data:
         return findings
 
     # ========================================================================
+    # CHECK: DNS & REVERSE PROXY CONSISTENCY
+    # ========================================================================
+
+    async def check_dns_routing() -> list:
+        """Check DNS routing consistency — AdGuard rewrites, Caddy backends, Unbound overrides."""
+        findings = []
+        home = HOME_MCP_URL
+        infra = INFRASTRUCTURE_MCP_URL
+
+        try:
+            # Fetch all three DNS/proxy layers in parallel
+            ag_task = call_mcp_tool_safe(home, "adguard_list_rewrites")
+            caddy_task = call_mcp_tool_safe(infra, "list_caddy_reverse_proxies")
+            unbound_task = call_mcp_tool_safe(infra, "get_unbound_overrides")
+            ag_result, caddy_result, unbound_result = await asyncio.gather(
+                ag_task, caddy_task, unbound_task, return_exceptions=True,
+            )
+
+            # --- AdGuard duplicate detection ---
+            rewrites = []
+            if isinstance(ag_result, dict):
+                rewrites = ag_result.get("items", ag_result.get("result", []))
+                if isinstance(rewrites, str):
+                    rewrites = []
+            domain_counts: dict[str, int] = {}
+            for rw in rewrites:
+                domain = rw.get("domain", "") if isinstance(rw, dict) else ""
+                if domain:
+                    domain_counts[domain] = domain_counts.get(domain, 0) + 1
+            for domain, count in domain_counts.items():
+                if count > 1:
+                    findings.append(make_finding(
+                        "network", "dns_duplicate_rewrite", "global",
+                        f"adguard/{domain}", "warning",
+                        f"AdGuard has {count} duplicate rewrites for '{domain}'",
+                        {"domain": domain, "count": count},
+                        "Remove duplicate entries in AdGuard DNS rewrites",
+                    ))
+
+            # --- Caddy backend reachability ---
+            caddy_entries = []
+            if isinstance(caddy_result, dict):
+                caddy_entries = caddy_result.get("items", caddy_result.get("result", []))
+                if isinstance(caddy_entries, str):
+                    caddy_entries = []
+
+            adguard_domains = set(domain_counts.keys())
+            unbound_domains = set()
+            if isinstance(unbound_result, dict):
+                overrides = unbound_result.get("items", unbound_result.get("result", []))
+                if isinstance(overrides, list):
+                    for ov in overrides:
+                        if isinstance(ov, dict):
+                            unbound_domains.add(ov.get("hostname", ov.get("domain", "")))
+
+            async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+                for entry in caddy_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    domain = entry.get("domain", entry.get("match", ""))
+                    upstream = entry.get("upstream", entry.get("to", ""))
+                    if not upstream:
+                        continue
+
+                    # TCP reachability test on upstream
+                    test_url = upstream if upstream.startswith("http") else f"http://{upstream}"
+                    try:
+                        resp = await client.get(test_url, follow_redirects=False)
+                        # Any response (even 4xx/5xx) means the backend is alive
+                    except Exception:
+                        findings.append(make_finding(
+                            "network", "caddy_backend_unreachable", "global",
+                            f"caddy/{domain}", "warning",
+                            f"Caddy backend unreachable: {domain} → {upstream}",
+                            {"domain": domain, "upstream": upstream},
+                            f"Check if service at {upstream} is running",
+                        ))
+
+                    # DNS cross-reference
+                    clean_domain = domain.replace("*.", "").strip()
+                    if clean_domain and clean_domain not in adguard_domains and clean_domain not in unbound_domains:
+                        findings.append(make_finding(
+                            "network", "dns_missing_route", "global",
+                            f"caddy/{clean_domain}/dns", "info",
+                            f"Caddy entry '{clean_domain}' has no AdGuard rewrite or Unbound override",
+                            {"domain": clean_domain, "upstream": upstream},
+                        ))
+
+        except Exception as e:
+            logger.error(f"DNS routing check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: BACKUP SYSTEMS (Velero, Backrest, PBS)
+    # ========================================================================
+
+    async def check_backups() -> list:
+        """Check backup system health — Velero, Backrest, PBS."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # --- Velero (all 3 clusters) ---
+        for cluster_name, cluster_key in CLUSTERS.items():
+            try:
+                pods = await call_mcp_tool_safe(infra, "kubectl_get_pods", {
+                    "namespace": "velero", "cluster": cluster_key,
+                })
+                pod_list = pods.get("result", [])
+                if isinstance(pod_list, list):
+                    for pod in pod_list:
+                        if isinstance(pod, dict) and not pod.get("ready", True):
+                            findings.append(make_finding(
+                                "backups", "velero_pod_unhealthy", cluster_name,
+                                f"velero/{pod.get('name', 'unknown')}", "warning",
+                                f"Velero pod unhealthy on {cluster_name}: {pod.get('name')} ({pod.get('status')})",
+                                {"pod": pod.get("name"), "status": pod.get("status")},
+                            ))
+
+                # Check for failed backup jobs
+                jobs = await call_mcp_tool_safe(infra, "kubectl_get_jobs", {
+                    "namespace": "velero", "cluster": cluster_key,
+                })
+                job_list = jobs.get("result", [])
+                if isinstance(job_list, list):
+                    for job in job_list:
+                        if isinstance(job, dict):
+                            failures = job.get("failed", job.get("failures", 0))
+                            if failures and int(failures) > 0:
+                                findings.append(make_finding(
+                                    "backups", "velero_backup_failed", cluster_name,
+                                    f"velero/{job.get('name', 'unknown')}", "warning",
+                                    f"Velero backup job failed on {cluster_name}: {job.get('name')}",
+                                    {"job": job.get("name"), "failures": failures},
+                                ))
+            except Exception as e:
+                logger.error(f"Velero check error ({cluster_name}): {e}")
+
+        # --- Backrest (monit cluster, backrest namespace) ---
+        try:
+            backrest_url = "http://10.10.0.30:31800"
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                resp = await client.get(f"{backrest_url}/api/v1/operations")
+                if resp.status_code == 200:
+                    ops = resp.json()
+                    # Check if any plan hasn't run recently
+                    plan_last_run: dict[str, str] = {}
+                    if isinstance(ops, list):
+                        for op in ops:
+                            plan_id = op.get("planId", "")
+                            ts = op.get("unixTimeStartMs", 0)
+                            if plan_id and ts:
+                                prev = plan_last_run.get(plan_id, 0)
+                                if ts > prev:
+                                    plan_last_run[plan_id] = ts
+
+                    now_ms = int(datetime.utcnow().timestamp() * 1000)
+                    daily_threshold_ms = 36 * 3600 * 1000  # 36 hours
+                    weekly_threshold_ms = 8 * 24 * 3600 * 1000  # 8 days
+
+                    for plan_id, last_ms in plan_last_run.items():
+                        is_weekly = "weekly" in plan_id
+                        threshold = weekly_threshold_ms if is_weekly else daily_threshold_ms
+                        age_ms = now_ms - last_ms
+                        if age_ms > threshold:
+                            age_hours = age_ms // (3600 * 1000)
+                            findings.append(make_finding(
+                                "backups", "backrest_plan_overdue", "global",
+                                f"backrest/{plan_id}", "warning",
+                                f"Backrest plan '{plan_id}' last ran {age_hours}h ago (threshold: {'8d' if is_weekly else '36h'})",
+                                {"plan_id": plan_id, "last_run_ms": last_ms, "age_hours": age_hours},
+                            ))
+                else:
+                    findings.append(make_finding(
+                        "backups", "backrest_unreachable", "global",
+                        "backrest/api", "warning",
+                        f"Backrest API returned HTTP {resp.status_code}",
+                    ))
+        except Exception as e:
+            findings.append(make_finding(
+                "backups", "backrest_unreachable", "global",
+                "backrest/api", "warning",
+                f"Backrest API unreachable: {e}",
+            ))
+
+        # --- PBS (Proxmox Backup Server) ---
+        pbs_host = os.environ.get("PBS_HOST", "")
+        pbs_password = os.environ.get("PBS_PASSWORD", "")
+        if pbs_host and pbs_password:
+            try:
+                async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                    auth_resp = await client.post(
+                        f"{pbs_host}/api2/json/access/ticket",
+                        data={"username": "root@pam", "password": pbs_password},
+                    )
+                    if auth_resp.status_code == 200:
+                        ticket = auth_resp.json().get("data", {}).get("ticket", "")
+                        csrf = auth_resp.json().get("data", {}).get("CSRFPreventionToken", "")
+                        cookies = {"PBSAuthCookie": ticket}
+
+                        # List datastores
+                        ds_resp = await client.get(
+                            f"{pbs_host}/api2/json/admin/datastore",
+                            cookies=cookies,
+                        )
+                        datastores = ds_resp.json().get("data", []) if ds_resp.status_code == 200 else []
+
+                        for ds in datastores:
+                            store_name = ds.get("name", ds.get("store", ""))
+                            if not store_name:
+                                continue
+                            snap_resp = await client.get(
+                                f"{pbs_host}/api2/json/admin/datastore/{store_name}/snapshots",
+                                cookies=cookies,
+                            )
+                            snapshots = snap_resp.json().get("data", []) if snap_resp.status_code == 200 else []
+
+                            # Find most recent snapshot per backup-type/backup-id
+                            group_latest: dict[str, int] = {}
+                            for snap in snapshots:
+                                group = f"{snap.get('backup-type', '')}/{snap.get('backup-id', '')}"
+                                ts = snap.get("backup-time", 0)
+                                if ts > group_latest.get(group, 0):
+                                    group_latest[group] = ts
+
+                            now_ts = int(datetime.utcnow().timestamp())
+                            for group, last_ts in group_latest.items():
+                                age_hours = (now_ts - last_ts) // 3600
+                                if age_hours > 36:
+                                    findings.append(make_finding(
+                                        "backups", "pbs_backup_stale", "global",
+                                        f"pbs/{store_name}/{group}", "warning",
+                                        f"PBS backup '{group}' on '{store_name}' is {age_hours}h old",
+                                        {"datastore": store_name, "group": group, "age_hours": age_hours},
+                                    ))
+                    else:
+                        findings.append(make_finding(
+                            "backups", "pbs_unreachable", "global",
+                            "pbs/auth", "warning",
+                            f"PBS auth failed: HTTP {auth_resp.status_code}",
+                        ))
+            except Exception as e:
+                findings.append(make_finding(
+                    "backups", "pbs_unreachable", "global",
+                    "pbs/api", "warning",
+                    f"PBS API unreachable: {e}",
+                ))
+
+        return findings
+
+    # ========================================================================
+    # CHECK: NETWORK HEALTH (ntopng, UniFi, Omada)
+    # ========================================================================
+
+    async def check_network_health() -> list:
+        """Check network infrastructure — ntopng alerts, UniFi health, Omada switch/LAG."""
+        findings = []
+        obs = OBSERVABILITY_MCP_URL
+        home = HOME_MCP_URL
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # --- ntopng alerts ---
+        try:
+            result = await call_mcp_tool_safe(obs, "ntopng_get_alerts")
+            alerts = []
+            if isinstance(result, dict):
+                alerts = result.get("items", result.get("alerts", result.get("result", [])))
+            if isinstance(alerts, list):
+                for alert in alerts[:20]:
+                    if not isinstance(alert, dict):
+                        continue
+                    sev = alert.get("severity", alert.get("alert_severity", ""))
+                    sev_str = "warning"
+                    if isinstance(sev, (int, float)):
+                        sev_str = "critical" if sev <= 2 else "warning"
+                    elif isinstance(sev, str) and "error" in sev.lower():
+                        sev_str = "critical"
+                    msg = alert.get("msg", alert.get("alert_json", {}).get("msg", str(alert)[:200]))
+                    findings.append(make_finding(
+                        "network", "ntopng_alert", "global",
+                        f"ntopng/{alert.get('type', 'alert')}/{alert.get('entity_val', 'unknown')}", sev_str,
+                        f"ntopng alert: {msg}",
+                        {"raw": {k: v for k, v in alert.items() if k != "alert_json"}},
+                    ))
+        except Exception as e:
+            logger.error(f"ntopng alert check error: {e}")
+
+        # --- UniFi subsystem health ---
+        try:
+            result = await call_mcp_tool_safe(home, "unifi_get_health")
+            health_items = []
+            if isinstance(result, dict):
+                health_items = result.get("items", result.get("result", []))
+            if isinstance(health_items, list):
+                for item in health_items:
+                    if not isinstance(item, dict):
+                        continue
+                    subsystem = item.get("subsystem", "unknown")
+                    status = item.get("status", "ok")
+                    if status != "ok":
+                        findings.append(make_finding(
+                            "network", "unifi_subsystem_degraded", "global",
+                            f"unifi/{subsystem}", "warning",
+                            f"UniFi subsystem '{subsystem}' status: {status}",
+                            {"subsystem": subsystem, "status": status},
+                        ))
+        except Exception as e:
+            logger.error(f"UniFi health check error: {e}")
+
+        # --- UniFi alarms ---
+        try:
+            result = await call_mcp_tool_safe(home, "unifi_get_alarms")
+            alarms = []
+            if isinstance(result, dict):
+                alarms = result.get("items", result.get("result", []))
+            if isinstance(alarms, list):
+                for alarm in alarms[:10]:
+                    if not isinstance(alarm, dict):
+                        continue
+                    if alarm.get("archived", False):
+                        continue
+                    findings.append(make_finding(
+                        "network", "unifi_alarm", "global",
+                        f"unifi/alarm/{alarm.get('_id', 'unknown')}", "warning",
+                        f"UniFi alarm: {alarm.get('msg', alarm.get('key', 'unknown'))}",
+                        {"alarm_id": alarm.get("_id"), "msg": alarm.get("msg", "")},
+                    ))
+        except Exception as e:
+            logger.error(f"UniFi alarm check error: {e}")
+
+        # --- Omada switch + LAG health ---
+        try:
+            result = await call_mcp_tool_safe(infra, "omada_get_devices")
+            devices = []
+            if isinstance(result, dict):
+                devices = result.get("items", result.get("result", []))
+            if isinstance(devices, list):
+                for device in devices:
+                    if not isinstance(device, dict):
+                        continue
+                    status = device.get("status", device.get("statusCategory", ""))
+                    name = device.get("name", device.get("model", "unknown"))
+                    if isinstance(status, int):
+                        if status != 14:  # 14 = connected
+                            findings.append(make_finding(
+                                "network", "omada_switch_offline", "global",
+                                f"omada/{name}", "critical",
+                                f"Omada device '{name}' offline (status: {status})",
+                                {"name": name, "status": status, "mac": device.get("mac", "")},
+                            ))
+                    elif isinstance(status, str) and status.lower() not in ("connected", "online"):
+                        findings.append(make_finding(
+                            "network", "omada_switch_offline", "global",
+                            f"omada/{name}", "critical",
+                            f"Omada device '{name}' status: {status}",
+                            {"name": name, "status": status},
+                        ))
+        except Exception as e:
+            logger.error(f"Omada device check error: {e}")
+
+        try:
+            result = await call_mcp_tool_safe(infra, "omada_get_lags")
+            lags = []
+            if isinstance(result, dict):
+                lags = result.get("items", result.get("result", []))
+            if isinstance(lags, list):
+                for lag in lags:
+                    if not isinstance(lag, dict):
+                        continue
+                    lag_name = lag.get("name", lag.get("id", "unknown"))
+                    ports = lag.get("ports", lag.get("lagPorts", []))
+                    active = lag.get("activePortCount", lag.get("active_ports", len(ports)))
+                    total = lag.get("portCount", lag.get("total_ports", len(ports)))
+                    if total and active < total:
+                        findings.append(make_finding(
+                            "network", "omada_lag_degraded", "global",
+                            f"omada/lag/{lag_name}", "warning",
+                            f"Omada LAG '{lag_name}' degraded: {active}/{total} ports active",
+                            {"lag": lag_name, "active": active, "total": total},
+                        ))
+        except Exception as e:
+            logger.error(f"Omada LAG check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: NFS STORAGE & TRUENAS SNAPSHOTS
+    # ========================================================================
+
+    async def check_nfs_storage() -> list:
+        """Check NFS share health, snapshot freshness, and mount-canary status."""
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # Expected NFS shares per TrueNAS instance
+        expected_shares = {
+            "hdd": ["Pleximetry", "pbs", "victoria-metrics", "victoria-logs"],
+        }
+
+        for instance, expected in expected_shares.items():
+            try:
+                result = await call_mcp_tool_safe(infra, "truenas_list_shares", {"params": {"instance": instance}})
+                share_names = set()
+                shares = result.get("items", result.get("result", []))
+                if isinstance(shares, list):
+                    for share in shares:
+                        if isinstance(share, dict):
+                            path = share.get("path", share.get("paths", [""])[0] if isinstance(share.get("paths"), list) else "")
+                            name = path.split("/")[-1] if "/" in path else share.get("name", "")
+                            share_names.add(name.lower())
+                elif isinstance(shares, str):
+                    for name in expected:
+                        if name.lower() in shares.lower():
+                            share_names.add(name.lower())
+
+                for name in expected:
+                    if name.lower() not in share_names and share_names:
+                        findings.append(make_finding(
+                            "storage", "nfs_share_missing", "global",
+                            f"truenas-{instance}/nfs/{name}", "critical",
+                            f"Expected NFS share '{name}' not found on TrueNAS-{instance.upper()}",
+                            {"instance": instance, "share": name, "found_shares": list(share_names)},
+                        ))
+            except Exception as e:
+                logger.error(f"NFS share check error ({instance}): {e}")
+
+        # --- Snapshot freshness ---
+        for instance in ["hdd", "media"]:
+            try:
+                result = await call_mcp_tool_safe(infra, "truenas_list_snapshots", {"params": {"instance": instance}})
+                snapshots = result.get("items", result.get("result", []))
+                if isinstance(snapshots, list) and snapshots:
+                    # Group by dataset, find latest
+                    dataset_latest: dict[str, str] = {}
+                    for snap in snapshots:
+                        if not isinstance(snap, dict):
+                            continue
+                        ds = snap.get("dataset", snap.get("filesystem", ""))
+                        ts = snap.get("created", snap.get("createtxg", ""))
+                        name = snap.get("name", snap.get("snapshot_name", ""))
+                        if ds and name:
+                            prev = dataset_latest.get(ds, "")
+                            if name > prev:
+                                dataset_latest[ds] = name
+            except Exception as e:
+                logger.error(f"Snapshot check error ({instance}): {e}")
+
+        # --- Mount-canary CronJob status ---
+        try:
+            jobs = await call_mcp_tool_safe(infra, "kubectl_get_jobs", {
+                "namespace": "ai-platform", "cluster": "agentic",
+            })
+            job_list = jobs.get("result", [])
+            if isinstance(job_list, list):
+                canary_jobs = [j for j in job_list if isinstance(j, dict) and "mount-canary" in j.get("name", "")]
+                for job in canary_jobs[-3:]:
+                    failures = job.get("failed", job.get("failures", 0))
+                    if failures and int(failures) > 0:
+                        findings.append(make_finding(
+                            "storage", "mount_canary_failed", "agentic",
+                            f"ai-platform/{job.get('name', 'mount-canary')}", "warning",
+                            f"Mount-canary job failed: {job.get('name')} — NFS connectivity issue",
+                            {"job": job.get("name"), "failures": failures},
+                            "Check NFS mount from agentic cluster to TrueNAS-HDD",
+                        ))
+        except Exception as e:
+            logger.error(f"Mount-canary check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: HOMEPAGE SERVICE URLs & WIDGETS
+    # ========================================================================
+
+    async def check_homepage() -> list:
+        """Check Homepage service URLs and widget health via home-mcp."""
+        findings = []
+        home = HOME_MCP_URL
+
+        try:
+            result = await call_mcp_tool_safe(home, "get_service_status_summary", timeout=60.0)
+            if not result:
+                return findings
+
+            services = result.get("services", result.get("result", []))
+            total = result.get("total", 0)
+            unhealthy_count = result.get("unhealthy", 0)
+
+            # Track failures by group for category-level alerting
+            group_failures: dict[str, list] = {}
+
+            if isinstance(services, list):
+                for svc in services:
+                    if not isinstance(svc, dict):
+                        continue
+                    status = svc.get("status", "unknown")
+                    name = svc.get("name", "unknown")
+                    href = svc.get("href", svc.get("url", ""))
+                    group = svc.get("group", svc.get("category", "ungrouped"))
+
+                    if status in ("unhealthy", "error", "unreachable", "timeout"):
+                        findings.append(make_finding(
+                            "services", "homepage_service_unreachable", "global",
+                            f"homepage/{group}/{name}", "warning",
+                            f"Homepage service unreachable: {name} ({href})",
+                            {"name": name, "href": href, "group": group, "status": status},
+                        ))
+                        group_failures.setdefault(group, []).append(name)
+
+            # Category-level degradation (3+ services in same group failing)
+            for group, failed_services in group_failures.items():
+                if len(failed_services) >= 3:
+                    findings.append(make_finding(
+                        "services", "homepage_category_degraded", "global",
+                        f"homepage/{group}", "warning",
+                        f"Homepage group '{group}' degraded: {len(failed_services)} services unreachable ({', '.join(failed_services[:5])})",
+                        {"group": group, "failed_services": failed_services},
+                    ))
+
+        except Exception as e:
+            logger.error(f"Homepage check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: MEDIA PIPELINE (Plex, Arr Suite, Download Clients)
+    # ========================================================================
+
+    async def check_media_pipeline() -> list:
+        """Check media pipeline health — Plex, Sonarr/Radarr queues, Prowlarr indexers, downloads."""
+        findings = []
+        media = MEDIA_MCP_URL
+
+        # --- Plex server status ---
+        try:
+            result = await call_mcp_tool_safe(media, "plex_get_server_status")
+            if result.get("_error") or not result:
+                findings.append(make_finding(
+                    "media", "plex_unreachable", "global",
+                    "plex/server", "critical",
+                    "Plex Media Server unreachable",
+                    {"error": result.get("message", "no response")},
+                ))
+        except Exception as e:
+            logger.error(f"Plex status check error: {e}")
+
+        # --- Sonarr/Radarr queues ---
+        for app_name, tool_name in [("sonarr", "sonarr_get_queue"), ("radarr", "radarr_get_queue")]:
+            try:
+                result = await call_mcp_tool_safe(media, tool_name)
+                records = result.get("records", result.get("items", result.get("result", [])))
+                if isinstance(records, list):
+                    for item in records:
+                        if not isinstance(item, dict):
+                            continue
+                        status = item.get("status", "").lower()
+                        title = item.get("title", item.get("series", {}).get("title", "unknown"))
+                        tracked_status = item.get("trackedDownloadStatus", "")
+                        if status in ("warning", "failed") or tracked_status in ("warning", "error"):
+                            findings.append(make_finding(
+                                "media", "arr_queue_stuck", "global",
+                                f"{app_name}/queue/{title[:50]}", "warning",
+                                f"{app_name.capitalize()} queue item stuck: {title} (status: {status})",
+                                {"app": app_name, "title": title, "status": status,
+                                 "tracked_status": tracked_status},
+                            ))
+            except Exception as e:
+                logger.error(f"{app_name} queue check error: {e}")
+
+        # --- Prowlarr indexers ---
+        try:
+            result = await call_mcp_tool_safe(media, "prowlarr_list_indexers")
+            indexers = result.get("items", result.get("result", []))
+            if isinstance(indexers, list):
+                for idx in indexers:
+                    if not isinstance(idx, dict):
+                        continue
+                    name = idx.get("name", "unknown")
+                    enable = idx.get("enable", True)
+                    status_obj = idx.get("status", {})
+                    if isinstance(status_obj, dict):
+                        is_healthy = status_obj.get("isHealthy", True)
+                        if not is_healthy and enable:
+                            findings.append(make_finding(
+                                "media", "prowlarr_indexer_failed", "global",
+                                f"prowlarr/{name}", "warning",
+                                f"Prowlarr indexer '{name}' unhealthy",
+                                {"indexer": name, "status": status_obj},
+                            ))
+                    elif isinstance(status_obj, str) and "fail" in status_obj.lower():
+                        findings.append(make_finding(
+                            "media", "prowlarr_indexer_failed", "global",
+                            f"prowlarr/{name}", "warning",
+                            f"Prowlarr indexer '{name}' status: {status_obj}",
+                            {"indexer": name, "status": status_obj},
+                        ))
+        except Exception as e:
+            logger.error(f"Prowlarr indexer check error: {e}")
+
+        # --- Download clients (Transmission + SABnzbd) ---
+        try:
+            result = await call_mcp_tool_safe(media, "transmission_list_torrents")
+            torrents = result.get("items", result.get("torrents", result.get("result", [])))
+            if isinstance(torrents, list):
+                for torrent in torrents:
+                    if not isinstance(torrent, dict):
+                        continue
+                    status = torrent.get("status", 0)
+                    error_val = torrent.get("error", 0)
+                    name = torrent.get("name", "unknown")
+                    # Transmission status 0 = stopped, error != 0 = problem
+                    if error_val and int(error_val) > 0:
+                        findings.append(make_finding(
+                            "media", "download_stalled", "global",
+                            f"transmission/{name[:50]}", "warning",
+                            f"Transmission download error: {name} (error: {torrent.get('errorString', error_val)})",
+                            {"name": name, "error": error_val, "errorString": torrent.get("errorString", "")},
+                        ))
+        except Exception as e:
+            logger.error(f"Transmission check error: {e}")
+
+        try:
+            result = await call_mcp_tool_safe(media, "sabnzbd_get_queue")
+            slots = result.get("slots", result.get("items", result.get("result", [])))
+            if isinstance(slots, list):
+                for slot in slots:
+                    if not isinstance(slot, dict):
+                        continue
+                    status = slot.get("status", "").lower()
+                    name = slot.get("filename", slot.get("name", "unknown"))
+                    if status in ("failed", "paused"):
+                        findings.append(make_finding(
+                            "media", "download_stalled", "global",
+                            f"sabnzbd/{name[:50]}", "warning",
+                            f"SABnzbd download {status}: {name}",
+                            {"name": name, "status": status},
+                        ))
+        except Exception as e:
+            logger.error(f"SABnzbd check error: {e}")
+
+        return findings
+
+    # ========================================================================
+    # CHECK: HOME AUTOMATION (HA, Tasmota, AdGuard Filtering)
+    # ========================================================================
+
+    async def check_home_automation() -> list:
+        """Check Home Assistant, Tasmota devices, and AdGuard filter freshness."""
+        findings = []
+        home = HOME_MCP_URL
+
+        # --- Home Assistant entity availability ---
+        try:
+            result = await call_mcp_tool_safe(home, "get_home_overview")
+            if isinstance(result, dict):
+                # Count unavailable entities
+                unavailable = []
+                entities = result.get("entities", result.get("items", result.get("result", [])))
+                if isinstance(entities, list):
+                    for entity in entities:
+                        if isinstance(entity, dict):
+                            state = entity.get("state", "")
+                            if state == "unavailable":
+                                unavailable.append(entity.get("entity_id", entity.get("name", "unknown")))
+                elif isinstance(result, dict) and "unavailable" in result:
+                    unavailable_count = result.get("unavailable", 0)
+                    if isinstance(unavailable_count, int) and unavailable_count > 3:
+                        findings.append(make_finding(
+                            "home", "ha_entities_unavailable", "global",
+                            "homeassistant/entities", "warning",
+                            f"Home Assistant: {unavailable_count} entities unavailable",
+                            {"count": unavailable_count},
+                        ))
+                        return findings
+
+                if len(unavailable) > 3:
+                    findings.append(make_finding(
+                        "home", "ha_entities_unavailable", "global",
+                        "homeassistant/entities", "warning",
+                        f"Home Assistant: {len(unavailable)} entities unavailable ({', '.join(unavailable[:5])}...)",
+                        {"count": len(unavailable), "entities": unavailable[:20]},
+                        "Check network connectivity to smart home devices",
+                    ))
+        except Exception as e:
+            logger.error(f"Home Assistant check error: {e}")
+
+        # --- Tasmota device status ---
+        try:
+            result = await call_mcp_tool_safe(home, "tasmota_status_all", timeout=30.0)
+            devices = result.get("items", result.get("devices", result.get("result", [])))
+            if isinstance(devices, list):
+                for device in devices:
+                    if not isinstance(device, dict):
+                        continue
+                    name = device.get("name", device.get("ip", "unknown"))
+                    online = device.get("online", device.get("reachable", True))
+                    if online is False or (isinstance(online, str) and online.lower() == "false"):
+                        findings.append(make_finding(
+                            "home", "tasmota_device_offline", "global",
+                            f"tasmota/{name}", "warning",
+                            f"Tasmota device '{name}' offline",
+                            {"name": name, "ip": device.get("ip", "")},
+                        ))
+        except Exception as e:
+            logger.error(f"Tasmota check error: {e}")
+
+        # --- AdGuard filter list freshness ---
+        try:
+            result = await call_mcp_tool_safe(home, "adguard_get_filtering_status")
+            filters_data = result.get("filters", result.get("result", []))
+            if isinstance(filters_data, list):
+                now = datetime.utcnow()
+                for f in filters_data:
+                    if not isinstance(f, dict):
+                        continue
+                    name = f.get("name", "unknown")
+                    enabled = f.get("enabled", True)
+                    last_updated = f.get("last_updated", "")
+                    if not enabled or not last_updated:
+                        continue
+                    try:
+                        updated_dt = datetime.fromisoformat(last_updated.replace("Z", "+00:00").replace("+00:00", ""))
+                        age_days = (now - updated_dt).days
+                        if age_days > 7:
+                            findings.append(make_finding(
+                                "home", "adguard_filters_stale", "global",
+                                f"adguard/filter/{name[:40]}", "warning",
+                                f"AdGuard filter '{name}' is {age_days} days stale",
+                                {"filter": name, "last_updated": last_updated, "age_days": age_days},
+                                "Update AdGuard filter lists in Settings → Filters",
+                            ))
+                    except (ValueError, TypeError):
+                        pass
+        except Exception as e:
+            logger.error(f"AdGuard filter check error: {e}")
+
+        return findings
+
+    # ========================================================================
     # LANGGRAPH STATE AND NODES
     # ========================================================================
 
@@ -1350,7 +2089,7 @@ data:
         """Node 1: Run all checks in parallel across the estate."""
         sweep_id = state["sweep_id"]
         logger.info(f"[{sweep_id}] Starting estate sweep...")
-        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 11 checks", 10)
+        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 18 checks", 10)
 
         # Record sweep start
         try:
@@ -1374,6 +2113,13 @@ data:
             check_mcp_health(),
             check_renovate(),
             check_beszel(),
+            check_dns_routing(),
+            check_backups(),
+            check_network_health(),
+            check_nfs_storage(),
+            check_homepage(),
+            check_media_pipeline(),
+            check_home_automation(),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1495,6 +2241,38 @@ data:
                     log_only.append(finding)
                 else:
                     create_rule.append(finding)
+            # DNS/routing — broken backends need immediate fix
+            elif check_name == "caddy_backend_unreachable":
+                fix_now.append(finding)
+            # Backup failures are urgent
+            elif check_name in ("velero_backup_failed", "velero_storage_unavailable",
+                                "backrest_plan_overdue", "pbs_backup_stale"):
+                fix_now.append(finding)
+            # Network — switch offline is urgent
+            elif check_name == "omada_switch_offline":
+                fix_now.append(finding)
+            elif check_name in ("omada_lag_degraded", "unifi_subsystem_degraded",
+                                "unifi_alarm", "ntopng_alert"):
+                create_rule.append(finding)
+            # NFS — missing share or canary failure is urgent
+            elif check_name in ("nfs_share_missing", "mount_canary_failed"):
+                fix_now.append(finding)
+            # Plex unreachable is urgent
+            elif check_name == "plex_unreachable":
+                fix_now.append(finding)
+            # Media/home/homepage — create rules, not urgent
+            elif check_name in ("arr_queue_stuck", "prowlarr_indexer_failed",
+                                "download_stalled", "homepage_service_unreachable",
+                                "homepage_category_degraded",
+                                "ha_entities_unavailable", "adguard_filters_stale",
+                                "tasmota_device_offline"):
+                create_rule.append(finding)
+            # Informational items
+            elif check_name in ("dns_missing_route", "dns_duplicate_rewrite",
+                                "nfs_snapshot_stale", "backrest_unreachable",
+                                "pbs_unreachable", "velero_pod_unhealthy",
+                                "k8s_pvc_pending"):
+                log_only.append(finding)
             # Informational
             elif severity == "info":
                 log_only.append(finding)
@@ -2078,6 +2856,13 @@ spec:
                 secretKeyRef:
                   name: mcp-opnsense
                   key: ROOT_PASSWORD
+            - name: PBS_HOST
+              value: "https://10.10.0.151:8007"
+            - name: PBS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alert-forwarder-pbs
+                  key: PASSWORD
           volumeMounts:
             - name: code
               mountPath: /code
@@ -2085,10 +2870,10 @@ spec:
               mountPath: /app/deps
           resources:
             requests:
-              memory: "256Mi"
+              memory: "384Mi"
               cpu: "100m"
             limits:
-              memory: "512Mi"
+              memory: "768Mi"
               cpu: "500m"
           readinessProbe:
             httpGet:
