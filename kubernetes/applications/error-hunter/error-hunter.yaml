@@ -4304,12 +4304,13 @@ metadata:
   labels:
     app: error-hunter
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: error-hunter
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 30801
       name: http
 ---
 apiVersion: secrets.infisical.com/v1alpha1
