@@ -94,7 +94,7 @@ data:
             threshold=85,
             severity="warning",
             description_template="Pool '{pool_name}' is at {usage_percent}% capacity",
-            fix_template="Review and clean up data or expand storage"
+            fix_template="See runbook: /home/agentic_lab/runbooks/alerts/truenas-low-disk-space.md. Quick: (1) Identify space consumers: zfs list -r {pool_name}; (2) Remove old snapshots or files; (3) Expand pool if needed."
         ),
         # Proxmox alerts (via infrastructure-mcp)
         AlertRule(
