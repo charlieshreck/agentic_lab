@@ -215,6 +215,26 @@ infrastructure-mcp proxmox_list_nodes --host ruapehu
    - 1x 2GB Omada (LXC)
    - **Total: 51GB allocations + 13.6GB overhead ≈ 64.6GB (slightly overcommitted)**
 
+## Per-Host Reference
+
+### Ruapehu (62.6GB - Production VMs)
+- **Terraform**: `prod_homelab/infrastructure/terraform/variables.tf`
+- **VMs**: talos-cp-01 (4GB), talos-worker-01..03 (9GB each), plex (7GB), unifi (2GB)
+- **Safe total**: 51GB allocated (~81%)
+
+### Pihanga (28GB - Monitoring + Backup)
+- **Terraform**: `monit_homelab/terraform/talos-single-node/variables.tf`
+- **VMs**: talos-monitor (20GB max, 14GB min with balloon), pbs (2GB)
+- **Memory budget**:
+  - talos-monitor: 20GB max, 14GB balloon min
+  - pbs: ~2GB
+  - Proxmox host overhead: ~5.7GB
+  - Total worst case: ~27.7GB / 28.2GB = ~98% (normal without balloon reclaim)
+  - With balloon active: ~21.7GB / 28.2GB = ~77%
+- **Key**: Pod working set on talos-monitor is only ~7.2GB — Linux fills the rest with page cache
+- **Fix**: Balloon driver enabled with `floating = 14336` (14GB min), allows Proxmox to reclaim up to 6GB
+- **Terraform file to edit**: `monit_homelab/terraform/talos-single-node/main.tf` (memory block)
+
 ## Alert Rules
 
 The Proxmox node memory alert should trigger at:
@@ -234,17 +254,28 @@ The Proxmox node memory alert should trigger at:
 
 ## Historical Incidents
 
-### Incident #156 - February 2026
-- **Host**: Pihanga (Ruapehu) - 62.6GB RAM
-- **Alert**: Memory at 92.3% (threshold 85%)
-- **Cause**: VM allocations overcommitted (60GB allocated + 13.6GB host overhead)
-  - Workers at 12GB each (36GB total)
-  - Plex at 6GB (but using 6.5GB)
-  - UniFi at 3GB (but using 1.5GB)
+### Incident #156 - February 2026 (Pihanga - talos-monitor)
+- **Host**: Pihanga - 28GB RAM
+- **Alert**: Memory at 97% (critical, threshold 85%)
+- **Cause**: talos-monitor VM had 20GB dedicated with balloon **disabled** (`floating = 0`)
+  - Linux fills all available RAM with page cache (disk I/O caching for monitoring data)
+  - Pod working set is only ~7.2GB (VictoriaMetrics 1.4GB, Prometheus 1.2GB, kube-apiserver 1.0GB, etc.)
+  - Remaining ~12GB was page cache — unnecessarily held by guest
+- **Fix**: Enabled memory balloon in Terraform (`floating = 14336` = 14GB minimum)
+  - virtio_balloon module was already loaded in Talos kernel config
+  - No VM restart required — balloon device activated in-place
+  - Host reclaims up to 6GB from talos-monitor guest's page cache
+  - Result: ~77% utilization (well below 85% threshold)
+- **Time to fix**: ~15 minutes (blocked by PBS backup lock, then terraform apply)
+- **Root cause**: Balloon disabled when VM was created; page cache naturally fills all available RAM
+
+### Incident #160 - February 2026 (Ruapehu)
+- **Host**: Ruapehu - 62.6GB RAM
+- **Alert**: Memory at 91% (warning level)
+- **Cause**: VM allocations overcommitted (65GB allocated + host overhead)
 - **Fix**: Reduced allocations via Terraform:
   - Workers: 12GB → 9GB (saves 9GB)
   - UniFi: 3GB → 2GB (saves 1GB)
-  - Plex: 6GB → 7GB (adds 1GB, stabilizes)
   - Result: 51GB allocated (81% utilization, under 85% threshold)
 - **Time to fix**: 10 minutes (commit → push → Terraform apply + VM restart)
 - **Root cause**: No periodic memory review during VM allocation planning
