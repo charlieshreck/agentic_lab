@@ -90,6 +90,63 @@ sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 "journalctl -u pvedaemon | grep vzdump
 1. Check datastore consistency
 2. Run manual verify via PBS UI or API
 
+## Memory Pressure (Incident #163 — Feb 2026)
+
+### Symptoms
+- Pulse/KAO alert: `VM memory at >85% (value: ~98%)` for `pbs` on Pihanga
+- Proxmox reports ~98% memory used for PBS VM (VMID 101)
+- `free -h` inside VM shows MemAvailable ~1.3GB (actual pressure is low but risk is real during backups)
+
+### Root Cause
+PBS VM has 2GB RAM. During backup windows:
+- `proxmox-backup-proxy` peaks at ~1GB RSS
+- `systemd-journald` can balloon to 240MB+ if error-log flooding occurs
+  (e.g., stale NFS causing "unable to open chunk store" errors every ~100s)
+- OS overhead + buffer/cache fills remaining 2GB
+- Proxmox reports 98%+ because it counts all allocated guest pages
+
+**Risk**: OOM during 02:00 backup window when multiple VMs are backed up concurrently.
+
+### Fix Applied (Incident #163)
+1. **Terraform** (`monit_homelab/terraform/talos-single-node/pbs.tf`): Increased RAM 2GB → 4GB
+   - Requires `terraform apply` in monit_homelab terraform (PBS VM will restart)
+2. **journald** (`/etc/systemd/journald.conf` on PBS): Capped at 128MB runtime / 256MB system
+   ```
+   RuntimeMaxUse=128M
+   SystemMaxUse=256M
+   RuntimeMaxFileSize=32M
+   SystemMaxFileSize=64M
+   ```
+   Applied via: `systemctl restart systemd-journald`
+
+### Procedure When Alert Fires
+
+```bash
+# 1. SSH to PBS and check real memory pressure
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "free -h"
+# MemAvailable > 500MB = safe, just Proxmox reporting bloat
+
+# 2. Check for log flooding
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "journalctl -u proxmox-backup-proxy --since '30 min ago' --no-pager | grep -c 'unable to open'"
+
+# 3. If journald is bloated from log flooding, restart it
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "systemctl restart systemd-journald"
+
+# 4. If actual memory pressure (MemAvailable < 200MB), check for a larger process
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "ps aux --sort=rss | tail -10"
+
+# 5. If NFS error flooding, see stale-NFS section above — restart PBS services
+```
+
+### Terraform Apply (after RAM increase commit)
+```bash
+cd /home/monit_homelab/terraform/talos-single-node
+terraform init   # if needed
+terraform plan   # review — should show memory change to 4096
+terraform apply  # PBS VM will be restarted to apply new RAM
+```
+**Note**: Plan PBS restart during a maintenance window (avoid 02:00 backup window).
+
 ## Monitoring
 
 ### PBS Health
