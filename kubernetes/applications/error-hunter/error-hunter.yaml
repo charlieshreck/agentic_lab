@@ -2949,6 +2949,31 @@ data:
         except Exception as e:
             logger.error(f"Failed to update sweep run: {e}")
 
+        # Auto-resolve findings no longer detected.
+        # If a finding was active (new/dispatched) but its fingerprint was NOT
+        # found in this sweep's raw findings, the issue has cleared — resolve it.
+        current_fingerprints = set(f["fingerprint"] for f in state.get("raw_findings", []))
+        auto_resolved = 0
+        try:
+            stale = await pg_fetch(
+                "SELECT id, fingerprint, check_name, resource FROM error_hunter_findings "
+                "WHERE status IN ('new', 'dispatched')"
+            )
+            for row in stale:
+                if row["fingerprint"] not in current_fingerprints:
+                    await pg_execute(
+                        "UPDATE error_hunter_findings SET status = 'resolved', "
+                        "resolved_at = NOW() WHERE id = $1",
+                        row["id"],
+                    )
+                    auto_resolved += 1
+            if auto_resolved > 0:
+                logger.info(f"[{sweep_id}] Auto-resolved {auto_resolved} findings no longer detected")
+        except Exception as e:
+            logger.warning(f"Auto-resolve error: {e}")
+
+        summary["auto_resolved"] = auto_resolved
+
         # Log to knowledge-mcp
         try:
             await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
