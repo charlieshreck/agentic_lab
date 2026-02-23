@@ -2068,6 +2068,64 @@ data:
         return findings
 
     # ========================================================================
+    # CHECK: STALE INCIDENTS
+    # ========================================================================
+
+    async def check_stale_incidents() -> list:
+        """Find and auto-resolve KAO incidents stuck in non-terminal states.
+
+        Incidents that have been in 'detected' or 'investigating' for >6 hours
+        are considered stale (screen session likely died). This check resolves
+        them automatically and reports a finding.
+        """
+        findings = []
+        try:
+            stale_rows = await pg_fetch("""
+                SELECT id, alert_name, status, screen_session, detected_at,
+                       EXTRACT(EPOCH FROM (NOW() - detected_at)) / 3600 AS age_hours
+                FROM incidents
+                WHERE status IN ('detected', 'investigating', 'mitigating')
+                  AND detected_at < NOW() - INTERVAL '6 hours'
+                ORDER BY detected_at ASC
+            """)
+
+            if stale_rows:
+                stale_ids = []
+                for row in stale_rows:
+                    inc_id = row["id"]
+                    alert = row["alert_name"]
+                    age_h = round(row["age_hours"], 1)
+                    session = row["screen_session"] or "none"
+                    stale_ids.append(inc_id)
+                    findings.append(make_finding(
+                        "operations", "incident_stale", "global",
+                        f"kao/incident-{inc_id}", "info",
+                        f"Stale incident #{inc_id} '{alert}' ({age_h}h old, status={row['status']}, screen={session}) — auto-resolved",
+                        {"incident_id": inc_id, "alert_name": alert,
+                         "age_hours": age_h, "screen_session": session},
+                        "Investigate why screen session did not resolve the incident",
+                    ))
+
+                # Auto-resolve them
+                if stale_ids:
+                    await pg_execute(f"""
+                        UPDATE incidents
+                        SET status = 'resolved',
+                            resolution_type = 'auto_stale',
+                            resolution_summary = 'Auto-resolved by error-hunter: incident stale >6h with no screen progress',
+                            resolved_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = ANY($1::int[])
+                          AND status IN ('detected', 'investigating', 'mitigating')
+                    """, stale_ids)
+                    logger.info(f"Auto-resolved {len(stale_ids)} stale incidents: {stale_ids}")
+
+        except Exception as e:
+            logger.error(f"Stale incident check error: {e}")
+
+        return findings
+
+    # ========================================================================
     # CHECK: OPNSENSE UPDATES & SECURITY
     # ========================================================================
 
@@ -2339,7 +2397,7 @@ data:
         """Node 1: Run all checks in parallel across the estate."""
         sweep_id = state["sweep_id"]
         logger.info(f"[{sweep_id}] Starting estate sweep...")
-        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 21 checks", 10)
+        await report_progress(sweep_id, "Scanning clusters", "3 clusters, 22 checks", 10)
 
         # Record sweep start
         try:
@@ -2370,6 +2428,7 @@ data:
             check_homepage(),
             check_media_pipeline(),
             check_home_automation(),
+            check_stale_incidents(),
             check_opnsense_updates(),
             check_cloudflare_health(),
             check_proxmox_health(),
@@ -2537,7 +2596,7 @@ data:
                                 "nfs_snapshot_stale", "backrest_unreachable",
                                 "pbs_unreachable", "velero_pod_unhealthy",
                                 "k8s_pvc_pending", "opnsense_firmware_update",
-                                "opnsense_plugin_update"):
+                                "opnsense_plugin_update", "incident_stale"):
                 log_only.append(finding)
             # Informational
             elif severity == "info":
