@@ -2666,6 +2666,195 @@ data:
         await report_progress(sweep_id, "Classified", f"{len(fix_now)} fix, {len(create_rule)} rules, {len(log_only)} log", 65)
         return {"fix_now": fix_now, "create_rule": create_rule, "log_only": log_only}
 
+    # ========================================================================
+    # AUTO-REMEDIATION (attempt fixes before dispatching to Claude screen)
+    # ========================================================================
+
+    ADGUARD_URL = os.environ.get("ADGUARD_URL", "http://10.10.0.1:3000")
+    ADGUARD_USER = os.environ.get("ADGUARD_USER", "admin")
+    ADGUARD_PASS = os.environ.get("ADGUARD_PASS", "")
+
+    async def _remediate_argocd_out_of_sync(finding: dict) -> bool:
+        """Sync an out-of-sync ArgoCD application."""
+        app_name = finding.get("evidence", {}).get("app", "")
+        if not app_name:
+            return False
+        result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "argocd_sync_application", {"app_name": app_name})
+        if result.get("_error"):
+            logger.warning(f"ArgoCD sync failed for {app_name}: {result.get('message')}")
+            return False
+        logger.info(f"Auto-remediated: synced ArgoCD app '{app_name}'")
+        return True
+
+    async def _remediate_argocd_unhealthy(finding: dict) -> bool:
+        """Sync a degraded ArgoCD application (often fixes itself on resync)."""
+        app_name = finding.get("evidence", {}).get("app", "")
+        if not app_name:
+            return False
+        result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "argocd_sync_application", {"app_name": app_name})
+        if result.get("_error"):
+            return False
+        logger.info(f"Auto-remediated: synced degraded ArgoCD app '{app_name}'")
+        return True
+
+    async def _remediate_adguard_filters_stale(finding: dict) -> bool:
+        """Refresh AdGuard filter lists."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{ADGUARD_URL}/control/filtering/refresh",
+                    json={"whitelist": False},
+                    auth=(ADGUARD_USER, ADGUARD_PASS) if ADGUARD_PASS else None,
+                )
+                if resp.status_code == 200:
+                    logger.info("Auto-remediated: refreshed AdGuard filter lists")
+                    return True
+                logger.warning(f"AdGuard filter refresh returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"AdGuard filter refresh failed: {e}")
+        return False
+
+    async def _remediate_pod_not_running(finding: dict) -> bool:
+        """Delete a CrashLoopBackOff/Error pod so K8s recreates it."""
+        ev = finding.get("evidence", {})
+        pod_name = ev.get("pod", "")
+        namespace = ev.get("namespace", "")
+        status = ev.get("status", "")
+        cluster = finding.get("cluster", "")
+        ctx = CLUSTERS.get(cluster, cluster)
+        # Only bounce pods in recoverable error states
+        if status not in ("CrashLoopBackOff", "Error", "OOMKilled"):
+            return False
+        if not pod_name or not namespace:
+            return False
+        result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_delete_pod", {
+            "pod_name": pod_name, "namespace": namespace, "cluster": ctx,
+        })
+        if result.get("_error"):
+            logger.warning(f"Pod delete failed for {namespace}/{pod_name}: {result.get('message')}")
+            return False
+        logger.info(f"Auto-remediated: bounced pod {namespace}/{pod_name} on {cluster} (was {status})")
+        return True
+
+    async def _remediate_mcp_tool_broken(finding: dict) -> bool:
+        """Restart the MCP deployment whose tool is timing out."""
+        resource = finding.get("resource", "")
+        # resource format: "mcp/<domain>/<tool_name>"
+        parts = resource.split("/")
+        if len(parts) < 2:
+            return False
+        mcp_domain = parts[1]  # e.g. "observability", "infrastructure"
+        deploy_name = f"{mcp_domain}-mcp"
+        ctx = CLUSTERS.get("agentic", "agentic")
+        result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_restart_deployment", {
+            "deployment_name": deploy_name, "namespace": "ai-platform", "cluster": ctx,
+        })
+        if result.get("_error"):
+            logger.warning(f"MCP restart failed for {deploy_name}: {result.get('message')}")
+            return False
+        logger.info(f"Auto-remediated: restarted {deploy_name} deployment (tool timeout)")
+        return True
+
+    # Map finding check_names to their auto-fix functions
+    REMEDIATORS = {
+        "argocd_out_of_sync": _remediate_argocd_out_of_sync,
+        "argocd_unhealthy": _remediate_argocd_unhealthy,
+        "adguard_filters_stale": _remediate_adguard_filters_stale,
+        "pod_not_running": _remediate_pod_not_running,
+        "mcp_tool_broken": _remediate_mcp_tool_broken,
+    }
+
+    async def remediate(state: SweepState) -> dict:
+        """Node 3.5: Attempt auto-fixes for known finding types.
+
+        Successfully remediated findings move from fix_now/create_rule to log_only.
+        Failed remediations stay in their original bucket for dispatch to Claude.
+        """
+        sweep_id = state["sweep_id"]
+        await report_progress(sweep_id, "Remediating", "Auto-fixing known issues", 60)
+
+        fix_now = list(state.get("fix_now", []))
+        create_rule = list(state.get("create_rule", []))
+        log_only = list(state.get("log_only", []))
+
+        remediated_count = 0
+        already_refreshed_adguard = False
+        already_restarted_mcps = set()
+
+        # Try to remediate fix_now items
+        remaining_fix_now = []
+        for finding in fix_now:
+            check_name = finding.get("check_name", "")
+            remediator = REMEDIATORS.get(check_name)
+            fixed = False
+            if remediator:
+                # Deduplicate: only refresh AdGuard once, only restart each MCP once
+                if check_name == "adguard_filters_stale":
+                    if already_refreshed_adguard:
+                        fixed = True  # already triggered refresh for all lists
+                    else:
+                        fixed = await remediator(finding)
+                        if fixed:
+                            already_refreshed_adguard = True
+                elif check_name == "mcp_tool_broken":
+                    mcp_domain = finding.get("resource", "").split("/")[1] if "/" in finding.get("resource", "") else ""
+                    if mcp_domain in already_restarted_mcps:
+                        fixed = True
+                    else:
+                        fixed = await remediator(finding)
+                        if fixed:
+                            already_restarted_mcps.add(mcp_domain)
+                else:
+                    fixed = await remediator(finding)
+
+            if fixed:
+                finding["remediated"] = True
+                finding["description"] = f"[AUTO-FIXED] {finding.get('description', '')}"
+                log_only.append(finding)
+                remediated_count += 1
+            else:
+                remaining_fix_now.append(finding)
+
+        # Try to remediate create_rule items
+        remaining_create_rule = []
+        for finding in create_rule:
+            check_name = finding.get("check_name", "")
+            remediator = REMEDIATORS.get(check_name)
+            fixed = False
+            if remediator:
+                if check_name == "adguard_filters_stale":
+                    if already_refreshed_adguard:
+                        fixed = True
+                    else:
+                        fixed = await remediator(finding)
+                        if fixed:
+                            already_refreshed_adguard = True
+                elif check_name == "mcp_tool_broken":
+                    mcp_domain = finding.get("resource", "").split("/")[1] if "/" in finding.get("resource", "") else ""
+                    if mcp_domain in already_restarted_mcps:
+                        fixed = True
+                    else:
+                        fixed = await remediator(finding)
+                        if fixed:
+                            already_restarted_mcps.add(mcp_domain)
+                else:
+                    fixed = await remediator(finding)
+
+            if fixed:
+                finding["remediated"] = True
+                finding["description"] = f"[AUTO-FIXED] {finding.get('description', '')}"
+                log_only.append(finding)
+                remediated_count += 1
+            else:
+                remaining_create_rule.append(finding)
+
+        logger.info(f"[{sweep_id}] Remediation: {remediated_count} auto-fixed, "
+                    f"{len(remaining_fix_now)} fix_now remaining, {len(remaining_create_rule)} create_rule remaining")
+        await report_progress(sweep_id, "Remediated",
+                              f"{remediated_count} auto-fixed, {len(remaining_fix_now)+len(remaining_create_rule)} remaining", 65)
+
+        return {"fix_now": remaining_fix_now, "create_rule": remaining_create_rule, "log_only": log_only}
+
     def _build_sweep_prompt(sweep_id: str, fix_now: list, create_rule: list, log_only: list) -> str:
         """Build a single prompt for the entire sweep — all findings as a batch queue."""
         total = len(fix_now) + len(create_rule) + len(log_only)
@@ -3009,13 +3198,15 @@ data:
         workflow.add_node("sweep_estate", sweep_estate)
         workflow.add_node("deduplicate", deduplicate)
         workflow.add_node("classify", classify)
+        workflow.add_node("remediate", remediate)
         workflow.add_node("dispatch_sweep_screen", dispatch_sweep_screen)
         workflow.add_node("record_sweep", record_sweep)
 
         workflow.set_entry_point("sweep_estate")
         workflow.add_edge("sweep_estate", "deduplicate")
         workflow.add_edge("deduplicate", "classify")
-        workflow.add_edge("classify", "dispatch_sweep_screen")
+        workflow.add_edge("classify", "remediate")
+        workflow.add_edge("remediate", "dispatch_sweep_screen")
         workflow.add_edge("dispatch_sweep_screen", "record_sweep")
         workflow.add_edge("record_sweep", END)
 
@@ -3269,6 +3460,18 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: alert-forwarder-pbs
+                  key: PASSWORD
+            - name: ADGUARD_URL
+              value: "http://10.10.0.1:3000"
+            - name: ADGUARD_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-adguard
+                  key: USERNAME
+            - name: ADGUARD_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-adguard
                   key: PASSWORD
           volumeMounts:
             - name: code
