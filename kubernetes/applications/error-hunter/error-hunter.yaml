@@ -56,7 +56,7 @@ data:
     )
 
     # Kernow Hub / Synapse for screen dispatch (Phase 2)
-    AFFERENT_URL = os.environ.get("AFFERENT_URL", "http://10.20.0.40:30456")
+    AFFERENT_URL = os.environ.get("AFFERENT_URL", "http://10.10.0.22:3456")
     AFFERENT_AUTH_TOKEN = os.environ.get("AFFERENT_AUTH_TOKEN", "")
     SYNAPSE_URL = os.environ.get("SYNAPSE_URL", "http://10.10.0.22:3460")
 
@@ -3019,12 +3019,15 @@ data:
             # Proxmox failed tasks, zone inactive, LAG degrade
             elif check_name in ("proxmox_task_failed", "cloudflare_zone_inactive"):
                 create_rule.append(finding)
+            # Items that need investigation/rules
+            elif check_name in ("velero_pod_unhealthy", "pbs_unreachable",
+                                "k8s_pvc_pending", "incident_stale"):
+                create_rule.append(finding)
             # Informational items
             elif check_name in ("dns_missing_route", "dns_duplicate_rewrite",
                                 "nfs_snapshot_stale",
-                                "pbs_unreachable", "velero_pod_unhealthy",
-                                "k8s_pvc_pending", "opnsense_firmware_update",
-                                "opnsense_plugin_update", "incident_stale"):
+                                "opnsense_firmware_update",
+                                "opnsense_plugin_update"):
                 log_only.append(finding)
             # Informational
             elif severity == "info":
@@ -3458,7 +3461,7 @@ data:
             "After you finish ALL items, you MUST resolve each finding in the dashboard.",
             "For each fix_now and create_rule finding, run this curl (replace FINDING_ID and summary):",
             "```bash",
-            'curl -s -X POST http://10.20.0.40:30456/webhook/screen-resolve \\',
+            f'curl -s -X POST {AFFERENT_URL}/webhook/screen-resolve \\',
             '  -H "Content-Type: application/json" \\',
             '  -d \'{"type":"finding","id":FINDING_ID,"summary":"<what you did>"}\'',
             "```",
@@ -3618,11 +3621,55 @@ data:
         await report_progress(sweep_id, "LLM Remediated",
                               f"{llm_fixed_count} LLM-fixed, {len(remaining_fix_now)} unresolved", 80)
 
+        # ── Dispatch remaining items to Claude patrol screen ──
+        # If there are still unfixed fix_now or create_rule items, build a prompt
+        # and send to tamar's patrol screen for full Claude investigation
+        screens_created = []
+        actionable_fix = [f for f in remaining_fix_now if not f.get("remediated")]
+        actionable_rule = [f for f in create_rule if not f.get("remediated")]
+
+        if actionable_fix or actionable_rule:
+            await report_progress(sweep_id, "Dispatching to Claude",
+                                  f"{len(actionable_fix)} fix + {len(actionable_rule)} rules", 85)
+            try:
+                prompt = _build_sweep_prompt(sweep_id, actionable_fix, actionable_rule, log_only)
+                # Choose model based on severity — critical gets opus, else sonnet
+                has_critical = any(f.get("severity") == "critical" for f in actionable_fix)
+                model = "opus" if has_critical else "sonnet"
+
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        f"{AFFERENT_URL}/api/screens",
+                        json={"prompt": prompt, "model": model},
+                        headers={"Content-Type": "application/json"},
+                    )
+                    resp_data = resp.json()
+                    screen_name = resp_data.get("session", "patrol")
+                    screens_created.append(screen_name)
+                    logger.info(f"[{sweep_id}] Dispatched {len(actionable_fix)+len(actionable_rule)} items "
+                                f"to Claude patrol screen ({model})")
+
+                # Mark dispatched findings in DB
+                for finding in actionable_fix + actionable_rule:
+                    try:
+                        await pg_execute(
+                            "UPDATE error_hunter_findings SET status = 'dispatched', "
+                            "screen_session = $2 WHERE fingerprint = $1 AND status = 'new'",
+                            finding.get("fingerprint", ""), screen_name,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to mark dispatched: {e}")
+
+            except Exception as e:
+                logger.error(f"[{sweep_id}] Failed to dispatch to Claude screen: {e}")
+        else:
+            logger.info(f"[{sweep_id}] No actionable items remaining — skipping screen dispatch")
+
         return {
             "fix_now": remaining_fix_now,
             "create_rule": create_rule,
             "log_only": log_only,
-            "screens_created": [],
+            "screens_created": screens_created,
             "rules_written": [],
             "runbooks_drafted": [],
             "remediation_results": remediation_results,
