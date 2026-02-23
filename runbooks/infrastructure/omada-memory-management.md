@@ -40,6 +40,8 @@ The change is committed to git and will be automatically applied by:
 3. `terraform apply` increases LXC memory to 4GB
 4. Proxmox reconfigures VMID 200 without requiring container restart
 
+**Status**: Committed in `eea3241` (2026-02-22), awaiting `terraform apply` deployment
+
 ### Step 3: Verify Memory After Upgrade
 ```bash
 # Check container status
