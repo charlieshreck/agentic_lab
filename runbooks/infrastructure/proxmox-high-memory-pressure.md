@@ -1,0 +1,121 @@
+# Proxmox Node Memory Pressure
+
+**Alert**: `node_memory_available_percent < 15%` on Proxmox hosts
+
+**Severity**: Warning (15-20% free), Critical (<10% free)
+
+**Description**: Proxmox host has insufficient free memory for workload operations.
+
+## Root Causes
+
+1. **VM Over-Allocation**: Total VM allocated memory exceeds physical host memory
+   - Proxmox supports memory overcommit, but balloon drivers + host overhead consume real RAM
+   - Each QEMU process adds overhead (~50MB per VM)
+   - Kernel buffers and caches further reduce available memory
+
+2. **Memory Leak in Guest OS**: Individual VM consuming more than allocated
+   - Use `ssh root@<vm-ip>` and run `free -h` to check guest memory usage
+   - Check kernel messages: `dmesg | tail -20` for OOM killer activity
+
+3. **Host Overhead**: Proxmox system services consuming memory
+   - Check: `free -h` on Proxmox host
+   - Check: `ps aux | sort -k4 -rn | head -10` for top memory consumers
+
+## Investigation Steps
+
+### Step 1: Get Host Memory Status
+```bash
+# From Synapse LXC, check Proxmox node memory
+kubectl get nodes -o custom-columns=NAME:.metadata.name,MEMORY:.status.allocatable.memory
+
+# Or use MCP infrastructure tool:
+mcp__infrastructure__proxmox_list_nodes with params={"host": "ruapehu"}
+```
+
+### Step 2: List All VMs and Their Memory Usage
+```bash
+mcp__infrastructure__proxmox_list_vms with params={"host": "ruapehu"}
+
+# Check actual memory (memhost) vs allocated (maxmem) for each VM
+# If memhost + (# VMs × 50MB overhead) + host buffer ≈ 62.6GB, then allocation is too high
+```
+
+### Step 3: Identify Problem VMs
+Look for VMs where:
+- **`memhost` > `maxmem`**: Guest OS using more than allocated (balloon deflation issue)
+- Sum of all `maxmem` values > host physical memory: Overcommit situation
+
+### Step 4: Check Guest OS Status
+```bash
+# SSH to problem VM and check memory
+ssh root@<vm-ip> "free -h && top -b -n1 | head -20"
+
+# Check for OOM killer activity
+ssh root@<vm-ip> "dmesg | grep -i 'oom\|killed' | tail -10"
+```
+
+## Permanent Fix
+
+Memory allocations are managed in GitOps (Terraform):
+- **File**: `prod_homelab/infrastructure/terraform/variables.tf`
+- **Variables**:
+  - `var.control_plane.memory` - Control plane allocation
+  - `var.workers[*].memory` - Worker allocations
+  - `var.plex_vm.memory` - Plex VM allocation
+  - `var.unifi_vm.memory` - UniFi VM allocation
+
+### Current Safe Allocations (Incident #160 fix)
+```hcl
+control_plane.memory = 4096   # 4GB
+workers[*].memory    = 9216   # 9GB each (3 × 9GB = 27GB)
+plex_vm.memory       = 7168   # 7GB
+unifi_vm.memory      = 2048   # 2GB
+truenas.memory       = 16384  # 16GB (TrueNAS VM, separate)
+
+Total = 4 + 27 + 7 + 2 + 16 = 56GB allocated
+Available for host overhead = 62.6GB - 56GB = 6.6GB (acceptable)
+```
+
+### To Apply Fix
+```bash
+cd /home/prod_homelab/infrastructure/terraform
+
+# Requires terraform.tfvars with Proxmox credentials
+terraform plan
+terraform apply
+
+# Verify nodes have new allocations
+mcp__infrastructure__proxmox_list_vms with params={"host": "ruapehu"}
+```
+
+## Temporary Mitigation (if Terraform apply blocked)
+
+If you cannot apply Terraform (e.g., waiting for credentials), migrate workloads to other nodes:
+
+1. **Drain worker node**: `kubectl drain <node> --ignore-daemonsets --delete-emptydir-data`
+2. **Reduce VM memory via Proxmox UI**: Proxmox → Ruapehu → VM → Hardware → Memory
+3. **Reboot VM**: Changes take effect on next boot
+
+**WARNING**: Manual changes will be overwritten by next Terraform apply.
+
+## Prevention
+
+1. **Monitor regularly**: Set up recurring check via Alert Manager
+   - `node_memory_available_percent < 20%` (warning threshold)
+   - `node_memory_available_percent < 10%` (critical threshold)
+
+2. **Size nodes correctly**: Calculate memory budget upfront
+   - Sum all VM allocations + 10% buffer for host overhead
+
+3. **Right-size VMs**: Monitor actual usage
+   - Use Kubernetes resource metrics: `kubectl top nodes` / `kubectl top pods`
+   - Adjust `maxmem` if VMs consistently use <50% allocation
+
+4. **Enable balloon drivers**: Allow Proxmox to reclaim unused memory
+   - Balloon enabled on workers allows flexible allocation
+   - Disabled on control plane (needs stable memory) and Plex (GPU stability)
+
+## References
+- Memory overcommit: https://pve.proxmox.com/wiki/Memory
+- Balloon driver: https://pve.proxmox.com/wiki/Balloning
+- Incident #160 fix: GitOps commit reducing allocations (Feb 23, 2026)
