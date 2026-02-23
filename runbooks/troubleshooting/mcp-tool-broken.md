@@ -72,10 +72,7 @@ Fix the calling code (error-hunter, alerting-pipeline, etc.) to use the correct 
 - All `argocd_*` tools
 - `get_scrape_targets`, `query_metrics`, `list_alerts`
 
-**Auto-unwrap fix (2026-02-22):** The REST bridge now auto-detects both directions:
-- If a flat-kwargs tool is called with `{"params": {...}}`, the bridge catches `unexpected_keyword_argument` and retries by unwrapping
-- If a Pydantic model tool is called without wrapping, the bridge catches `Field required` and retries by wrapping
-- This makes the bridge self-healing for parameter format mismatches
+**Direct call fix (2026-02-23):** The REST bridge now uses `mcp.call_tool()` directly instead of `Client(mcp)` in-process transport. This bypasses FastMCP Client transport validation issues that caused `Unexpected keyword argument: params` errors in newer FastMCP versions. The auto-wrap/unwrap logic is preserved but now catches double-faults (when both wrapped and unwrapped calls fail).
 
 ### 2. Backend API Unavailable
 
