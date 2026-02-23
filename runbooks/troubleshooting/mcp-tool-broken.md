@@ -74,6 +74,8 @@ Fix the calling code (error-hunter, alerting-pipeline, etc.) to use the correct 
 
 **Direct call fix (2026-02-23):** The REST bridge now uses `mcp.call_tool()` directly instead of `Client(mcp)` in-process transport. This bypasses FastMCP Client transport validation issues that caused `Unexpected keyword argument: params` errors in newer FastMCP versions. The auto-wrap/unwrap logic is preserved but now catches double-faults (when both wrapped and unwrapped calls fail).
 
+**Error result handling fix (2026-02-23):** FastMCP's server-side `mcp.call_tool()` may return validation errors as `CallToolResult(is_error=True)` instead of raising exceptions. The auto-wrap/unwrap retry logic previously only handled exceptions, meaning tools like `coroot_get_recent_anomalies` (flat kwargs) would fail when called with `{"params": {"hours": 1}}` — the unwrap retry never triggered because no exception was raised. Fix: check for `is_error` results AND exceptions in `_call_tool()` (in `mcp-servers/shared/kernow_mcp_common/base.py`).
+
 ### 2. Backend API Unavailable
 
 **Symptoms:**
