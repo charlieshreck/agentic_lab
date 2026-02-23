@@ -142,9 +142,38 @@ sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "ps aux --sort=rss | tail -10"
 ```bash
 cd /home/monit_homelab/terraform/talos-single-node
 terraform init   # if needed
-terraform plan   # review — should show memory change to 4096
-terraform apply  # PBS VM will be restarted to apply new RAM
+terraform plan -target=proxmox_virtual_environment_vm.pbs  # review
+terraform apply  # Updates Proxmox VM config to 4096MB
 ```
+
+**IMPORTANT**: Terraform only updates the VM config in Proxmox. Because PBS has `balloon = 0`,
+the running guest will NOT see the new RAM until the VM is rebooted. After `terraform apply`:
+
+```bash
+# Check if VM is still running with old RAM
+# (Proxmox API maxmem will show old value until reboot)
+
+# Verify no active backups before rebooting
+curl -sk -X POST "https://10.10.0.151:8007/api2/json/access/ticket" \
+  -d "username=root@pam&password=H4ckwh1z" | python3 -c "
+import sys, json, urllib.request, ssl
+r = json.load(sys.stdin)
+ticket = r['data']['ticket']
+ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+req = urllib.request.Request('https://10.10.0.151:8007/api2/json/nodes/localhost/tasks?running=1&limit=10',
+  headers={'Cookie': f'PBSAuthCookie={ticket}'})
+data = json.loads(urllib.request.urlopen(req, context=ctx).read())
+print('Active tasks:', data.get('data', []))
+"
+
+# Reboot PBS to pick up new RAM allocation (use Proxmox MCP tool)
+# mcp__infrastructure__proxmox_reboot_vm(host="pihanga", node="Pihanga", vmid=101)
+
+# Verify after reboot (30s to boot)
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "free -h"
+# Should show Total: ~3.8Gi
+```
+
 **Note**: Plan PBS restart during a maintenance window (avoid 02:00 backup window).
 
 ## Monitoring
