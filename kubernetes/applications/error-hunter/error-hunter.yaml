@@ -2398,16 +2398,21 @@ data:
         except Exception as e:
             logger.error(f"Cleanuparr check error: {e}")
 
-        # --- Huntarr health ---
+        # --- Huntarr health (scheduled 00:00-08:00 UTC only) ---
         try:
-            result = await call_mcp_tool_safe(media, "huntarr_get_status")
-            if result.get("error") or result.get("_error"):
-                findings.append(make_finding(
-                    "media", "media_tool_unhealthy", "global",
-                    "huntarr/health", "warning",
-                    f"Huntarr unreachable: {str(result.get('error', result.get('message', '')))[:100]}",
-                    {"error": str(result.get("error", result.get("message", "")))[:200]},
-                ))
+            from datetime import datetime, timezone
+            utc_hour = datetime.now(timezone.utc).hour
+            # Huntarr runs 00:00-08:00 UTC via CronJob scale schedule
+            if 0 <= utc_hour < 8:
+                result = await call_mcp_tool_safe(media, "huntarr_get_status")
+                if result.get("error") or result.get("_error"):
+                    findings.append(make_finding(
+                        "media", "media_tool_unhealthy", "global",
+                        "huntarr/health", "warning",
+                        f"Huntarr unreachable during scheduled uptime (00-08 UTC): {str(result.get('error', result.get('message', '')))[:100]}",
+                        {"error": str(result.get("error", result.get("message", "")))[:200],
+                         "note": "Huntarr should be running 00:00-08:00 UTC"},
+                    ))
         except Exception as e:
             logger.error(f"Huntarr check error: {e}")
 
