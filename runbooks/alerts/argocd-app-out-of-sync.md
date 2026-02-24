@@ -237,7 +237,67 @@ If the app keeps going OutOfSync, identify what's causing drift:
 
 ## Incident History
 
-### Incident #224 (2026-02-24)
+### Incident #224 — Second occurrence (2026-02-24 ~20:22 UTC)
+
+**Alert**: ArgoCDOutOfSync on cloudflare-tunnel-controller (health: Missing)
+**Status**: RESOLVED
+**Root Cause**: `secret-transformer` Job had `ttlSecondsAfterFinished: 300`. K8s TTL controller deletes completed jobs after 5 minutes. ArgoCD tracked the Job as a managed resource, saw it missing, set health=Missing, and re-synced to recreate it — infinite loop.
+
+**Fix**: Converted Job to ArgoCD PostSync hook:
+```yaml
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+```
+Removed `ttlSecondsAfterFinished: 300`. ArgoCD now runs the Job after each sync as a hook (not a tracked resource), so its deletion does not affect app health.
+
+**Commit**: `8bbe3df` in `prod_homelab`
+
+**Pattern**: Any Job with `ttlSecondsAfterFinished` that ArgoCD manages will create a sync loop. Fix = PostSync hook. See "Cause 7" below.
+
+---
+
+### Common Cause 7: Job with TTL Causing Sync Loop
+
+**Symptoms:**
+- App health shows `Missing` despite pods being `Running`
+- Sync reports "successfully synced (all tasks run)" but SyncError condition persists
+- No jobs exist in the namespace (`kubectl_get_jobs` returns empty)
+- Sync loop triggers every 5–10 minutes
+
+**Root Cause:**
+A Job in the app has `ttlSecondsAfterFinished` set. When the Job completes, K8s deletes it after the TTL. ArgoCD then sees its managed resource is gone → sets health=Missing → re-syncs → Job runs again → completes → gets deleted → repeat.
+
+**Verification:**
+```bash
+# Check if any jobs exist (empty = already auto-deleted)
+kubectl get jobs -n <namespace> --context=admin@homelab-prod
+
+# Look for ttlSecondsAfterFinished in manifests
+grep -r "ttlSecondsAfterFinished" prod_homelab/kubernetes/platform/<app>/
+```
+
+**Resolution:**
+Convert the Job to an ArgoCD PostSync hook. The hook runs after each sync but is NOT tracked as a managed resource:
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: <job-name>
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  # Remove ttlSecondsAfterFinished entirely
+  template: ...
+```
+
+**Alternative**: Remove `ttlSecondsAfterFinished` and let the Job persist in Completed state (ArgoCD treats Succeeded jobs as Healthy).
+
+---
+
+### Incident #224 — First occurrence (2026-02-24)
 
 **Alert**: ArgoCDAppOutOfSync on app-of-apps
 **Status**: RESOLVED (self-healed after fixes applied)
