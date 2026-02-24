@@ -120,7 +120,59 @@ kubectl get application <app-name> -n argocd -o yaml | grep -A 20 helm
 - Sync the app to apply new Helm values
 - Check for Helm chart version bumps via Renovate
 
-### 5. Target Cluster Unreachable
+### 5. Persistent Sync Loop (Default-Value Fields)
+
+**Symptoms:**
+- App is OutOfSync but sync operation shows "successfully synced"
+- `status.operationState.operation.sync.autoHealAttemptsCount` is high (> 3)
+- The same 1-2 resources keep getting re-synced every cycle
+- `app-of-apps` or another parent app keeps cycling on specific child Application resources
+
+**Root cause:**
+YAML fields that are Kubernetes defaults get **stripped** when stored in etcd. If these fields exist in Git, ArgoCD will always detect a diff because live state never has them.
+
+Common culprits in ArgoCD Application specs:
+- `spec.source.directory.recurse: false` — default, stripped on store
+- `spec.source.directory.jsonnet: {}` — empty default
+- Any field with zero-value (`false`, `""`, `0`, `{}`) that isn't stored
+
+**Verification:**
+```bash
+# Check the specific resource that keeps cycling
+kubectl get application <app-name> -n argocd -o jsonpath='{.spec.source}' | python3 -m json.tool
+
+# Compare against git manifest — look for fields missing from live spec
+diff <(cat kubernetes/argocd-apps/.../app.yaml | yq .spec.source) \
+     <(kubectl get application <app-name> -n argocd -o jsonpath='{.spec.source}' | python3 -m json.tool)
+```
+
+**Resolution:**
+Remove the default-value field from the Git manifest so it matches what Kubernetes stores.
+
+Example: `prod_homelab/kubernetes/argocd-apps/platform/homepage-rbac-agentic.yaml` (2026-02-24)
+```yaml
+# BEFORE (caused persistent loop)
+source:
+  repoURL: ...
+  targetRevision: main
+  path: kubernetes/platform/homepage-rbac
+  directory:
+    recurse: false   # <-- default, gets stripped
+
+# AFTER (fixed)
+source:
+  repoURL: ...
+  targetRevision: main
+  path: kubernetes/platform/homepage-rbac
+```
+
+Commit the fix and wait for the next ArgoCD reconcile (~3 min).
+
+**Prevention:**
+- In `app-of-apps` ignoreDifferences, only ignoring `/metadata/*` and `/status` is NOT enough — spec diffs also trigger OutOfSync
+- Either: add problematic jsonPointers to app-of-apps ignoreDifferences, OR remove default fields from git manifests (preferred)
+
+### 6. Target Cluster Unreachable
 
 **Symptoms:**
 - Multiple apps targeting the same cluster are OutOfSync
