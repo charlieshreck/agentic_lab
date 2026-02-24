@@ -120,11 +120,29 @@ kubectl get servicemonitor -n <namespace>
 - Correct the ServiceMonitor selector if misconfigured
 - Delete ServiceMonitor if target shouldn't exist
 
-**Common Application Example - ArgoCD Metrics (Feb 2026):**
-- ArgoCD metrics service (`argocd-metrics:8082`) was running but had NO ServiceMonitor
-- Prometheus couldn't discover it, causing TargetDown alert
-- Fix: Created ServiceMonitor in `kubernetes/platform/argocd/servicemonitor.yaml`
-- Pattern: Any application with metrics needs a ServiceMonitor in the Prometheus operator ecosystem
+**ArgoCD Metrics (argocd-metrics job) - Confirmed Root Cause (Feb 2026):**
+
+The scrape config used the Kubernetes API server proxy path:
+```
+https://10.10.0.40:6443/api/v1/namespaces/argocd/services/argocd-metrics:8082/proxy/metrics
+```
+This returns `503 ServiceUnavailable: error trying to reach service: dial tcp <pod-ip>:8082: i/o timeout`
+because the prod API server cannot reach pod IPs cross-node (CNI routing constraint).
+Note: `kubectl port-forward` DOES work (uses kubelet tunnel, not direct pod IP routing).
+
+Additional blocker: `argocd-application-controller-network-policy` only allows ingress from
+pods via `namespaceSelector: {}`, blocking all external traffic including NodePort.
+
+**Fix applied:**
+1. `prod_homelab/kubernetes/platform/argocd/resources/argocd-metrics-nodeport.yaml`:
+   - NodePort service `argocd-metrics-nodeport` (port 30082 → 8082)
+   - NodePort service `argocd-server-metrics-nodeport` (port 30083 → 8083)
+   - NetworkPolicy `argocd-application-controller-metrics-external` allowing all-source ingress on 8082
+2. `monit_homelab/kubernetes/argocd-apps/platform/kube-prometheus-stack-app.yaml`:
+   - Changed scrape targets from API proxy to `10.10.0.40:30082` and `10.10.0.40:30083`
+
+**Pattern:** For cross-cluster scraping of ArgoCD/similar apps, use NodePort + check NetworkPolicies.
+Never use the API server proxy for metrics — it times out due to CNI constraints.
 
 ### 4. Node Exporter Targets
 
@@ -211,6 +229,8 @@ mcp__monitoring__create_silence alertname=TargetDown comment="Investigating" dur
 | talos-kubelets | 10.10.0.40-43 | YES |
 | talos-node-exporter | 10.10.0.40-43:9100 | YES |
 | kube-state-metrics | 10.10.0.40:30081 | YES |
+| argocd-metrics | 10.10.0.40:30082 | YES |
+| argocd-server-metrics | 10.10.0.40:30083 | YES |
 | kube-proxy | N/A | NO (Cilium) |
 | kube-scheduler | N/A | NO (Talos) |
 | kube-controller-manager | N/A | NO (Talos) |
@@ -258,6 +278,17 @@ If target remains down:
 - **Cause:** Under investigation (host is reachable)
 - **Status:** Silenced pending investigation
 - **Next Steps:** Verify Proxmox API credentials, check firewall
+
+### February 2026 - argocd-metrics TargetDown
+- **Target:** `argocd-metrics/` job in AlertManager
+- **Cause (multi-layer):**
+  1. Scrape config used API server proxy — times out because prod API server can't reach pod IPs across nodes (CNI constraint)
+  2. `argocd-application-controller-network-policy` blocked external traffic (only allowed pods via `namespaceSelector: {}`)
+- **Resolution:**
+  1. Added NodePort services (30082, 30083) in `prod_homelab/kubernetes/platform/argocd/resources/argocd-metrics-nodeport.yaml`
+  2. Added supplemental NetworkPolicy allowing all-source ingress on 8082
+  3. Updated Prometheus scrape config to use NodePort targets instead of API proxy
+- **Lesson:** API server proxy is unreliable for cross-cluster metrics scraping on Talos+Cilium. Use NodePort pattern (same as kube-state-metrics:30081). Always check NetworkPolicies when NodePort is unreachable.
 
 ### January 2026 - kube-scheduler/controller-manager TargetDown
 - **Cause:** False positive - Talos doesn't expose these metrics
