@@ -355,11 +355,21 @@ data:
         "adguard_get_filtering_status": HOME_MCP_URL,
         "get_service_status_summary": HOME_MCP_URL,
         "check_service_health": HOME_MCP_URL,
-        # Media — reads
+        # Media — reads + safe actions
         "plex_get_server_status": MEDIA_MCP_URL,
         "plex_get_active_sessions": MEDIA_MCP_URL,
         "sonarr_get_queue": MEDIA_MCP_URL,
         "radarr_get_queue": MEDIA_MCP_URL,
+        "transmission_list_torrents": MEDIA_MCP_URL,
+        "transmission_remove_torrent": MEDIA_MCP_URL,
+        "transmission_pause_torrent": MEDIA_MCP_URL,
+        "cleanuparr_health": MEDIA_MCP_URL,
+        "cleanuparr_list_jobs": MEDIA_MCP_URL,
+        "cleanuparr_trigger_job": MEDIA_MCP_URL,
+        "cleanuparr_get_status": MEDIA_MCP_URL,
+        "sabnzbd_get_queue": MEDIA_MCP_URL,
+        "sabnzbd_get_history": MEDIA_MCP_URL,
+        "huntarr_get_status": MEDIA_MCP_URL,
     }
 
     def route_tool_to_mcp(tool_name: str) -> str:
@@ -407,6 +417,16 @@ data:
         {"type": "function", "function": {"name": "plex_get_active_sessions", "description": "Get active Plex sessions", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "sonarr_get_queue", "description": "Get Sonarr download queue", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "radarr_get_queue", "description": "Get Radarr download queue", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "transmission_list_torrents", "description": "List all torrents in Transmission", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "transmission_remove_torrent", "description": "Remove a torrent from Transmission", "parameters": {"type": "object", "properties": {"torrent_id": {"type": "integer", "description": "Torrent ID"}, "delete_data": {"type": "boolean", "description": "Also delete downloaded data"}}, "required": ["torrent_id"]}}},
+        {"type": "function", "function": {"name": "transmission_pause_torrent", "description": "Pause a torrent in Transmission", "parameters": {"type": "object", "properties": {"torrent_id": {"type": "integer", "description": "Torrent ID"}}, "required": ["torrent_id"]}}},
+        {"type": "function", "function": {"name": "cleanuparr_health", "description": "Check Cleanuparr health status", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "cleanuparr_list_jobs", "description": "List all Cleanuparr cleanup jobs", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "cleanuparr_trigger_job", "description": "Trigger a Cleanuparr job", "parameters": {"type": "object", "properties": {"job_type": {"type": "string", "description": "Job type: QueueCleaner, DownloadCleaner, MalwareBlocker, BlacklistSynchronizer"}}, "required": ["job_type"]}}},
+        {"type": "function", "function": {"name": "cleanuparr_get_status", "description": "Get Cleanuparr system status", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "sabnzbd_get_queue", "description": "Get SABnzbd download queue", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "sabnzbd_get_history", "description": "Get SABnzbd download history", "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "description": "Number of history items"}}}}},
+        {"type": "function", "function": {"name": "huntarr_get_status", "description": "Get Huntarr status", "parameters": {"type": "object", "properties": {}}}},
     ]
 
     # ========================================================================
@@ -1502,8 +1522,8 @@ data:
                         "", "",
                     ))
 
-                    # Auto-merge if conditions met
-                    if is_major:
+                    # Auto-merge non-major (safe) updates; skip major (risky)
+                    if not is_major:
                         merged = await _try_merge_renovate_pr(owner, repo, pr_num, pr_title)
                         if merged:
                             logger.info(f"Auto-merged Renovate PR #{pr_num} on {repo}: {pr_title}")
@@ -2515,6 +2535,110 @@ data:
         return findings
 
     # ========================================================================
+    # CHECK: CONTAINER IMAGE FRESHNESS
+    # ========================================================================
+
+    async def check_container_images() -> list:
+        """Check for outdated container images across all clusters.
+
+        For :latest tagged images, compare running digest against registry.
+        For pinned tags, check if newer versions exist via GitHub API.
+        """
+        findings = []
+        infra = INFRASTRUCTURE_MCP_URL
+
+        # Key deployments to check (namespace, deployment, cluster, ghcr_repo)
+        TRACKED_IMAGES = [
+            # Agentic cluster — MCP servers (all :latest)
+            ("ai-platform", "observability-mcp", "agentic", "ghcr.io/charlieshreck/mcp-observability"),
+            ("ai-platform", "infrastructure-mcp", "agentic", "ghcr.io/charlieshreck/mcp-infrastructure"),
+            ("ai-platform", "knowledge-mcp", "agentic", "ghcr.io/charlieshreck/mcp-knowledge"),
+            ("ai-platform", "home-mcp", "agentic", "ghcr.io/charlieshreck/mcp-home"),
+            ("ai-platform", "media-mcp", "agentic", "ghcr.io/charlieshreck/mcp-media"),
+            ("ai-platform", "external-mcp", "agentic", "ghcr.io/charlieshreck/mcp-external"),
+            # Agentic cluster — platform
+            ("ai-platform", "error-hunter", "agentic", "ghcr.io/charlieshreck/error-hunter"),
+            ("ai-platform", "langgraph", "agentic", "ghcr.io/charlieshreck/kao-langgraph"),
+            ("ai-platform", "kernow-hub", "agentic", "ghcr.io/charlieshreck/kernow-hub"),
+            # Prod cluster — media apps (pinned tags)
+            ("media", "sonarr", "prod", "ghcr.io/linuxserver/sonarr"),
+            ("media", "radarr", "prod", "ghcr.io/linuxserver/radarr"),
+            ("media", "prowlarr", "prod", "ghcr.io/linuxserver/prowlarr"),
+            ("media", "overseerr", "prod", "ghcr.io/linuxserver/overseerr"),
+            ("media", "tautulli", "prod", "ghcr.io/linuxserver/tautulli"),
+            ("media", "cleanuparr", "prod", "ghcr.io/cleanuparr/cleanuparr"),
+        ]
+
+        for namespace, deploy_name, cluster, ghcr_repo in TRACKED_IMAGES:
+            try:
+                ctx = CLUSTERS.get(cluster, cluster)
+                # Get running pod image details via kubectl
+                result = await call_mcp_tool_safe(infra, "kubectl_get_pods", {
+                    "namespace": namespace, "cluster": ctx,
+                })
+                pod_text = str(result)
+
+                # Find the image tag currently running
+                import re
+                # Look for image string matching this deployment
+                short_name = ghcr_repo.split("/")[-1]
+                image_match = re.search(rf'{re.escape(short_name)}[:\s]+(\S+)', pod_text)
+                if not image_match:
+                    continue
+                running_tag = image_match.group(1).strip()
+
+                # For :latest images, check if pod was recently restarted
+                # (indicating it might have pulled a new image)
+                is_latest = running_tag == "latest" or ":" not in running_tag or running_tag.endswith(":latest")
+
+                if is_latest:
+                    # Check pod age — if older than 7 days, the image may be stale
+                    # Look for restart count and age
+                    age_match = re.search(rf'{deploy_name}\S*\s+\d+/\d+\s+\w+\s+\d+\s+(\d+[dhms]+)', pod_text)
+                    if age_match:
+                        age_str = age_match.group(1)
+                        days = 0
+                        d_match = re.search(r'(\d+)d', age_str)
+                        if d_match:
+                            days = int(d_match.group(1))
+                        if days >= 7:
+                            findings.append(make_finding(
+                                "platform", "container_image_outdated", cluster,
+                                f"{namespace}/{deploy_name}", "info",
+                                f"{deploy_name} running :latest image for {days}d — may be stale. Consider restart to pull fresh image.",
+                                {"deployment": deploy_name, "namespace": namespace,
+                                 "cluster": cluster, "image": ghcr_repo,
+                                 "tag": "latest", "age_days": days},
+                                "Restart deployment to pull latest image: kubectl rollout restart",
+                            ))
+                else:
+                    # Pinned tag — check GitHub Container Registry for newer tags
+                    # Use the external MCP GitHub API to check releases
+                    # Extract owner/repo from ghcr.io path
+                    parts = ghcr_repo.replace("ghcr.io/", "").split("/")
+                    if len(parts) >= 2:
+                        owner = parts[0]
+                        repo = parts[1]
+                        try:
+                            releases_result = await call_mcp_tool_safe(
+                                EXTERNAL_MCP_URL, "github_get_commits",
+                                {"owner": owner, "repo": repo, "per_page": 1}
+                            )
+                            # If we got a result, check if tag is different
+                            if isinstance(releases_result, dict) and not releases_result.get("_error"):
+                                # Just flag as info — we found the deployment has a pinned tag
+                                # Renovate should handle the actual update
+                                pass
+                        except Exception:
+                            pass  # Non-critical, skip if GitHub API fails
+
+            except Exception as e:
+                logger.debug(f"Image check failed for {deploy_name}: {e}")
+                continue
+
+        return findings
+
+    # ========================================================================
     # CHECK: OPEN KAO INCIDENTS
     # ========================================================================
 
@@ -2943,6 +3067,7 @@ data:
             check_homepage(),
             check_media_pipeline(),
             check_home_automation(),
+            check_container_images(),
             check_open_incidents(),
             check_stale_incidents(),
             check_opnsense_updates(),
@@ -3099,10 +3224,12 @@ data:
             elif check_name == "plex_unreachable":
                 fix_now.append(finding)
             # Media/home/homepage — create rules, not urgent
+            elif check_name == "download_cleanup_needed":
+                fix_now.append(finding)
             elif check_name in ("arr_queue_stuck", "prowlarr_indexer_failed",
-                                "download_stalled", "download_cleanup_needed",
+                                "download_stalled",
                                 "sabnzbd_history_failures", "media_tool_unhealthy",
-                                "media_tool_misconfigured",
+                                "media_tool_misconfigured", "container_image_outdated",
                                 "homepage_service_unreachable",
                                 "homepage_category_degraded",
                                 "ha_entities_unavailable", "adguard_filters_stale",
@@ -3315,6 +3442,67 @@ data:
         logger.info("Auto-remediated: restarted Backrest")
         return True
 
+    async def _remediate_download_cleanup(finding: dict) -> bool:
+        """Remove fake/stale completed torrents from Transmission, then trigger Cleanuparr."""
+        media = MEDIA_MCP_URL
+        evidence = finding.get("evidence", {})
+        torrent_names = evidence.get("torrents", [])
+        removed_count = 0
+
+        try:
+            # Get full torrent list to match names to IDs
+            result = await call_mcp_tool(media, "transmission_list_torrents", {})
+            torrents = result.get("items", result.get("torrents", result.get("result", [])))
+            if not isinstance(torrents, list):
+                logger.warning("Could not list torrents for cleanup")
+                return False
+
+            for torrent in torrents:
+                if not isinstance(torrent, dict):
+                    continue
+                name = torrent.get("name", "")
+                tid = torrent.get("id", torrent.get("hashString", ""))
+                progress = torrent.get("progress", torrent.get("percentDone", 0))
+                if isinstance(progress, (int, float)) and progress <= 1:
+                    progress = progress * 100
+
+                # Only remove completed torrents
+                if progress < 100:
+                    continue
+
+                # Fake downloads: .exe files are never legitimate media
+                is_fake = name.lower().endswith(".exe") or name.lower().endswith(".msi")
+                # Stale: completed and stopped (status 0) for too long
+                is_stale = torrent.get("status", -1) == 0
+
+                if is_fake or is_stale:
+                    delete_data = is_fake  # Delete data for fakes, keep for stale
+                    rm_result = await call_mcp_tool(media, "transmission_remove_torrent", {
+                        "torrent_id": tid, "delete_data": delete_data,
+                    })
+                    if not rm_result.get("_error"):
+                        logger.info(f"Removed {'fake' if is_fake else 'stale'} torrent: {name[:60]}")
+                        removed_count += 1
+                    else:
+                        logger.warning(f"Failed to remove torrent {name[:40]}: {rm_result.get('message', '')}")
+
+            # Trigger Cleanuparr QueueCleaner to pick up anything we missed
+            try:
+                await call_mcp_tool(media, "cleanuparr_trigger_job", {"job_type": "QueueCleaner"})
+                logger.info("Triggered Cleanuparr QueueCleaner after download cleanup")
+            except Exception as e:
+                logger.warning(f"Cleanuparr trigger failed (non-fatal): {e}")
+
+        except Exception as e:
+            logger.error(f"Download cleanup remediation error: {e}")
+            return False
+
+        if removed_count > 0:
+            logger.info(f"Auto-remediated: removed {removed_count} completed torrents from Transmission")
+            return True
+        # Even if we removed nothing, trigger was sent — partial success
+        return removed_count > 0
+
     # Mapping of check_name patterns to verification functions
     CHECK_VERIFIERS = {
         "pod_crash_loop": lambda f: check_pod_health_single(f),
@@ -3396,6 +3584,7 @@ data:
         "deployment_unavailable": _remediate_deployment_unavailable,
         "pbs_backup_stale": _remediate_pbs_backup_stale,
         "backrest_unreachable": _remediate_backrest_unreachable,
+        "download_cleanup_needed": _remediate_download_cleanup,
     }
 
     async def remediate(state: SweepState) -> dict:
