@@ -3649,11 +3649,70 @@ data:
         "arr_queue_orphaned": _remediate_arr_queue_orphaned,
     }
 
+    # Checks that benefit from re-scan after remediation (transient items, e.g. downloads completing)
+    RESCANNABLE_CHECKS = {
+        "arr_queue_orphaned",   # New downloads finish and become orphaned after first pass
+        "download_cleanup_needed",  # New torrents may appear
+    }
+    MAX_REMEDIATION_PASSES = 3
+    REMEDIATION_RESCAN_DELAY = 60  # seconds between passes
+
+    async def _run_remediation_pass(findings: list, remediators_map: dict,
+                                     log_only: list, sweep_id: str,
+                                     already_refreshed_adguard: bool,
+                                     already_restarted_mcps: set) -> tuple:
+        """Run one pass of remediation on a list of findings.
+        Returns (remaining, remediated_count, already_refreshed_adguard)."""
+        remaining = []
+        remediated_count = 0
+
+        for finding in findings:
+            check_name = finding.get("check_name", "")
+            remediator = remediators_map.get(check_name)
+            fixed = False
+            if remediator:
+                if check_name == "adguard_filters_stale":
+                    if already_refreshed_adguard:
+                        fixed = True
+                    else:
+                        fixed = await remediator(finding)
+                        if fixed:
+                            already_refreshed_adguard = True
+                elif check_name == "mcp_tool_broken":
+                    mcp_domain = finding.get("resource", "").split("/")[1] if "/" in finding.get("resource", "") else ""
+                    if mcp_domain in already_restarted_mcps:
+                        fixed = True
+                    else:
+                        fixed = await remediator(finding)
+                        if fixed:
+                            already_restarted_mcps.add(mcp_domain)
+                else:
+                    fixed = await remediator(finding)
+
+            if fixed:
+                verified = await verify_remediation(finding)
+                if verified:
+                    logger.info(f"Verified remediation for {finding['check_name']}")
+                else:
+                    logger.warning(f"Remediation not verified for {finding['check_name']}, will retry")
+                finding["remediated"] = True
+                finding["description"] = f"[AUTO-FIXED] {finding.get('description', '')}"
+                log_only.append(finding)
+                remediated_count += 1
+            else:
+                remaining.append(finding)
+
+        return remaining, remediated_count, already_refreshed_adguard
+
     async def remediate(state: SweepState) -> dict:
         """Node 3.5: Attempt auto-fixes for known finding types.
 
         Successfully remediated findings move from fix_now/create_rule to log_only.
         Failed remediations stay in their original bucket for dispatch to Claude.
+
+        For checks in RESCANNABLE_CHECKS, re-runs the relevant checks after a delay
+        to catch transient items (e.g. downloads that complete between passes).
+        Runs up to MAX_REMEDIATION_PASSES until no new findings appear.
         """
         sweep_id = state["sweep_id"]
         await report_progress(sweep_id, "Remediating", "Auto-fixing known issues", 60)
@@ -3662,91 +3721,91 @@ data:
         create_rule = list(state.get("create_rule", []))
         log_only = list(state.get("log_only", []))
 
-        remediated_count = 0
+        total_remediated = 0
         already_refreshed_adguard = False
         already_restarted_mcps = set()
 
-        # Try to remediate fix_now items
-        remaining_fix_now = []
-        for finding in fix_now:
-            check_name = finding.get("check_name", "")
-            remediator = REMEDIATORS.get(check_name)
-            fixed = False
-            if remediator:
-                # Deduplicate: only refresh AdGuard once, only restart each MCP once
-                if check_name == "adguard_filters_stale":
-                    if already_refreshed_adguard:
-                        fixed = True  # already triggered refresh for all lists
-                    else:
-                        fixed = await remediator(finding)
-                        if fixed:
-                            already_refreshed_adguard = True
-                elif check_name == "mcp_tool_broken":
-                    mcp_domain = finding.get("resource", "").split("/")[1] if "/" in finding.get("resource", "") else ""
-                    if mcp_domain in already_restarted_mcps:
-                        fixed = True
-                    else:
-                        fixed = await remediator(finding)
-                        if fixed:
-                            already_restarted_mcps.add(mcp_domain)
-                else:
-                    fixed = await remediator(finding)
+        # ── Pass 1: remediate all fix_now and create_rule items ──
+        remaining_fix_now, count, already_refreshed_adguard = await _run_remediation_pass(
+            fix_now, REMEDIATORS, log_only, sweep_id,
+            already_refreshed_adguard, already_restarted_mcps)
+        total_remediated += count
 
-            if fixed:
-                verified = await verify_remediation(finding)
-                if verified:
-                    logger.info(f"Verified remediation for {finding['check_name']}")
-                else:
-                    logger.warning(f"Remediation not verified for {finding['check_name']}, will retry next sweep")
-                finding["remediated"] = True
-                finding["description"] = f"[AUTO-FIXED] {finding.get('description', '')}"
-                log_only.append(finding)
-                remediated_count += 1
-            else:
-                remaining_fix_now.append(finding)
+        remaining_create_rule, count, already_refreshed_adguard = await _run_remediation_pass(
+            create_rule, REMEDIATORS, log_only, sweep_id,
+            already_refreshed_adguard, already_restarted_mcps)
+        total_remediated += count
 
-        # Try to remediate create_rule items
-        remaining_create_rule = []
-        for finding in create_rule:
-            check_name = finding.get("check_name", "")
-            remediator = REMEDIATORS.get(check_name)
-            fixed = False
-            if remediator:
-                if check_name == "adguard_filters_stale":
-                    if already_refreshed_adguard:
-                        fixed = True
-                    else:
-                        fixed = await remediator(finding)
-                        if fixed:
-                            already_refreshed_adguard = True
-                elif check_name == "mcp_tool_broken":
-                    mcp_domain = finding.get("resource", "").split("/")[1] if "/" in finding.get("resource", "") else ""
-                    if mcp_domain in already_restarted_mcps:
-                        fixed = True
-                    else:
-                        fixed = await remediator(finding)
-                        if fixed:
-                            already_restarted_mcps.add(mcp_domain)
-                else:
-                    fixed = await remediator(finding)
+        logger.info(f"[{sweep_id}] Pass 1: {total_remediated} auto-fixed, "
+                    f"{len(remaining_fix_now)} fix_now remaining, {len(remaining_create_rule)} create_rule remaining")
 
-            if fixed:
-                verified = await verify_remediation(finding)
-                if verified:
-                    logger.info(f"Verified remediation for {finding['check_name']}")
-                else:
-                    logger.warning(f"Remediation not verified for {finding['check_name']}, will retry next sweep")
-                finding["remediated"] = True
-                finding["description"] = f"[AUTO-FIXED] {finding.get('description', '')}"
-                log_only.append(finding)
-                remediated_count += 1
-            else:
-                remaining_create_rule.append(finding)
+        # ── Passes 2+: re-scan checks that may have new transient items ──
+        # Only re-scan if we successfully remediated something with a rescannable check
+        remediated_checks = set(f.get("check_name") for f in log_only if f.get("remediated"))
+        rescannable = remediated_checks & RESCANNABLE_CHECKS
 
-        logger.info(f"[{sweep_id}] Remediation: {remediated_count} auto-fixed, "
+        for pass_num in range(2, MAX_REMEDIATION_PASSES + 1):
+            if not rescannable:
+                break
+
+            logger.info(f"[{sweep_id}] Pass {pass_num}: waiting {REMEDIATION_RESCAN_DELAY}s for transient items to settle")
+            await report_progress(sweep_id, f"Rescan pass {pass_num}",
+                                  f"Waiting {REMEDIATION_RESCAN_DELAY}s for downloads to complete", 62)
+            await asyncio.sleep(REMEDIATION_RESCAN_DELAY)
+
+            # Re-run only the affected checks
+            new_findings = []
+            try:
+                if rescannable & {"arr_queue_orphaned", "arr_queue_stuck"}:
+                    media_findings = await check_media_pipeline()
+                    new_findings.extend([f for f in media_findings
+                                        if f.get("check_name") in RESCANNABLE_CHECKS])
+                if "download_cleanup_needed" in rescannable:
+                    media_findings = await check_media_pipeline()
+                    new_findings.extend([f for f in media_findings
+                                        if f.get("check_name") == "download_cleanup_needed"])
+            except Exception as e:
+                logger.warning(f"[{sweep_id}] Rescan error: {e}")
+                break
+
+            # Deduplicate: only keep findings we haven't already fixed
+            already_fixed_fps = set(f.get("fingerprint") for f in log_only if f.get("remediated"))
+            new_findings = [f for f in new_findings if f.get("fingerprint") not in already_fixed_fps]
+
+            if not new_findings:
+                logger.info(f"[{sweep_id}] Pass {pass_num}: no new findings — all clear")
+                break
+
+            # Classify new findings as fix_now (they have known remediators)
+            new_fix = [f for f in new_findings if f.get("check_name") in REMEDIATORS]
+            if not new_fix:
+                logger.info(f"[{sweep_id}] Pass {pass_num}: {len(new_findings)} found but none remediable")
+                remaining_fix_now.extend(new_findings)
+                break
+
+            logger.info(f"[{sweep_id}] Pass {pass_num}: found {len(new_fix)} new remediable items")
+            await report_progress(sweep_id, f"Remediating pass {pass_num}",
+                                  f"{len(new_fix)} new items found", 63)
+
+            new_remaining, count, already_refreshed_adguard = await _run_remediation_pass(
+                new_fix, REMEDIATORS, log_only, sweep_id,
+                already_refreshed_adguard, already_restarted_mcps)
+            total_remediated += count
+            remaining_fix_now.extend(new_remaining)
+
+            # Check if we fixed anything new — if not, stop retrying
+            if count == 0:
+                logger.info(f"[{sweep_id}] Pass {pass_num}: nothing new fixed, stopping retry loop")
+                break
+
+            # Update rescannable for next pass
+            remediated_checks = set(f.get("check_name") for f in log_only if f.get("remediated"))
+            rescannable = remediated_checks & RESCANNABLE_CHECKS
+
+        logger.info(f"[{sweep_id}] Remediation complete: {total_remediated} auto-fixed across all passes, "
                     f"{len(remaining_fix_now)} fix_now remaining, {len(remaining_create_rule)} create_rule remaining")
         await report_progress(sweep_id, "Remediated",
-                              f"{remediated_count} auto-fixed, {len(remaining_fix_now)+len(remaining_create_rule)} remaining", 65)
+                              f"{total_remediated} auto-fixed, {len(remaining_fix_now)+len(remaining_create_rule)} remaining", 65)
 
         return {"fix_now": remaining_fix_now, "create_rule": remaining_create_rule, "log_only": log_only}
 
@@ -4042,16 +4101,21 @@ data:
         )
 
         # Persist each finding (upsert: update last_seen + sweep_id if already active)
+        # Auto-fixed findings (remediated=True) go straight to 'resolved'
         persisted = 0
         for finding, classification in all_classified:
+            initial_status = "resolved" if finding.get("remediated") else "new"
             try:
                 await pg_execute("""
                     INSERT INTO error_hunter_findings
                         (sweep_id, fingerprint, check_category, check_name, cluster, resource,
-                         severity, classification, description, evidence, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'new')
+                         severity, classification, description, evidence, status, resolved_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                            CASE WHEN $11 = 'resolved' THEN NOW() ELSE NULL END)
                     ON CONFLICT (fingerprint) WHERE status NOT IN ('resolved', 'ignored', 'superseded')
-                    DO UPDATE SET last_seen = NOW(), sweep_id = $1, severity = $7, description = $9
+                    DO UPDATE SET last_seen = NOW(), sweep_id = $1, severity = $7, description = $9,
+                                  status = CASE WHEN $11 = 'resolved' THEN 'resolved' ELSE error_hunter_findings.status END,
+                                  resolved_at = CASE WHEN $11 = 'resolved' THEN NOW() ELSE error_hunter_findings.resolved_at END
                 """,
                     sweep_id,
                     finding["fingerprint"],
@@ -4063,6 +4127,7 @@ data:
                     classification,
                     finding.get("description", ""),
                     json.dumps(finding.get("evidence", {})),
+                    initial_status,
                 )
                 persisted += 1
             except Exception as e:
@@ -4236,6 +4301,15 @@ data:
             await init_db()
         except Exception as e:
             logger.warning(f"init_db failed (non-fatal): {e}")
+        # Clean up sweeps stuck in 'running' from previous pod lifecycle
+        try:
+            result = await pg_execute(
+                "UPDATE sweep_runs SET status = 'aborted', completed_at = NOW() "
+                "WHERE status = 'running'"
+            )
+            logger.info("Cleaned up stale running sweeps from previous pod")
+        except Exception as e:
+            logger.warning(f"Stale sweep cleanup failed (non-fatal): {e}")
 
     @app.post("/sweep")
     async def trigger_sweep():
