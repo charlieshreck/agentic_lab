@@ -2270,7 +2270,12 @@ data:
                         match_key = media_key.get(app_name, "series")
                         has_match = item.get(match_key) is not None
 
-                        if status in ("warning", "failed") or tracked_status in ("warning", "error"):
+                        # Orphaned check FIRST: completed but no series/movie match
+                        if status == "completed" and not has_match:
+                            orphaned_items.append({"title": title, "queue_id": queue_id,
+                                                   "download_client": item.get("downloadClient", "")})
+                        # Then check generic stuck items (warning/failed status)
+                        elif status in ("warning", "failed") or tracked_status in ("warning", "error"):
                             findings.append(make_finding(
                                 "media", "arr_queue_stuck", "global",
                                 f"{app_name}/queue/{title[:50]}", "warning",
@@ -2278,10 +2283,6 @@ data:
                                 {"app": app_name, "title": title, "status": status,
                                  "tracked_status": tracked_status, "queue_id": queue_id},
                             ))
-                        # Completed but no series/movie match — orphaned download
-                        elif status == "completed" and not has_match:
-                            orphaned_items.append({"title": title, "queue_id": queue_id,
-                                                   "download_client": item.get("downloadClient", "")})
 
                     if orphaned_items:
                         findings.append(make_finding(
