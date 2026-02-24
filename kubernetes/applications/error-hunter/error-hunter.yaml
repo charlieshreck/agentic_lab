@@ -4303,8 +4303,9 @@ data:
             logger.warning(f"init_db failed (non-fatal): {e}")
         # Clean up sweeps stuck in 'running' from previous pod lifecycle
         try:
-            result = await pg_execute(
-                "UPDATE sweep_runs SET status = 'aborted', completed_at = NOW() "
+            await pg_execute(
+                "UPDATE sweep_runs SET status = 'completed', completed_at = NOW(), "
+                "summary = '{\"note\": \"terminated by pod restart\"}' "
                 "WHERE status = 'running'"
             )
             logger.info("Cleaned up stale running sweeps from previous pod")
