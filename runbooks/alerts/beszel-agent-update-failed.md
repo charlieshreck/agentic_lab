@@ -179,6 +179,27 @@ mcp__observability__gatus_get_endpoint_status()
 3. **Keep agents updated** — When upgrading Beszel hub, also update agents promptly
 4. **Document agent hosts** — Maintain the known agents table above
 
+### Systemic Issue: SSH Key Deployment (Design Gap)
+
+**Problem**: Beszel stores SSH keys in its PocketBase database (dynamic, runtime), not in git. When the hub is redeployed or the PVC is recreated, SSH keys are lost or don't match what's on agents' `authorized_keys` files.
+
+**Why this matters**: Auto-update via SSH fails silently. Manual updates are required until SSH keys are re-synchronized. This creates recurring findings (e.g., #908 on 2026-02-24 and again on 2026-02-24).
+
+**Workaround (current)**: After Beszel hub deployment or PVC recreation:
+1. Log into Beszel UI at https://beszel.kernow.io
+2. For each agent in Settings > Systems, copy the public key
+3. SSH to each agent and add the key to `~/.ssh/authorized_keys`
+4. Run `beszel-agent update` to verify SSH works
+
+**Long-term fix** (not yet implemented):
+- Create an Ansible playbook that fetches the hub's public key and deploys it to all agents
+- Or: Store the SSH key pair in Infisical and use it for both hub and agents (deterministic)
+- Or: Use an agent webhook instead of SSH for updates
+
+**Related events**:
+- 2026-02-24: Findings #473, #474, #475, #476 — SSH auth failures, manual update required
+- 2026-02-24: Finding #908 (stale) — version drift due to auto-update SSH failure
+
 ## Related Alerts
 
 - Gatus `Beszel Agent (TrueNAS-HDD)` — TCP connectivity check
