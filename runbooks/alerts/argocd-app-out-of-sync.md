@@ -235,6 +235,26 @@ If the app keeps going OutOfSync, identify what's causing drift:
 - `ArgoCDAppUnhealthy` — App health is Degraded/Missing/Unknown
 - `KubeDeploymentRolloutStuck` — Deployment not progressing (may cause Unhealthy)
 
+## Incident History
+
+### Incident #224 (2026-02-24)
+
+**Alert**: ArgoCDAppOutOfSync on app-of-apps
+**Status**: RESOLVED (self-healed after fixes applied)
+**Root Cause**: Persistent sync loop from `directory.recurse: false` in homepage-rbac-agentic.yaml
+
+**Timeline**:
+- **09:47 AM**: Fixed cloudflare-tunnel-controller ignoreDifferences (commit f3cf47d)
+- **10:48 AM**: Added ArgoCD finalizer to app-of-apps (commit 84d8f0c)
+- **13:12 PM**: Removed `directory.recurse: false` from homepage-rbac-agentic (commit 485d1ff)
+- **13:14 PM**: App-of-apps transitioned to Synced; all 127 child apps healthy
+
+**Learning**: Default-value fields in ArgoCD Application specs need either:
+1. Removal from Git (preferred) — let Kubernetes defaults apply
+2. Explicit addition to app-of-apps ignoreDifferences if they must be present
+
+Never include `recurse: false` or empty `jsonnet: {}` unless absolutely necessary.
+
 ## Detection Methods
 
 | Method | Status |
