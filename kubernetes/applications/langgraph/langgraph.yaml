@@ -1573,49 +1573,49 @@ data:
             # Build investigation prompt for Claude
             prompt = f"""# Incident Investigation: {alert_name} (#{incident_id})
 
-**Severity**: {severity}
-**Source**: {state.get('source', 'unknown')}
-**Description**: {description}
+    **Severity**: {severity}
+    **Source**: {state.get('source', 'unknown')}
+    **Description**: {description}
 
-## AI Assessment
-{assessment.get('assessment', 'No assessment available')}
-Confidence: {assessment.get('confidence', 'unknown')}
+    ## AI Assessment
+    {assessment.get('assessment', 'No assessment available')}
+    Confidence: {assessment.get('confidence', 'unknown')}
 
-## Your Task
+    ## Your Task
 
-1. **Investigate** — Use MCP tools to understand the root cause:
-   - Check pod/deployment status, logs, metrics
-   - Look at recent changes (ArgoCD sync status, recent commits)
-   - Check related services and dependencies
+    1. **Investigate** — Use MCP tools to understand the root cause:
+       - Check pod/deployment status, logs, metrics
+       - Look at recent changes (ArgoCD sync status, recent commits)
+       - Check related services and dependencies
 
-2. **Fix** — Resolve the issue:
-   - Follow GitOps: edit manifests, commit, push (never kubectl apply)
-   - If it needs a restart: use MCP kubectl_restart_deployment or kubectl_delete_pod
-   - If it needs config change: edit the manifest in the right repo
+    2. **Fix** — Resolve the issue:
+       - Follow GitOps: edit manifests, commit, push (never kubectl apply)
+       - If it needs a restart: use MCP kubectl_restart_deployment or kubectl_delete_pod
+       - If it needs config change: edit the manifest in the right repo
 
-3. **Wider View** — What caused this? Can we prevent it?
-   - Is this a recurring issue? Check knowledge base for similar events
-   - Should an alert rule be added/updated?
-   - Is there a systemic issue (resource limits, stale config, missing dependency)?
+    3. **Wider View** — What caused this? Can we prevent it?
+       - Is this a recurring issue? Check knowledge base for similar events
+       - Should an alert rule be added/updated?
+       - Is there a systemic issue (resource limits, stale config, missing dependency)?
 
-4. **Document** — Update runbooks and knowledge base:
-   - Write/update a runbook in `/home/agentic_lab/runbooks/`
-   - Log the resolution to knowledge-mcp
+    4. **Document** — Update runbooks and knowledge base:
+       - Write/update a runbook in `/home/agentic_lab/runbooks/`
+       - Log the resolution to knowledge-mcp
 
-5. **Resolve** — Mark the incident resolved:
-   ```bash
-   curl -s -X POST http://10.10.0.22:3456/webhook/screen-resolve \\
-     -H "Content-Type: application/json" \\
-     -d '{{"type":"incident","id":{incident_id},"summary":"<what you did>"}}'
-   ```
+    5. **Resolve** — Mark the incident resolved:
+       ```bash
+       curl -s -X POST http://10.10.0.22:3456/webhook/screen-resolve \\
+         -H "Content-Type: application/json" \\
+         -d '{{"type":"incident","id":{incident_id},"summary":"<what you did>"}}'
+       ```
 
-## Repository Paths
-- Prod: `/home/prod_homelab/`
-- Agentic: `/home/agentic_lab/`
-- Monit: `/home/monit_homelab/`
-- Runbooks: `/home/agentic_lab/runbooks/`
+    ## Repository Paths
+    - Prod: `/home/prod_homelab/`
+    - Agentic: `/home/agentic_lab/`
+    - Monit: `/home/monit_homelab/`
+    - Runbooks: `/home/agentic_lab/runbooks/`
 
-Use `git -C <path>` for all git commands. Never cd."""
+    Use `git -C <path>` for all git commands. Never cd."""
 
             # Dispatch to Claude patrol screen
             model = "opus" if severity == "critical" else recommended_model
