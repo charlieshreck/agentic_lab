@@ -93,85 +93,68 @@ sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 "journalctl -u pvedaemon | grep vzdump
 ## Memory Pressure (Incident #163 — Feb 2026)
 
 ### Symptoms
-- Pulse/KAO alert: `VM memory at >85% (value: ~98%)` for `pbs` on Pihanga
-- Proxmox reports ~98% memory used for PBS VM (VMID 101)
-- `free -h` inside VM shows MemAvailable ~1.3GB (actual pressure is low but risk is real during backups)
+- Pulse/KAO alert: `VM memory at >85%` for `pbs` on Pihanga
+- Proxmox API reports ~96-98% memory used for PBS VM (VMID 101)
+- `free -h` inside VM shows MemAvailable ~3.4GB — actual usage only ~430MB
 
-### Root Cause
-PBS VM has 2GB RAM. During backup windows:
-- `proxmox-backup-proxy` peaks at ~1GB RSS
-- `systemd-journald` can balloon to 240MB+ if error-log flooding occurs
-  (e.g., stale NFS causing "unable to open chunk store" errors every ~100s)
-- OS overhead + buffer/cache fills remaining 2GB
-- Proxmox reports 98%+ because it counts all allocated guest pages
+### Root Cause: Missing QEMU Guest Agent (Primary)
 
-**Risk**: OOM during 02:00 backup window when multiple VMs are backed up concurrently.
+Without `qemu-guest-agent`, Proxmox reports the QEMU process memory from the host side,
+which includes **all Linux page cache**. Linux uses free RAM for disk cache (healthy behavior),
+but Proxmox interprets it as used memory → false positive alert.
 
-### Fix Applied (Incident #163)
-1. **Terraform** (`monit_homelab/terraform/talos-single-node/pbs.tf`): Increased RAM 2GB → 4GB
-   - Requires `terraform apply` in monit_homelab terraform (PBS VM will restart)
-2. **journald** (`/etc/systemd/journald.conf` on PBS): Capped at 128MB runtime / 256MB system
-   ```
-   RuntimeMaxUse=128M
-   SystemMaxUse=256M
-   RuntimeMaxFileSize=32M
-   SystemMaxFileSize=64M
-   ```
-   Applied via: `systemctl restart systemd-journald`
+**Feb 24 2026 (recurrence)**:
+- Proxmox-reported memory: 95.9% (3.84 GB / 4 GB) → alert fires
+- Actual `MemAvailable`: 3.4 GB / 3.8 GB → **only 11% actually used**
+- Active RSS: ~430 MB (proxmox-backup-proxy 55MB, proxmox-backup-api 25MB, system ~350MB)
+- Page cache: 3.5 GB (disk I/O cache, reclaimable)
+- `qemu-guest-agent`: **not installed**, `agent: enabled=0` in VM config
+
+**Fix applied**: Installed `qemu-guest-agent`, enabled `agent: 1` in Proxmox config, rebooted VM.
+After fix, Proxmox correctly reports ~25% memory usage via guest agent.
+
+### Historical Fix (Initial incident)
+1. **RAM increased** 2GB → 4GB (Terraform or manual `qm set`)
+2. **journald** capped at 128MB runtime / 256MB system
+3. **Guest agent** installed and enabled (Feb 24 fix)
 
 ### Procedure When Alert Fires
 
 ```bash
 # 1. SSH to PBS and check real memory pressure
 sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "free -h"
-# MemAvailable > 500MB = safe, just Proxmox reporting bloat
+# MemAvailable > 500MB = safe, just Proxmox cache bloat (likely false positive)
 
-# 2. Check for log flooding
+# 2. Verify guest agent is running (prevents false positives)
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "systemctl status qemu-guest-agent --no-pager"
+# If not running: systemctl start qemu-guest-agent
+
+# 3. Check for log flooding
 sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "journalctl -u proxmox-backup-proxy --since '30 min ago' --no-pager | grep -c 'unable to open'"
 
-# 3. If journald is bloated from log flooding, restart it
+# 4. If journald is bloated from log flooding, restart it
 sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "systemctl restart systemd-journald"
 
-# 4. If actual memory pressure (MemAvailable < 200MB), check for a larger process
-sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "ps aux --sort=rss | tail -10"
+# 5. If actual memory pressure (MemAvailable < 200MB), check for a larger process
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "ps aux --sort=-%mem | head -10"
 
-# 5. If NFS error flooding, see stale-NFS section above — restart PBS services
+# 6. If NFS error flooding, see stale-NFS section above — restart PBS services
 ```
 
-### Terraform Apply (after RAM increase commit)
-```bash
-cd /home/monit_homelab/terraform/talos-single-node
-terraform init   # if needed
-terraform plan -target=proxmox_virtual_environment_vm.pbs  # review
-terraform apply  # Updates Proxmox VM config to 4096MB
-```
-
-**IMPORTANT**: Terraform only updates the VM config in Proxmox. Because PBS has `balloon = 0`,
-the running guest will NOT see the new RAM until the VM is rebooted. After `terraform apply`:
+### Guest Agent Setup (if missing)
 
 ```bash
-# Check if VM is still running with old RAM
-# (Proxmox API maxmem will show old value until reboot)
+# Install inside PBS VM
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "apt-get install -y qemu-guest-agent"
 
-# Verify no active backups before rebooting
-curl -sk -X POST "https://10.10.0.151:8007/api2/json/access/ticket" \
-  -d "username=root@pam&password=H4ckwh1z" | python3 -c "
-import sys, json, urllib.request, ssl
-r = json.load(sys.stdin)
-ticket = r['data']['ticket']
-ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
-req = urllib.request.Request('https://10.10.0.151:8007/api2/json/nodes/localhost/tasks?running=1&limit=10',
-  headers={'Cookie': f'PBSAuthCookie={ticket}'})
-data = json.loads(urllib.request.urlopen(req, context=ctx).read())
-print('Active tasks:', data.get('data', []))
-"
+# Enable in Proxmox config from Pihanga host
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.20 "qm set 101 --agent enabled=1"
 
-# Reboot PBS to pick up new RAM allocation (use Proxmox MCP tool)
-# mcp__infrastructure__proxmox_reboot_vm(host="pihanga", node="Pihanga", vmid=101)
+# Reboot VM (virtio-serial device only appears after reboot)
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.20 "qm reboot 101"
 
-# Verify after reboot (30s to boot)
-sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "free -h"
-# Should show Total: ~3.8Gi
+# Verify after ~30s
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "systemctl status qemu-guest-agent --no-pager"
 ```
 
 **Note**: Plan PBS restart during a maintenance window (avoid 02:00 backup window).
