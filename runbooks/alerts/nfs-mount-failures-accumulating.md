@@ -86,7 +86,26 @@ mcp__infrastructure__truenas_list_shares()
 - Verify LACP/LAG status if applicable
 - Fall back to prod network path (10.10.0.103) if 40Gbps is down
 
-### 3. Transient NFS Timeout
+### 3. UID Mismatch on TrueNAS-Media NFS
+
+**Symptoms:**
+- mount-canary-writer jobs fail with permission denied or mount timeout
+- Failures accumulate but resolve after Kubernetes Job objects are cleaned up
+- Root cause: pod UID (1000) doesn't match NFS export requirements (UID 3000)
+
+**Verification:**
+- Check TrueNAS-Media NFS ACLs at 10.40.0.10 — verify required UID is 3000, not 1000
+- Check mount-canary-writer pod security context: `spec.securityContext.runAsUser`
+
+**Resolution:**
+- Verify fix is deployed: `git -C /home/prod_homelab log --oneline kubernetes/applications/media/mount-canary/`
+- Deployment should have `runAsUser: 3000` in pod spec (commit 6bf63d0 and later)
+- If deployed but alert persists: delete stale failed Job objects
+  - `kubectl delete job -n media -l app=mount-canary-writer --field-selector status.successful=0`
+  - `kubectl delete job -n media -l app=huntarr --field-selector status.successful=0`
+- Wait for next mount-canary-writer run to verify recovery
+
+### 4. Transient NFS Timeout
 
 **Symptoms:**
 - A few failures followed by recovery
