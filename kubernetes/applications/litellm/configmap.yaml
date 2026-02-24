@@ -33,13 +33,23 @@ data:
           model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
 
-      # Default model alias (for backward compatibility)
+      # Backward-compatibility aliases (all route to local Ollama)
       - model_name: gemini/gemini-2.0-flash
         litellm_params:
           model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
 
       - model_name: gemini-pro
+        litellm_params:
+          model: ollama/qwen2.5:7b
+          api_base: http://ollama:11434
+
+      - model_name: anthropic/claude-haiku-4-5-20251001
+        litellm_params:
+          model: ollama/qwen2.5:7b
+          api_base: http://ollama:11434
+
+      - model_name: anthropic/claude-sonnet-4-6
         litellm_params:
           model: ollama/qwen2.5:7b
           api_base: http://ollama:11434
