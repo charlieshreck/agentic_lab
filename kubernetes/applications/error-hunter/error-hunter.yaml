@@ -29,7 +29,7 @@ data:
     from datetime import datetime, timedelta
 
     from langgraph.graph import StateGraph, END
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, Request
     from pydantic import BaseModel
     import httpx
     import uvicorn
@@ -3817,12 +3817,16 @@ data:
             "## When Done — Report Back",
             "",
             "After you finish ALL items, you MUST resolve each finding in the dashboard.",
-            "For each fix_now and create_rule finding, run this curl (replace FINDING_ID and summary):",
+            "For each fix_now and create_rule finding, run this curl (replace values):",
             "```bash",
             f'curl -s -X POST {AFFERENT_URL}/webhook/screen-resolve \\',
             '  -H "Content-Type: application/json" \\',
-            '  -d \'{"type":"finding","id":FINDING_ID,"summary":"<what you did>"}\'',
+            '  -d \'{"type":"finding","id":FINDING_ID,"summary":"<what you did>","lessons":"<pattern or insight for next time>","runbook_path":"<path if you wrote one>"}\'',
             "```",
+            "Fields: **summary** (required), **lessons** (optional — key insight worth remembering),",
+            "**runbook_path** (optional — file path if you created/updated a runbook).",
+            "These feed the knowledge base so future incidents can find your work.",
+            "",
             "The FINDING_ID for each item is listed next to its heading below.",
             "This marks them resolved in the dashboard. Do NOT skip this step.",
             "",
@@ -4476,9 +4480,49 @@ data:
             return {"error": str(e)}
 
     @app.post("/api/estate/resolve/{item_id}")
-    async def resolve_item(item_id: int, item_type: str = "finding"):
-        """Mark a finding or incident as resolved."""
+    async def resolve_item(item_id: int, request: Request, item_type: str = "finding"):
+        """Mark a finding or incident as resolved, then log to knowledge base.
+
+        Accepts optional JSON body:
+          summary   — what was done to resolve
+          lessons   — lessons learned (optional)
+          runbook_path — path to runbook file if one was created (optional)
+          domain    — infra|security|obs|dns|network|data (auto-detected if omitted)
+        """
+        body = {}
         try:
+            raw = await request.json()
+            if isinstance(raw, dict):
+                body = raw
+        except Exception:
+            pass
+
+        summary = body.get("summary", "")
+        lessons = body.get("lessons", "")
+        runbook_path = body.get("runbook_path", "")
+        domain = body.get("domain", "")
+
+        try:
+            # ---- 1. Fetch item context before updating ----
+            item_context = {}
+            if item_type == "finding":
+                rows = await pg_fetch(
+                    "SELECT id, check_name, severity, cluster, resource, description, "
+                    "classification, evidence::text FROM error_hunter_findings WHERE id = $1",
+                    item_id,
+                )
+                if rows:
+                    item_context = dict(rows[0])
+            elif item_type == "incident":
+                rows = await pg_fetch(
+                    "SELECT id, alert_name, severity, source, description, "
+                    "fingerprint, labels::text FROM incidents WHERE id = $1",
+                    item_id,
+                )
+                if rows:
+                    item_context = dict(rows[0])
+
+            # ---- 2. Update DB ----
             if item_type == "finding":
                 await pg_execute(
                     "UPDATE error_hunter_findings SET status = 'resolved' WHERE id = $1",
@@ -4486,12 +4530,116 @@ data:
                 )
             elif item_type == "incident":
                 await pg_execute(
-                    "UPDATE incidents SET status = 'resolved', resolved_at = NOW() WHERE id = $1",
-                    item_id
+                    "UPDATE incidents SET status = 'resolved', resolved_at = NOW(), "
+                    "resolution_summary = $2, lessons_learned = $3 WHERE id = $1",
+                    item_id, summary or None, json.dumps({"lessons": lessons}) if lessons else None,
                 )
+
+            # ---- 3. Log resolution to knowledge (async, non-blocking) ----
+            asyncio.create_task(_log_resolution_to_knowledge(
+                item_id=item_id,
+                item_type=item_type,
+                item_context=item_context,
+                summary=summary,
+                lessons=lessons,
+                runbook_path=runbook_path,
+                domain=domain,
+            ))
+
             return {"status": "resolved", "item_type": item_type, "id": item_id}
         except Exception as e:
             return {"error": str(e)}
+
+    async def _log_resolution_to_knowledge(
+        item_id: int, item_type: str, item_context: dict,
+        summary: str, lessons: str, runbook_path: str, domain: str,
+    ):
+        """Write resolution to Qdrant + Neo4j via knowledge-mcp. Fire-and-forget."""
+        alert_name = item_context.get("alert_name") or item_context.get("check_name") or f"{item_type}-{item_id}"
+        severity = item_context.get("severity", "unknown")
+        description = item_context.get("description", "")
+
+        # Auto-detect domain from alert name / description if not provided
+        if not domain:
+            text = (alert_name + " " + description).lower()
+            if any(w in text for w in ("node", "pod", "deploy", "kube", "vm", "proxmox", "storage", "nfs", "dns", "caddy", "firewall")):
+                domain = "infra"
+            elif any(w in text for w in ("alert", "metric", "prometheus", "grafana", "gatus", "coroot")):
+                domain = "obs"
+            elif any(w in text for w in ("plex", "sonarr", "radarr", "transmission", "media")):
+                domain = "media"
+            elif any(w in text for w in ("network", "unifi", "omada", "cloudflare", "tunnel")):
+                domain = "network"
+            else:
+                domain = "infra"
+
+        # ---- A. Log structured resolution event to agent_events ----
+        try:
+            await call_mcp_tool(KNOWLEDGE_MCP_URL, "log_event", {
+                "event_type": f"{item_type}.resolved",
+                "description": f"[{severity.upper()}] {alert_name}: {summary}" if summary else f"[{severity.upper()}] {alert_name} resolved",
+                "source_agent": "error-hunter",
+                "metadata": {
+                    "item_id": item_id,
+                    "item_type": item_type,
+                    "alert_name": alert_name,
+                    "severity": severity,
+                    "domain": domain,
+                    "summary": summary,
+                    "lessons": lessons,
+                    "runbook_path": runbook_path,
+                    "cluster": item_context.get("cluster", ""),
+                    "resource": item_context.get("resource", ""),
+                },
+                "resolution": "completed",
+            })
+        except Exception as e:
+            logger.warning(f"Failed to log resolution event for {item_type} #{item_id}: {e}")
+
+        # ---- B. Match/record runbook execution if a known runbook was used ----
+        if summary:
+            try:
+                matches = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_runbooks", {
+                    "query": alert_name,
+                    "limit": 1,
+                    "min_score": 0.7,
+                })
+                results = matches.get("result", [])
+                if results and len(results) > 0:
+                    rb_id = str(results[0].get("id", ""))
+                    if rb_id:
+                        await call_mcp_tool(KNOWLEDGE_MCP_URL, "record_runbook_execution", {
+                            "runbook_id": rb_id,
+                            "success": True,
+                        })
+                        logger.info(f"Recorded runbook execution for {alert_name} -> runbook {rb_id}")
+            except Exception as e:
+                logger.warning(f"Failed to record runbook execution: {e}")
+
+        # ---- C. Record lessons learned as a decision (dedup by alert_name) ----
+        if lessons:
+            try:
+                existing = await call_mcp_tool(KNOWLEDGE_MCP_URL, "search_decisions", {
+                    "query": alert_name,
+                    "limit": 1,
+                })
+                existing_results = existing.get("result", [])
+                already_recorded = False
+                if existing_results:
+                    for d in existing_results:
+                        if alert_name.lower() in (d.get("title", "") or "").lower():
+                            already_recorded = True
+                            break
+                if not already_recorded:
+                    await call_mcp_tool(KNOWLEDGE_MCP_URL, "add_decision", {
+                        "title": f"Resolution: {alert_name}",
+                        "decision": summary or f"Resolved {alert_name}",
+                        "rationale": lessons,
+                        "context": f"Domain: {domain}. Severity: {severity}. {item_type} #{item_id}. {description[:300]}",
+                    })
+                    logger.info(f"Recorded lessons for {alert_name} in decisions")
+            except Exception as e:
+                logger.warning(f"Failed to record lessons: {e}")
 
     @app.post("/api/estate/remediate/{finding_id}")
     async def trigger_remediation(finding_id: int):
