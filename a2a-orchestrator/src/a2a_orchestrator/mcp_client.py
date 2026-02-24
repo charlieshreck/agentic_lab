@@ -97,7 +97,7 @@ async def kubectl_get_events(namespace: str = "default", field_selector: Optiona
 
 async def kubectl_logs(namespace: str, pod: str, container: Optional[str] = None, tail: int = 50) -> dict:
     """Get pod logs from infrastructure-mcp."""
-    args = {"namespace": namespace, "pod": pod, "tail": tail}
+    args = {"namespace": namespace, "pod_name": pod, "tail_lines": tail}
     if container:
         args["container"] = container
     return await call_mcp_tool("infrastructure", "kubectl_logs", args)

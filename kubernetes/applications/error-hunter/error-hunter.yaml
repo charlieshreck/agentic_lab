@@ -1007,7 +1007,7 @@ data:
                         "pod_name": pod_name,
                         "namespace": ns,
                         "cluster": ctx,
-                        "tail": 100,
+                        "tail_lines": 100,
                     }, timeout=15.0)
 
                     if log_result.get("_error"):
