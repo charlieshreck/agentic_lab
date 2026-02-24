@@ -40,7 +40,7 @@ The change is committed to git and will be automatically applied by:
 3. `terraform apply` increases LXC memory to 4GB
 4. Proxmox reconfigures VMID 200 without requiring container restart
 
-**Status**: Committed in `eea3241` (2026-02-22), awaiting `terraform apply` deployment
+**Status**: Committed in `eea3241` (2026-02-22). Terraform apply pending. Current alert #155 at 88.5% (2026-02-23)
 
 ### Step 3: Verify Memory After Upgrade
 ```bash
@@ -55,13 +55,30 @@ ssh root@10.10.0.10 "pct exec 200 -- free -h"
 # Usage: 1.7 / 4.0 = 42.5% (healthy)
 ```
 
-## Prevention
-- Monitor `omada` container memory weekly
-- Alert threshold is appropriately set at 85% (warns before OOMKill at 100%)
+## Prevention & Alert Rule
+
+### Alert Configuration
+Prometheus alert rule (auto-generated from pulse metrics):
+```
+alert: OmadaHighMemory
+expr: container_memory_percent{name="omada"} > 85
+for: 5m
+annotations:
+  summary: "Omada container memory usage at {{ $value }}%"
+  description: "Container memory at {{ $value }}% (threshold: 85%)"
+```
+
+This alert fires automatically from Pulse monitoring system when container reaches 85%+ memory.
+
+### Prevention & Monitoring
+- Monitor `omada` container memory weekly via Pulse dashboard
+- Alert threshold 85% is appropriate (warns before OOMKill at 100%)
+- Post-upgrade verification: memory should drop to ~42.5% (1.7GB / 4GB)
 - If memory stays >75% after upgrade, investigate:
   - Large switch topology (many devices/clients)
   - High API activity (frequent polling)
   - Database growth (retention policies)
+  - Excessive logging
 
 ## Related
 - **Component**: Omada controller (VMID 200 on Ruapehu)
