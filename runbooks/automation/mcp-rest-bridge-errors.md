@@ -123,6 +123,16 @@ kubectl_restart_deployment namespace=ai-platform name=langgraph cluster=agentic
 
 ## Incident History
 
+- **2026-02-24**: Incident #207 — `infrastructure-mcp` reporting 53 errors (recurring).
+  Coroot counted FastMCP validation error logs from REST bridge calls to Pydantic-model
+  tools (`proxmox_list_vms`, `truenas_list_pools`, `cloudflare_list_tunnels`). The bridge's
+  auto-retry mechanism worked (calls succeeded), but FastMCP logged errors before raising,
+  and Coroot counted them. **Root cause fix**: Added `_wrap_tools`/`_unwrap_tools` caching
+  sets to `create_rest_bridge()` in `kernow_mcp_common/base.py`. After the first retry for
+  a tool, its name is cached so subsequent calls pre-wrap params without triggering the
+  failed validation. Reduces errors from O(n calls) to O(n unique tools per pod lifecycle).
+  Commit `8798573` in `mcp-servers`.
+
 - **2026-02-22**: Incident #153 — `knowledge-mcp` reporting 28 errors. Root causes:
   1. `list_recent_events` tool missing `hours` parameter — KAO was calling with `hours=24`
      causing Pydantic validation failure → 500 on `/api/call`. Fixed by adding `hours: Optional[int]`
