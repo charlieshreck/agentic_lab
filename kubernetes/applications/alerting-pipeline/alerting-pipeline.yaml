@@ -396,7 +396,7 @@ data:
             if infra_url:
                 jobs = await call_mcp_tool(infra_url, "kubectl_get_jobs", {
                     "namespace": "media",
-                    "cluster": "production"
+                    "cluster": "prod"
                 }) or {}
                 job_list = jobs.get("jobs", jobs.get("result", []))
                 if isinstance(job_list, list):
@@ -441,7 +441,7 @@ data:
             if infra_url:
                 jobs = await call_mcp_tool(infra_url, "kubectl_get_jobs", {
                     "namespace": "velero",
-                    "cluster": "production"
+                    "cluster": "prod"
                 }) or {}
                 job_list = jobs.get("jobs", jobs.get("result", []))
                 if isinstance(job_list, list):
