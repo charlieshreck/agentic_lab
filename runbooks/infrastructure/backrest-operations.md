@@ -240,6 +240,32 @@ kubectl logs -n backrest deployment/backrest --previous | grep -E "running task|
 
 **Prevention**: Image pinned to specific version (`v1.12.0`) with `imagePullPolicy: IfNotPresent` — prevents pulling unexpected new versions on restart.
 
+### API Temporarily Unreachable (Transient Check Failure)
+
+**Symptoms**: Health check reports "Backrest API unreachable: All connection attempts failed" but web UI is accessible via browser.
+
+**Root cause**: Health check ran during a brief moment when the pod was transitioning (reload, probes not ready yet) or a single-request network blip. The pod recovers within seconds and continues operating normally.
+
+**Diagnosis**:
+```bash
+# Check if pod is running and ready
+kubectl get pods -n backrest -o wide
+
+# Check recent pod events for restarts or transitions
+kubectl get events -n backrest --sort-by='.lastTimestamp' | tail -5
+
+# Verify API responds
+curl -I https://backrest.kernow.io/
+# Expected: HTTP 200
+```
+
+**Resolution**:
+1. If pod shows `Ready 1/1` and recent events show no crashes → incident is self-resolved
+2. Web UI accessibility confirms the pod is healthy (404 API responses indicate the pod is serving traffic)
+3. No action needed — next health check will succeed
+
+**Expected behavior**: This is a transient check artifact on single-node clusters. The pod may be momentarily not accepting connections during probes, initialization, or lease transitions. The deployment strategy is set to `Recreate` (not `RollingUpdate`) to avoid multi-pod race conditions in testing.
+
 ### SSH Connection Failed
 
 1. **Verify SSH key is installed on target**:
