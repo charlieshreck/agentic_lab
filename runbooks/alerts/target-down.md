@@ -294,3 +294,11 @@ If target remains down:
 - **Cause:** False positive - Talos doesn't expose these metrics
 - **Resolution:** Deleted ServiceMonitors
 - **Lesson:** Document Talos-specific monitoring requirements
+
+### February 24, 2026 - argocd-metrics Transient TargetDown (#114)
+- **Target:** `argocd-metrics/` job - brief UP/DOWN oscillation
+- **Duration:** ~6 minutes
+- **Cause:** Transient scrape failure (network blip or pod restart cycle)
+- **Resolution:** Self-healed. Metrics recovered to consistently UP. All targets (10.10.0.40:30082 NodePort + 10.10.0.40:6443 API proxy) now healthy.
+- **Action:** Auto-resolved as expected transient pattern. No permanent fix needed - existing NodePort configuration working as designed.
+- **Lesson:** Brief TargetDown alerts that self-heal within minutes are expected when using dynamically scaled clusters. Watch for PERSISTENT TargetDown (>10 min) as signal of real issues.
