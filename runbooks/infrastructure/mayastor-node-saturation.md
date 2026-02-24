@@ -13,13 +13,21 @@ This is **expected behavior** for SPDK-based storage, NOT a sign the node is unr
 
 ## Affected Nodes (as of 2026-02-24)
 
-| Node | IP | io-engine pod | Status |
-|------|-----|--------------|--------|
-| talos-worker-03 | 10.10.0.43 | mayastor-io-engine-clct7 | Alert suppressed in AlertManager |
-| talos-worker-01 | 10.10.0.41 | mayastor-io-engine-vfhw7 | load/core ~0.7 (below threshold) |
-| talos-worker-02 | 10.10.0.42 | mayastor-io-engine-2gqwf | load/core ~0.6 (below threshold) |
+| Node | IP | io-engine pod | load_1min | load/core | Status |
+|------|-----|--------------|-----------|-----------|--------|
+| talos-worker-03 | 10.10.0.43 | mayastor-io-engine-clct7 | ~8.0 | ~2.0 | Alert suppressed in AlertManager |
+| talos-worker-01 | 10.10.0.41 | mayastor-io-engine-vfhw7 | ~2.4 | ~0.6 | Below threshold |
+| talos-worker-02 | 10.10.0.42 | mayastor-io-engine-2gqwf | ~2.4 | ~0.6 | Below threshold |
 
-Worker-03 has higher baseline load because it was the sole storage node before Feb 19 2026, so all PVC nexuses were initially placed there. Nexuses don't automatically rebalance.
+Worker-03 has significantly higher load than workers 01/02 despite identical io-engine config (`-l1,2`). Root cause:
+1. Worker-03 is the **nexus host** for most PVC volumes — it coordinates I/O across all replica nodes
+2. Each NVMe connection to replica nodes spawns additional SPDK pollers (admin queue threads, etc.)
+3. These pollers all compete for CPUs 1 and 2, creating a run queue depth of ~8 threads on those 2 cores
+4. Load average of ~8.0 is the stable baseline for worker-03 when hosting multiple active nexuses
+
+All three nodes show CPUs 1 and 2 at 100% (SPDK busy-poll), but worker-03 has more threads competing for those CPUs.
+
+Worker-03 was the sole storage node before Feb 19 2026, so all PVC nexuses were initially placed there. Nexuses don't automatically rebalance.
 
 ## AlertManager Fix
 
@@ -45,11 +53,13 @@ A null-route is configured in `monit_homelab/kubernetes/argocd-apps/platform/kub
    ```
    Expected: ~50% (2 of 4 CPUs busy — the SPDK reactor cores)
 
-3. Check that the load average is a flat baseline (~2.0-2.3), not spiking:
+3. Check that the load average is stable at its expected baseline, not spiking:
    ```promql
    node_load1{instance="10.10.0.43:9100"} / 4
    ```
-   Spikes above 3.0/core warrant investigation.
+   - **Expected baseline for worker-03**: ~2.0/core (absolute load ~8.0) — stable, not growing
+   - **Workers 01 and 02**: ~0.6/core (absolute load ~2.4)
+   - Spikes above 3.0/core OR sustained upward trend warrants investigation.
 
 4. Verify io-engine is not logging errors:
    ```bash
