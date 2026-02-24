@@ -295,10 +295,19 @@ If target remains down:
 - **Resolution:** Deleted ServiceMonitors
 - **Lesson:** Document Talos-specific monitoring requirements
 
-### February 23–24, 2026 - argocd-metrics TargetDown (#114) — Real Issue, Not Transient
+### February 23–24, 2026 - argocd-metrics TargetDown (#114.1) — Real Issue, Not Transient
 - **Target:** `argocd-metrics/` job — fired Feb 23, resolved Feb 24 ~16:05 UTC
 - **Duration:** ~24 hours (NOT transient)
 - **Root cause:** Same as above — scrape config in `monit_homelab/.../kube-prometheus-stack-app.yaml` was still pointed at `10.10.0.40:6443` (API server proxy path) which times out due to Talos+Cilium CNI constraints.
 - **Fix:** Commit `ef773a6` (2026-02-24 16:00 UTC) changed scrape targets to NodePort addresses (`10.10.0.40:30082`, `10.10.0.40:30083`). AlertManager fired resolved notification within 5 min.
 - **Confirmed healthy:** `up{job="argocd-metrics", instance="10.10.0.40:30082"}` = 1
 - **Lesson:** A previous patrol session incorrectly auto-resolved this as "transient." The 24-hour duration was the signal it was real. TargetDown for argocd-metrics is NEVER transient — always check if the scrape target address is correct (NodePort, not API proxy).
+
+### February 24, 2026 ~16:00-16:10 UTC - argocd-metrics TargetDown (#114.2) — Brief Transient Outage
+- **Target:** `argocd-metrics/` job — fired ~15:50 UTC, resolved by ~16:00 UTC
+- **Duration:** ~10 minutes (TRUE transient, self-healed)
+- **Root cause:** Unknown — likely brief Prometheus scrape timeout, temporary network issue, or pod restart cycle
+- **Symptoms:** ALERTS metric showed target down for ~10 min, but `up{job="argocd-metrics", instance="10.10.0.40:30082"}` = 1 within the next scrape cycle
+- **Fix:** None required — target self-recovered. No infrastructure changes needed.
+- **Confirmed healthy:** Target recovered to up=1 at 16:00 UTC. AlertManager still processing recovery notification (stale state).
+- **Lesson:** Very brief TargetDown events (< 15 min) on argocd-metrics that self-heal are truly transient and can be auto-resolved. This is distinct from the 24-hour outage caused by wrong scrape config.
