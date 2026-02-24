@@ -359,7 +359,9 @@ data:
         "plex_get_server_status": MEDIA_MCP_URL,
         "plex_get_active_sessions": MEDIA_MCP_URL,
         "sonarr_get_queue": MEDIA_MCP_URL,
+        "sonarr_remove_queue_item": MEDIA_MCP_URL,
         "radarr_get_queue": MEDIA_MCP_URL,
+        "radarr_remove_queue_item": MEDIA_MCP_URL,
         "transmission_list_torrents": MEDIA_MCP_URL,
         "transmission_remove_torrent": MEDIA_MCP_URL,
         "transmission_pause_torrent": MEDIA_MCP_URL,
@@ -415,8 +417,10 @@ data:
         # Media
         {"type": "function", "function": {"name": "plex_get_server_status", "description": "Get Plex server status", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "plex_get_active_sessions", "description": "Get active Plex sessions", "parameters": {"type": "object", "properties": {}}}},
-        {"type": "function", "function": {"name": "sonarr_get_queue", "description": "Get Sonarr download queue", "parameters": {"type": "object", "properties": {}}}},
-        {"type": "function", "function": {"name": "radarr_get_queue", "description": "Get Radarr download queue", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "sonarr_get_queue", "description": "Get Sonarr download queue with queue IDs", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "sonarr_remove_queue_item", "description": "Remove an item from Sonarr queue", "parameters": {"type": "object", "properties": {"queue_id": {"type": "integer", "description": "Queue item ID"}, "remove_from_client": {"type": "boolean", "description": "Also remove from download client"}, "blocklist": {"type": "boolean", "description": "Add to blocklist"}}, "required": ["queue_id"]}}},
+        {"type": "function", "function": {"name": "radarr_get_queue", "description": "Get Radarr download queue with queue IDs", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "radarr_remove_queue_item", "description": "Remove an item from Radarr queue", "parameters": {"type": "object", "properties": {"queue_id": {"type": "integer", "description": "Queue item ID"}, "remove_from_client": {"type": "boolean", "description": "Also remove from download client"}, "blocklist": {"type": "boolean", "description": "Add to blocklist"}}, "required": ["queue_id"]}}},
         {"type": "function", "function": {"name": "transmission_list_torrents", "description": "List all torrents in Transmission", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "transmission_remove_torrent", "description": "Remove a torrent from Transmission", "parameters": {"type": "object", "properties": {"torrent_id": {"type": "integer", "description": "Torrent ID"}, "delete_data": {"type": "boolean", "description": "Also delete downloaded data"}}, "required": ["torrent_id"]}}},
         {"type": "function", "function": {"name": "transmission_pause_torrent", "description": "Pause a torrent in Transmission", "parameters": {"type": "object", "properties": {"torrent_id": {"type": "integer", "description": "Torrent ID"}}, "required": ["torrent_id"]}}},
@@ -2249,25 +2253,47 @@ data:
             logger.error(f"Plex status check error: {e}")
 
         # --- Sonarr/Radarr queues ---
+        media_key = {"sonarr": "series", "radarr": "movie"}
         for app_name, tool_name in [("sonarr", "sonarr_get_queue"), ("radarr", "radarr_get_queue")]:
             try:
                 result = await call_mcp_tool_safe(media, tool_name)
                 records = result.get("records", result.get("items", result.get("result", [])))
                 if isinstance(records, list):
+                    orphaned_items = []
                     for item in records:
                         if not isinstance(item, dict):
                             continue
                         status = item.get("status", "").lower()
-                        title = item.get("title", item.get("series", {}).get("title", "unknown"))
+                        title = item.get("title", "unknown")
                         tracked_status = item.get("trackedDownloadStatus", "")
+                        queue_id = item.get("id")
+                        match_key = media_key.get(app_name, "series")
+                        has_match = item.get(match_key) is not None
+
                         if status in ("warning", "failed") or tracked_status in ("warning", "error"):
                             findings.append(make_finding(
                                 "media", "arr_queue_stuck", "global",
                                 f"{app_name}/queue/{title[:50]}", "warning",
                                 f"{app_name.capitalize()} queue item stuck: {title} (status: {status})",
                                 {"app": app_name, "title": title, "status": status,
-                                 "tracked_status": tracked_status},
+                                 "tracked_status": tracked_status, "queue_id": queue_id},
                             ))
+                        # Completed but no series/movie match — orphaned download
+                        elif status == "completed" and not has_match:
+                            orphaned_items.append({"title": title, "queue_id": queue_id,
+                                                   "download_client": item.get("downloadClient", "")})
+
+                    if orphaned_items:
+                        findings.append(make_finding(
+                            "media", "arr_queue_orphaned", "global",
+                            f"{app_name}/queue-orphaned", "warning",
+                            f"{len(orphaned_items)} orphaned item(s) in {app_name.capitalize()} queue — "
+                            f"completed but no {match_key} match. Files sitting in download temp folder.",
+                            {"app": app_name, "count": len(orphaned_items),
+                             "items": [{"title": i["title"][:60], "queue_id": i["queue_id"],
+                                        "client": i["download_client"]} for i in orphaned_items[:15]]},
+                            f"Remove orphaned items from {app_name} queue and clean up temp download files",
+                        ))
             except Exception as e:
                 logger.error(f"{app_name} queue check error: {e}")
 
@@ -3224,7 +3250,7 @@ data:
             elif check_name == "plex_unreachable":
                 fix_now.append(finding)
             # Media/home/homepage — create rules, not urgent
-            elif check_name == "download_cleanup_needed":
+            elif check_name in ("download_cleanup_needed", "arr_queue_orphaned"):
                 fix_now.append(finding)
             elif check_name in ("arr_queue_stuck", "prowlarr_indexer_failed",
                                 "download_stalled",
@@ -3503,6 +3529,40 @@ data:
         # Even if we removed nothing, trigger was sent — partial success
         return removed_count > 0
 
+    async def _remediate_arr_queue_orphaned(finding: dict) -> bool:
+        """Remove orphaned items from Sonarr/Radarr queue (completed but no series/movie match)."""
+        media = MEDIA_MCP_URL
+        evidence = finding.get("evidence", {})
+        app_name = evidence.get("app", "sonarr")
+        items = evidence.get("items", [])
+        remove_tool = f"{app_name}_remove_queue_item"
+        removed_count = 0
+
+        for item in items:
+            queue_id = item.get("queue_id")
+            title = item.get("title", "unknown")
+            if not queue_id:
+                continue
+            try:
+                # Remove from arr queue; also remove from download client since it's orphaned
+                result = await call_mcp_tool(media, remove_tool, {
+                    "queue_id": queue_id,
+                    "remove_from_client": True,
+                    "blocklist": True,  # Blocklist to prevent re-download of same bad release
+                })
+                if not result.get("_error"):
+                    logger.info(f"Removed orphaned {app_name} queue item: {title[:50]}")
+                    removed_count += 1
+                else:
+                    logger.warning(f"Failed to remove {app_name} queue item {queue_id}: {result.get('message', '')}")
+            except Exception as e:
+                logger.warning(f"Error removing {app_name} queue item {queue_id}: {e}")
+
+        if removed_count > 0:
+            logger.info(f"Auto-remediated: removed {removed_count} orphaned items from {app_name} queue")
+            return True
+        return False
+
     # Mapping of check_name patterns to verification functions
     CHECK_VERIFIERS = {
         "pod_crash_loop": lambda f: check_pod_health_single(f),
@@ -3585,6 +3645,7 @@ data:
         "pbs_backup_stale": _remediate_pbs_backup_stale,
         "backrest_unreachable": _remediate_backrest_unreachable,
         "download_cleanup_needed": _remediate_download_cleanup,
+        "arr_queue_orphaned": _remediate_arr_queue_orphaned,
     }
 
     async def remediate(state: SweepState) -> dict:
