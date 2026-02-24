@@ -295,10 +295,10 @@ If target remains down:
 - **Resolution:** Deleted ServiceMonitors
 - **Lesson:** Document Talos-specific monitoring requirements
 
-### February 24, 2026 - argocd-metrics Transient TargetDown (#114)
-- **Target:** `argocd-metrics/` job - brief UP/DOWN oscillation
-- **Duration:** ~6 minutes
-- **Cause:** Transient scrape failure (network blip or pod restart cycle)
-- **Resolution:** Self-healed. Metrics recovered to consistently UP. All targets (10.10.0.40:30082 NodePort + 10.10.0.40:6443 API proxy) now healthy.
-- **Action:** Auto-resolved as expected transient pattern. No permanent fix needed - existing NodePort configuration working as designed.
-- **Lesson:** Brief TargetDown alerts that self-heal within minutes are expected when using dynamically scaled clusters. Watch for PERSISTENT TargetDown (>10 min) as signal of real issues.
+### February 23–24, 2026 - argocd-metrics TargetDown (#114) — Real Issue, Not Transient
+- **Target:** `argocd-metrics/` job — fired Feb 23, resolved Feb 24 ~16:05 UTC
+- **Duration:** ~24 hours (NOT transient)
+- **Root cause:** Same as above — scrape config in `monit_homelab/.../kube-prometheus-stack-app.yaml` was still pointed at `10.10.0.40:6443` (API server proxy path) which times out due to Talos+Cilium CNI constraints.
+- **Fix:** Commit `ef773a6` (2026-02-24 16:00 UTC) changed scrape targets to NodePort addresses (`10.10.0.40:30082`, `10.10.0.40:30083`). AlertManager fired resolved notification within 5 min.
+- **Confirmed healthy:** `up{job="argocd-metrics", instance="10.10.0.40:30082"}` = 1
+- **Lesson:** A previous patrol session incorrectly auto-resolved this as "transient." The 24-hour duration was the signal it was real. TargetDown for argocd-metrics is NEVER transient — always check if the scrape target address is correct (NodePort, not API proxy).
