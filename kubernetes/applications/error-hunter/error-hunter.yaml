@@ -2286,13 +2286,19 @@ data:
             result = await call_mcp_tool_safe(media, "transmission_list_torrents")
             torrents = result.get("items", result.get("torrents", result.get("result", [])))
             if isinstance(torrents, list):
+                stale_completed = []
                 for torrent in torrents:
                     if not isinstance(torrent, dict):
                         continue
                     status = torrent.get("status", 0)
                     error_val = torrent.get("error", 0)
                     name = torrent.get("name", "unknown")
-                    # Transmission status 0 = stopped, error != 0 = problem
+                    progress = torrent.get("progress", torrent.get("percentDone", 0))
+                    # Normalize progress (API may return 0-1 or 0-100)
+                    if isinstance(progress, (int, float)) and progress <= 1:
+                        progress = progress * 100
+
+                    # Transmission error
                     if error_val and int(error_val) > 0:
                         findings.append(make_finding(
                             "media", "download_stalled", "global",
@@ -2300,9 +2306,22 @@ data:
                             f"Transmission download error: {name} (error: {torrent.get('errorString', error_val)})",
                             {"name": name, "error": error_val, "errorString": torrent.get("errorString", "")},
                         ))
+                    # Completed but still in client (stopped or seeding) — stale download
+                    elif progress >= 100:
+                        stale_completed.append(name)
+
+                # Report stale completed torrents as a batch finding
+                if stale_completed:
+                    findings.append(make_finding(
+                        "media", "download_cleanup_needed", "global",
+                        "transmission/stale-completed", "warning",
+                        f"{len(stale_completed)} completed torrent(s) still in Transmission — not cleaned up by Sonarr/Radarr/Cleanuparr",
+                        {"count": len(stale_completed), "torrents": [n[:60] for n in stale_completed[:10]]},
+                    ))
         except Exception as e:
             logger.error(f"Transmission check error: {e}")
 
+        # --- SABnzbd active queue ---
         try:
             result = await call_mcp_tool_safe(media, "sabnzbd_get_queue")
             slots = result.get("slots", result.get("items", result.get("result", [])))
@@ -2320,7 +2339,77 @@ data:
                             {"name": name, "status": status},
                         ))
         except Exception as e:
-            logger.error(f"SABnzbd check error: {e}")
+            logger.error(f"SABnzbd queue check error: {e}")
+
+        # --- SABnzbd history failures ---
+        try:
+            result = await call_mcp_tool_safe(media, "sabnzbd_get_history", {"limit": 30})
+            history = result.get("result", result.get("slots", []))
+            if isinstance(history, list):
+                failed_items = []
+                for item in history:
+                    if not isinstance(item, dict):
+                        continue
+                    status = item.get("status", "").lower()
+                    name = item.get("name", "unknown")
+                    if status == "failed":
+                        failed_items.append(name)
+                if failed_items:
+                    findings.append(make_finding(
+                        "media", "sabnzbd_history_failures", "global",
+                        "sabnzbd/history-failures", "warning",
+                        f"{len(failed_items)} failed download(s) in SABnzbd history",
+                        {"count": len(failed_items), "items": [n[:60] for n in failed_items[:10]]},
+                    ))
+        except Exception as e:
+            logger.error(f"SABnzbd history check error: {e}")
+
+        # --- Cleanuparr health + job status ---
+        try:
+            result = await call_mcp_tool_safe(media, "cleanuparr_health")
+            if result.get("_error"):
+                findings.append(make_finding(
+                    "media", "media_tool_unhealthy", "global",
+                    "cleanuparr/health", "warning",
+                    "Cleanuparr unreachable or unhealthy",
+                    {"error": str(result.get("message", ""))},
+                ))
+            else:
+                # Check if any connected client is unhealthy
+                for client_id, client_info in result.items():
+                    if isinstance(client_info, dict) and not client_info.get("isHealthy", True):
+                        cname = client_info.get("clientName", client_id)
+                        findings.append(make_finding(
+                            "media", "media_tool_unhealthy", "global",
+                            f"cleanuparr/{cname}", "warning",
+                            f"Cleanuparr client '{cname}' unhealthy: {client_info.get('errorMessage', 'unknown')}",
+                            {"client": cname, "error": client_info.get("errorMessage", "")},
+                        ))
+            # Check if cleanuparr has any jobs configured
+            jobs_result = await call_mcp_tool_safe(media, "cleanuparr_list_jobs")
+            jobs = jobs_result.get("result", jobs_result.get("items", []))
+            if isinstance(jobs, list) and len(jobs) == 0:
+                findings.append(make_finding(
+                    "media", "media_tool_misconfigured", "global",
+                    "cleanuparr/no-jobs", "warning",
+                    "Cleanuparr has no cleanup jobs configured — stale downloads will accumulate",
+                    {"detail": "No queue_cleaner, seeding_cleaner, or orphan_cleaner jobs found"},
+                ))
+        except Exception as e:
+            logger.error(f"Cleanuparr check error: {e}")
+
+        # --- Huntarr health ---
+        try:
+            result = await call_mcp_tool_safe(media, "huntarr_get_status")
+            if result.get("error") or result.get("_error"):
+                findings.append(make_finding(
+                    "media", "media_tool_unhealthy", "global",
+                    "huntarr/health", "warning",
+                    f"Huntarr unreachable: {str(result.get('error', result.get('message', '')))[:100]}",
+                    {"error": str(result.get("error", result.get("message", "")))[:200]},
+                ))
+        except Exception as e:
+            logger.error(f"Huntarr check error: {e}")
 
         return findings
 
@@ -3006,7 +3095,10 @@ data:
                 fix_now.append(finding)
             # Media/home/homepage — create rules, not urgent
             elif check_name in ("arr_queue_stuck", "prowlarr_indexer_failed",
-                                "download_stalled", "homepage_service_unreachable",
+                                "download_stalled", "download_cleanup_needed",
+                                "sabnzbd_history_failures", "media_tool_unhealthy",
+                                "media_tool_misconfigured",
+                                "homepage_service_unreachable",
                                 "homepage_category_degraded",
                                 "ha_entities_unavailable", "adguard_filters_stale",
                                 "tasmota_device_offline"):
