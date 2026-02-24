@@ -8,9 +8,9 @@
   "automerge": true,
   "automergeType": "branch",
   "platformAutomerge": false,
-  "minimumReleaseAge": "3 days",
+  "minimumReleaseAge": "1 days",
   "internalChecksFilter": "strict",
-  "prCreation": "not-pending",
+  "prCreation": "immediate",
   "vulnerabilityAlerts": {
     "enabled": true,
     "labels": [
