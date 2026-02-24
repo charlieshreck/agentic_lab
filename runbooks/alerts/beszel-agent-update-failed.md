@@ -130,8 +130,17 @@ Check error-hunter findings or Beszel UI for version mismatch details.
 
 ### Step 2: Attempt manual update
 
+Use the host-specific binary path (SSH-based auto-update commonly fails due to key auth):
+
 ```bash
-ssh root@<agent-host> "beszel-agent update"
+# Synapse / Omada / TrueNAS-HDD
+ssh root@<agent-host> "/usr/local/bin/beszel-agent update"
+
+# TrueNAS-Media (TrueNAS SCALE has read-only /opt, agent lives in /root)
+ssh root@10.10.0.100 "/root/beszel-agent/beszel-agent update"
+
+# Plex-VM (installed to /opt)
+ssh root@10.10.0.50 "/opt/beszel-agent/beszel-agent update"
 ```
 
 ### Step 3: If SSH auth fails, fix the keys
@@ -155,10 +164,13 @@ mcp__observability__gatus_get_endpoint_status()
 
 ## Known Agent Hosts
 
-| Host | IP | Agent Port | Notes |
-|------|-----|-----------|-------|
-| TrueNAS-HDD | 10.10.0.103 | 45876 | NAS, NFS server |
-| UniFi-OS | 10.10.0.51 | 45876 | Network controller |
+| Host | IP | Agent Port | Binary Path | Notes |
+|------|-----|-----------|-------------|-------|
+| TrueNAS-HDD | 10.10.0.103 | 45876 | `/usr/local/bin/beszel-agent` | NAS, NFS server |
+| TrueNAS-Media | 10.10.0.100 | 45876 | `/root/beszel-agent/beszel-agent` | Media NAS (TrueNAS, read-only /opt) |
+| Plex-VM | 10.10.0.50 | 45876 | `/opt/beszel-agent/beszel-agent` | Media server |
+| Omada LXC | 10.10.0.3 | 45876 | `/usr/local/bin/beszel-agent` | Network controller |
+| Synapse LXC | 10.10.0.22 | 45876 | `/usr/local/bin/beszel-agent` | Claude Code host |
 
 ## Prevention
 
