@@ -8,7 +8,7 @@
   "automerge": true,
   "automergeType": "branch",
   "platformAutomerge": false,
-  "internalChecksFilter": "flexible",
+  "ignoreTests": true,
   "prCreation": "immediate",
   "vulnerabilityAlerts": {
     "enabled": true,
