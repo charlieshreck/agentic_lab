@@ -37,7 +37,11 @@ Verify in AlertManager that the alert is resolving. Auto-resolve if no longer fi
 
 ---
 
-## Step 2: Check for Cascade (CPU Saturation Pattern)
+## Step 2: Check Cause — CPU Cascade vs I/O Wait
+
+There are two distinct failure modes on `talos-monitor`:
+
+### Mode A: CPU Saturation (Restart Cascade)
 
 The most common cause on `talos-monitor` is a **restart cascade**. When a critical pod
 (grafana, kube-state-metrics) enters a crash loop, containerd operations (start/init/mount)
@@ -63,6 +67,40 @@ wait 2-3 minutes and retry.
 kubectl --context admin@monitoring-cluster get events -n monitoring --sort-by=lastTimestamp | tail -30
 ```
 
+### Mode B: I/O Wait Saturation (Kopia Maintenance Burst)
+
+**Identified 2026-02-25**: Multiple Velero Kopia maintenance jobs firing simultaneously cause
+disk `sda` to spike to 50-65% saturation, which drives CPU I/O wait to 45-70% across all 6
+CPUs. This blocks the kubelet PLEG thread (waiting on I/O), not the container runtime.
+
+Check using:
+```promql
+# Rate of iowait across all CPUs (should be < 5% normally)
+rate(node_cpu_seconds_total{instance="10.10.0.30:9100", mode="iowait"}[5m])
+
+# Disk utilization (should be < 20% normally)
+rate(node_disk_io_time_seconds_total{instance="10.10.0.30:9100"}[5m])
+```
+
+**Indicators of I/O mode**:
+- `iowait` per CPU > 30% across most cores
+- Disk `sda` utilization > 40%
+- Velero namespace has several `kopia-maintain-job-*` pods recently Succeeded
+- All pods still Running+Ready (no crash loops)
+
+**Secondary effects** (chain reaction from PLEG freeze):
+1. Kubelet cert rotation delayed — cert may approach expiry (100-1500s remaining)
+   → `KubeClientCertificateExpiration` alert fires. Cert auto-rotates after PLEG recovers.
+2. kube-scheduler and kube-controller-manager static pods may restart
+   → Both recover automatically within 2-3 minutes of PLEG recovery.
+
+**Recovery**: Self-healing. Kopia jobs complete in ~5-10 minutes, disk I/O normalises,
+PLEG unfreezes. Monitor for full recovery (~15 minutes total).
+
+**Why simultaneous?**: Velero creates one kopia maintenance CronJob per BackupStorageLocation
+schedule. All BSLs use the same cron interval (`@every 1h`), so all fire at once. On a
+single-disk node this causes brief but significant I/O bursts hourly.
+
 ---
 
 ## Step 3: Identify Root Cause
@@ -71,6 +109,7 @@ kubectl --context admin@monitoring-cluster get events -n monitoring --sort-by=la
 
 | Time (UTC) | Possible Trigger |
 |------------|-----------------|
+| Every ~67 min | **Velero Kopia maintenance jobs (ALL fire simultaneously)** ← most common I/O cause |
 | 02:30 | Velero daily backup (`30 2 * * *`) |
 | 03:30 | Velero weekly backup (Sundays) |
 | Any | etcd WAL compaction (every ~3h) |
@@ -200,4 +239,4 @@ If cascades become frequent, consider:
 
 | Date | Root Cause | Fix | Duration |
 |------|-----------|-----|----------|
-| 2026-02-25 | Unknown OS-level CPU spike (~02:05 UTC) → grafana×11 + kube-state-metrics×8 restart cascade → containerd CPU saturation | Self-recovered | ~20 min |
+| 2026-02-25 (02:06 UTC) | **I/O Wait — Mode B**: 5 Velero Kopia maintenance jobs fired simultaneously (backrest, coroot, monitoring, traefik, velero BSLs all within 20s). Disk `sda` hit 52-64% saturation → CPU iowait 45-70% → PLEG froze. Secondary effects: kubelet cert hit 100s to expiry (rotated), kube-scheduler+kube-controller-manager restarted. | Self-recovered | ~15 min |
