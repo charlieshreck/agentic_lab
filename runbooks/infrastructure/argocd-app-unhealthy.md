@@ -67,6 +67,23 @@ Check `Health.Status`, `Operation State`, and `History` fields.
 **Check**: ArgoCD app events, compare live vs git
 **Fix**: ArgoCD auto-sync with self-heal should recreate it. If not, check `prune` settings.
 
+### Docker Hub Rate Limiting (e.g., Renovate)
+**Symptom**: health_status=Degraded, pod logs show HTTP 429 "Too Many Requests" from Docker Hub
+**Check**: Look for `ERR_NON_2XX_3XX_RESPONSE` with `statusCode: 429` and `TOOMANYREQUESTS` message
+**Root Cause**: Unauthenticated pull rate limit (100 pulls per 6 hours per IP) exceeded during dependency scanning
+**Recovery**: Transient — issue self-resolves when the 6-hour rate limit window shifts at 00:00Z UTC
+**Verification**: Run verification job to confirm the fix is transient (patrol system does this automatically)
+
+#### Renovate & Docker Rate Limiting
+- **Current condition**: Uses unauthenticated Docker pulls (no registry credentials)
+- **Rate limit**: 100 image manifest pulls per 6 hours per IP (very tight for scanning 317+ dependencies)
+- **Manifest**: `prod_homelab/kubernetes/applications/platform/renovate/cronjob.yaml`
+- **Prevention**: Add Docker Hub credentials to increase limit from 100 to 200/hour:
+  - Add env vars: `RENOVATE_DOCKER_USERNAME` + `RENOVATE_DOCKER_PASSWORD`
+  - Store in Infisical: `/platform/renovate/DOCKER_USERNAME` + `/platform/renovate/DOCKER_PASSWORD`
+  - Requires free Docker Hub account or Docker subscription
+- **Timeline**: Issue lasts ~17 minutes during the scanning window, self-resolves automatically
+
 ### Progressing (slow rollout)
 **Symptom**: health_status=Progressing for extended period
 **Check**: Deployment rollout status, pod scheduling, image pull
@@ -90,6 +107,7 @@ git -C /home/prod_homelab push origin main
 
 ## History
 
-| Date | App | Root Cause | Fix |
-|------|-----|-----------|-----|
+| Date | App | Root Cause | Status |
+|------|-----|-----------|--------|
+| 2026-02-25 00:43 | renovate | Docker Hub rate limit (HTTP 429) during image scan | Transient — self-healed when 6-hour window shifted. Patrol verified. |
 | 2026-02-25 | renovate | OOM crash (1Gi → too small for 317 deps) | Increased to 4Gi / 3072MB heap |
