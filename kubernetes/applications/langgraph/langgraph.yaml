@@ -198,9 +198,9 @@ data:
                 data.get("alert_name", "Unknown"),
                 data.get("description", ""),
                 data.get("fingerprint"),
-                json.dumps(data.get("enrichment", {})),
-                json.dumps(data.get("raw_payload", {})),
-                json.dumps(data.get("labels", {})),
+                json.dumps(data.get("enrichment", {}), default=str),
+                json.dumps(data.get("raw_payload", {}), default=str),
+                json.dumps(data.get("labels", {}), default=str),
             )
             return dict(row) if row else {}
 
@@ -218,7 +218,7 @@ data:
                 i += 1
             elif key in ("enrichment", "lessons_learned"):
                 sets.append(f"{key} = ${i}")
-                vals.append(json.dumps(val))
+                vals.append(json.dumps(val, default=str))
                 i += 1
             elif key in ("resolved_at", "closed_at", "close_scheduled_at"):
                 sets.append(f"{key} = ${i}")
@@ -1260,7 +1260,8 @@ data:
                         ORDER BY detected_at DESC LIMIT 5
                     """, alert_name)
                     if recent:
-                        return [dict(r) for r in recent]
+                        return [{k: (v.isoformat() if hasattr(v, 'isoformat') else v)
+                                 for k, v in dict(r).items()} for r in recent]
             except:
                 pass
             return []
@@ -1336,9 +1337,9 @@ data:
             f"**Description**: {payload_data.get('description', '')}",
         ]
         if payload_data.get("labels"):
-            parts.append(f"**Labels**: {json.dumps(payload_data['labels'], indent=2)}")
+            parts.append(f"**Labels**: {json.dumps(payload_data['labels'], indent=2, default=str)}")
         if enrichment.get("coroot_anomalies"):
-            parts.append(f"**Coroot Anomalies**: {json.dumps(enrichment['coroot_anomalies'], indent=2)[:1000]}")
+            parts.append(f"**Coroot Anomalies**: {json.dumps(enrichment['coroot_anomalies'], indent=2, default=str)[:1000]}")
         if enrichment.get("recent_similar"):
             parts.append("**Recent Similar Incidents**:")
             for r in enrichment["recent_similar"]:
