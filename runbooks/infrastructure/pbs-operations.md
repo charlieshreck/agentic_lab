@@ -21,13 +21,15 @@ PBS runs on Pihanga (separate from Ruapehu) for proper DR:
 
 ## Backup Strategy
 
-All three Proxmox hosts back up daily at 02:00 to PBS on Pihanga.
+All three Proxmox hosts back up daily to PBS on Pihanga, **staggered** to avoid I/O contention:
 
-| Host | VMs/LXCs | Notes |
-|------|----------|-------|
-| Ruapehu (10.10.0.10) | vm/109, vm/400-403, vm/450, vm/451, ct/200 | Production workloads |
-| Pihanga (10.10.0.20) | vm/101, vm/200 | PBS itself + monitoring |
-| Hikurangi (10.10.0.178) | ct/100, ct/101, ct/102 | Synapse, Haute Banque, Tamar |
+| Host | VMs/LXCs | Schedule (UTC) | Notes |
+|------|----------|----------------|-------|
+| Hikurangi (10.10.0.178) | ct/100, ct/101, ct/102 | **02:00** | Smallest, finishes first |
+| Ruapehu (10.10.0.10) | vm/109, vm/400-403, vm/450, vm/451, ct/200 | **02:20** | Largest backup set |
+| Pihanga (10.10.0.20) | vm/101, vm/200 | **02:45** | Local I/O — runs last to avoid starving monit VM |
+
+**Why staggered**: Simultaneous backups at 02:00 caused massive I/O on Pihanga (load >97, iowait >90%), starving the monit cluster VM and triggering false KubeClientCertificateExpiration alerts (incidents 256-259). Fixed Feb 25, 2026.
 
 **Retention**: keep-daily=7, keep-monthly=3, keep-yearly=1
 
@@ -43,8 +45,8 @@ Password: H4ckwh1z
 ```
 
 ### Backup Schedule
-All hosts have identical schedule configuration:
-- Schedule: Daily 02:00
+Staggered to reduce I/O contention on Pihanga (updated Feb 25, 2026):
+- Hikurangi: Daily **02:00** | Ruapehu: Daily **02:20** | Pihanga: Daily **02:45**
 - Selection: All VMs/LXCs (`all=1`)
 - Storage: `pbs-pihanga`
 - Mode: Snapshot
@@ -233,11 +235,12 @@ kubectl --context admin@monitoring-cluster get componentstatuses
 
 **Auto-resolve if**: Time is 01:45-03:00 UTC AND certificates show >7 days remaining AND control plane components are currently Healthy.
 
-**Root fix needed**: Reduce I/O contention from PBS backups on Pihanga. Options:
-1. Stagger backup start times (don't backup all hosts at 02:00 simultaneously)
-2. Add I/O throttling to vzdump (`--bwlimit` parameter)
-3. Move monit cluster VM to a different host (breaks DR isolation)
-4. Use ionice/cgroup limits on vzdump processes
+**Root fix applied (Feb 25, 2026)**: Staggered backup start times — Hikurangi 02:00, Ruapehu 02:20, Pihanga 02:45. This eliminates the simultaneous I/O storm that was starving the monit VM.
+
+**If this recurs despite staggering**, consider additional mitigations:
+1. Add I/O throttling to vzdump (`--bwlimit` parameter in jobs.cfg)
+2. Use ionice/cgroup limits on vzdump processes
+3. Move monit cluster VM to a different host (breaks DR isolation — last resort)
 
 ## Monitoring
 
