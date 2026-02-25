@@ -151,64 +151,68 @@ ssh root@<proxmox-host> "qm monitor <vmid> <<< 'info balloon'"
 ssh root@<proxmox-host> "qm guest exec <vmid> -- cat /proc/meminfo | head -3"
 ```
 
-## UniFi VM Memory Tuning (Incident #265, Feb 25 2026)
+## UniFi VM Memory (VMID 451) — Incidents #265+
 
-The UniFi VM (VMID 451) runs UniFi OS inside a Podman container. The container runs multiple services:
-- **Java (UniFi Network)**: Largest consumer. Default JVM max heap = 1/4 of VM RAM.
+The UniFi VM (VMID 451, 3GB RAM) runs UniFi OS with many services:
+- **Java (UniFi Network)**: `-Xmx512M -XX:+UseParallelGC` (heap capped)
 - **Node.js (UniFi Core)**: `--max-old-space-size=300` (300MB cap)
-- **MongoDB x2**: System MongoDB + UniFi MongoDB (256M WiredTiger cache)
-- **ulp-go, PostgreSQL, unifi-directory**: ~200MB combined
+- **MongoDB x2**: System MongoDB + UniFi MongoDB (`cache_size=256M`)
+- **ulp-go, PostgreSQL, unifi-directory, beszel-agent**: ~200MB combined
 
-### Root Cause: Missing JVM Heap Limit
+### Architecture
+UniFi OS runs via `uosserver` systemd service (PID 1 = `/sbin/init`). Services run directly
+on the VM with user namespacing (UIDs 100xxx). There are NO podman containers despite podman
+being installed. The `/var/lib/unifi/` path does NOT exist at the VM host level.
 
-The systemd service unit (`/lib/systemd/system/unifi.service`) sets:
-```
-Environment="UNIFI_JVM_OPTS=-Xmx512M -XX:+UseParallelGC"
-```
+### Alert Pattern: Pulse Memory False Positive
 
-But `/etc/default/unifi` (loaded via `EnvironmentFile`) overrides it to:
-```
-UNIFI_JVM_OPTS="-Dunifi-os.server=true -Dorg.xerial.snappy.tempdir=/usr/lib/unifi/run"
-```
+**Same pattern as monitoring cluster** (see `pulse-vm-memory-page-cache.md`):
 
-This **removes** the `-Xmx512M` flag. The JVM then uses its ergonomic default of ~730MB max heap (1/4 of 3GB VM). Combined with all other services, the VM naturally grows past 90%.
+| Metric | Source | Typical Value | Real? |
+|--------|--------|--------------|-------|
+| Proxmox `mem/maxmem` | Pulse alert | 85-97% | **NO** — includes page cache |
+| Linux `MemAvailable` | Guest OS | ~45-55% of total | **YES** — actual pressure |
+| Swap usage | Guest OS | 0 | Confirms no pressure |
+| OOM events | `dmesg` | None | Confirms healthy |
 
-### Fix: env-overrides File
+The 3GB VM fills its free RAM with filesystem cache (MongoDB, PostgreSQL reads). Proxmox
+reports this as "used" memory. Pulse fires at 85% threshold. This is a **false positive**.
 
-The systemd service loads EnvironmentFiles in order — the last one wins:
-1. `/etc/default/unifi` (image-managed, overrides service unit)
-2. `/var/lib/unifi/env-overrides` (persistent volume, our override)
-
-Create/edit the env-overrides file via the persistent volume:
+### Diagnosis (from Synapse LXC)
 ```bash
-# SSH to UniFi VM
-sshpass -p '<password>' ssh root@10.10.0.51
+# Check Proxmox-level (what Pulse sees — misleading)
+# Use MCP: proxmox_get_vm_status(node="Ruapehu", vmid=451)
+# Look at mem/maxmem ratio
 
-# Write env-overrides inside the container
-su - uosserver -c 'podman exec uosserver bash -c "cat > /var/lib/unifi/env-overrides << EOF
-UNIFI_JVM_OPTS=\"-Dunifi-os.server=true -Dorg.xerial.snappy.tempdir=/usr/lib/unifi/run -Xmx512M -XX:+UseParallelGC\"
-EOF"'
+# Check OS-level (what actually matters)
+ssh root@10.10.0.10 "qm guest exec 451 -- bash -c 'cat /proc/meminfo | grep -E \"MemTotal|MemAvailable|Cached|SwapFree\"'"
 
-# Restart UniFi Network Application service
-su - uosserver -c 'podman exec uosserver systemctl restart unifi'
+# If MemAvailable > 500MB (17% of 3GB): FALSE POSITIVE
+# If MemAvailable < 300MB (10% of 3GB): REAL PRESSURE — investigate services
+
+# Check for OOM events
+ssh root@10.10.0.10 "qm guest exec 451 -- bash -c 'dmesg | grep -i oom'"
+
+# Check JVM heap cap is working
+ssh root@10.10.0.10 "qm guest exec 451 -- bash -c 'ps aux | grep ace.jar'"
+# Should show -Xmx512M in the command line
 ```
 
-### Verification
-```bash
-# Check JVM flags — should show -Xmx512M
-su - uosserver -c 'podman exec uosserver bash -c "ps aux | grep ace.jar"'
+### Suppression
+Added `["memory", "unifi"]` to `SUPPRESSED_ALERT_KEYWORDS` in LangGraph normalizer
+(`agentic_lab/kubernetes/applications/langgraph/langgraph.yaml`). Future pulse/beszel
+memory alerts for the UniFi VM are auto-suppressed.
 
-# Check VM memory — should be under 80%
-free -m
-```
+If real memory issues occur, service-down alerts (Gatus, Coroot) will catch them.
 
-### Notes
-- The env-overrides file is in the `/var/lib/unifi` persistent podman volume — survives container restarts
-- After UniFi OS firmware updates, verify the file still exists and the -Xmx flag is active
-- With -Xmx512M: estimated steady-state ~75% of 3GB VM (was 97%+ without it)
+### JVM Heap Cap Status
+As of Feb 25 2026, the JVM includes `-Xmx512M` by default in the running process.
+The previous env-overrides file approach (incident #265 initial fix) does NOT persist —
+the path `/var/lib/unifi/env-overrides` doesn't exist at the VM host level. However, the
+heap cap is working natively in the current UniFi OS version. Monitor after firmware updates.
 
 ## References
 - Memory overcommit: https://pve.proxmox.com/wiki/Memory
 - Balloon driver: https://pve.proxmox.com/wiki/Balloning
 - Incident #160 fix: GitOps commit reducing allocations (Feb 23, 2026)
-- Incident #265 fix: UniFi JVM heap limit restored (Feb 25, 2026)
+- Incident #265: UniFi VM memory — page cache false positive, suppression added (Feb 25, 2026)
