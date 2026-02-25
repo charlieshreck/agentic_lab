@@ -19,9 +19,20 @@ UniFi OS Server runs on a dedicated Debian 13 VM using Podman containers. This p
 ### Resource Allocation
 
 - **CPU**: 2 cores
-- **RAM**: 4GB
+- **RAM**: 3GB (maxmem 3,221,225,472)
 - **Disk**: 50GB (scsi0 on local-lvm)
 - **Network**: Single NIC on vmbr0 (10.10.0.0/24)
+
+### Memory Budget (steady state ~75% of 3GB)
+
+| Process | RSS | Cap |
+|---------|-----|-----|
+| Java (UniFi Network) | ~570 MB | `-Xmx512M` heap + JVM overhead |
+| Node.js (unifi-core) | ~210 MB | `--max-old-space-size=300` |
+| MongoDB (system) | ~116 MB | wiredTiger default |
+| MongoDB (UniFi) | ~98 MB | `cache_size=256M` |
+| ulp-go | ~145 MB | — |
+| PostgreSQL + others | ~200 MB | — |
 
 ### Ports
 
@@ -233,6 +244,52 @@ ssh root@10.10.0.51 "uosserver status"
 
 ## Troubleshooting
 
+### High Memory / JVM Heap Cap Lost
+
+**Symptom**: VM memory exceeds 85%, typically climbing to 95%+.
+
+**Root cause**: UniFi OS runs Java (UniFi Network) inside a Podman container. The `unifi.service` systemd unit sets `-Xmx512M` via `UNIFI_JVM_OPTS`, but `/etc/default/unifi` (loaded via `EnvironmentFile`) can override this. UniFi OS updates may recreate `/etc/default/unifi` without the `-Xmx512M` cap, causing JVM heap to grow to the ergonomic default (~730 MB+).
+
+**Fix architecture**:
+1. **Persistent env-overrides file** at `/var/lib/unifi/env-overrides` (on `uosserver_var_lib_unifi` volume — survives container recreations):
+   ```
+   UNIFI_JVM_OPTS="-Dunifi-os.server=true -Dorg.xerial.snappy.tempdir=/usr/lib/unifi/run -Xmx512M -XX:+UseParallelGC"
+   ```
+2. **EnvironmentFile directive** in `unifi.service` (overlay layer — may be lost on UniFi OS updates):
+   ```
+   EnvironmentFile=-/etc/default/unifi
+   EnvironmentFile=-/var/lib/unifi/env-overrides   # <-- added, loads AFTER /etc/default
+   ```
+
+**Investigation steps** (via Ruapehu host):
+```bash
+# Check current JVM heap cap
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 \
+  "qm guest exec 451 -- bash -c 'ps aux | grep ace.jar | grep -o Xmx[^ ]*'"
+
+# Check if /etc/default/unifi exists and overrides JVM opts
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 \
+  "qm guest exec 451 -- bash -c 'cat /etc/default/unifi 2>/dev/null || echo FILE_NOT_FOUND'"
+
+# Check env-overrides on persistent volume
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 \
+  "qm guest exec 451 -- cat /home/uosserver/.local/share/containers/storage/volumes/uosserver_var_lib_unifi/_data/env-overrides"
+
+# Check if active overlay has the EnvironmentFile line
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 \
+  "qm guest exec 451 -- bash -c 'grep EnvironmentFile /home/uosserver/.local/share/containers/storage/overlay/*/diff/lib/systemd/system/unifi.service 2>/dev/null'"
+```
+
+**Repair steps** (if EnvironmentFile line is missing after update):
+```bash
+# Find the active overlay layer (the one WITHOUT env-overrides line)
+# Then add it after the /etc/default/unifi line:
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 \
+  "qm guest exec 451 -- bash -c 'sed -i \"/EnvironmentFile=-\\/etc\\/default\\/unifi/a EnvironmentFile=-/var/lib/unifi/env-overrides\" /home/uosserver/.local/share/containers/storage/overlay/<LAYER>/diff/lib/systemd/system/unifi.service'"
+```
+
+**Post-UniFi-OS-update checklist**: Re-verify the EnvironmentFile line is present in the active overlay. If not, re-apply using the repair steps above.
+
 ### VM Not Accessible
 
 1. Check VM status in Proxmox:
@@ -363,3 +420,4 @@ After setup, generate an API key in UniFi OS and update Infisical.
 | Date | Change |
 |------|--------|
 | 2026-01-12 | Initial deployment - migrated from unmanaged VM at 10.10.0.154 |
+| 2026-02-25 | Added JVM heap cap fix (env-overrides + EnvironmentFile in overlay) after incident #265 |
