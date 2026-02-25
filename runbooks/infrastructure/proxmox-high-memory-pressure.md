@@ -74,11 +74,11 @@ Memory allocations are managed in GitOps (Terraform):
 control_plane.memory = 5120   # 5GB
 workers[*].memory    = 9216   # 9GB each (3 × 9GB = 27GB)
 plex_vm.memory       = 7168   # 7GB
-unifi_vm.memory      = 2048   # 2GB
+unifi_vm.memory      = 3072   # 3GB (balloon disabled — see Balloon section below)
 truenas.memory       = 16384  # 16GB (TrueNAS VM, separate)
 
-Total = 5 + 27 + 7 + 2 + 16 = 57GB allocated
-Available for host overhead = 62.6GB - 57GB = 5.6GB (acceptable)
+Total = 5 + 27 + 7 + 3 + 16 = 58GB allocated
+Available for host overhead = 62.6GB - 58GB = 4.6GB (acceptable)
 ```
 
 **Pihanga Host** (Incident #156 fix - Feb 23, 2026):
@@ -125,9 +125,31 @@ If you cannot apply Terraform (e.g., waiting for credentials), migrate workloads
    - Use Kubernetes resource metrics: `kubectl top nodes` / `kubectl top pods`
    - Adjust `maxmem` if VMs consistently use <50% allocation
 
-4. **Enable balloon drivers**: Allow Proxmox to reclaim unused memory
+4. **Balloon drivers**: Use carefully, disable for memory-sensitive VMs
    - Balloon enabled on workers allows flexible allocation
-   - Disabled on control plane (needs stable memory) and Plex (GPU stability)
+   - **Disabled on**: control plane (stable memory), Plex (GPU stability), UniFi (Java+MongoDB needs stable RSS)
+   - See "Balloon Driver Gotchas" section below
+
+## Balloon Driver Gotchas
+
+**Key lesson (Incident — UniFi VM, Feb 25 2026, 3 occurrences in one day):**
+
+1. **`qm set <vmid> --balloon 0` only changes stored config** — the running VM still has the balloon device loaded from boot. The balloon driver will continue operating.
+
+2. **QMP `balloon` command is temporary** — inflating the balloon via QMP monitor (`info balloon` / `balloon <size>`) provides immediate relief, but the host's KSM/autoballooning will squeeze it back under memory pressure. This is NOT a durable fix.
+
+3. **Only a cold restart applies balloon removal** — you must `qm shutdown <vmid>` then `qm start <vmid>` (or `qm stop` + `qm start`). A guest-level `reboot` may NOT be sufficient since the hypervisor device config isn't reloaded.
+
+4. **Symptoms of balloon squeeze**: Low guest `free_mem` (<100MB), massive `mem_swapped_in`/`mem_swapped_out` (cumulative, hundreds of GB), high `major_page_faults` (millions), guest sees less `MemTotal` than `maxmem`.
+
+### Verification After Restart
+```bash
+# Should return "Error: No balloon device has been activated"
+ssh root@<proxmox-host> "qm monitor <vmid> <<< 'info balloon'"
+
+# Should show full memory allocation
+ssh root@<proxmox-host> "qm guest exec <vmid> -- cat /proc/meminfo | head -3"
+```
 
 ## References
 - Memory overcommit: https://pve.proxmox.com/wiki/Memory
