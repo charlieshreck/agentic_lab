@@ -151,7 +151,64 @@ ssh root@<proxmox-host> "qm monitor <vmid> <<< 'info balloon'"
 ssh root@<proxmox-host> "qm guest exec <vmid> -- cat /proc/meminfo | head -3"
 ```
 
+## UniFi VM Memory Tuning (Incident #265, Feb 25 2026)
+
+The UniFi VM (VMID 451) runs UniFi OS inside a Podman container. The container runs multiple services:
+- **Java (UniFi Network)**: Largest consumer. Default JVM max heap = 1/4 of VM RAM.
+- **Node.js (UniFi Core)**: `--max-old-space-size=300` (300MB cap)
+- **MongoDB x2**: System MongoDB + UniFi MongoDB (256M WiredTiger cache)
+- **ulp-go, PostgreSQL, unifi-directory**: ~200MB combined
+
+### Root Cause: Missing JVM Heap Limit
+
+The systemd service unit (`/lib/systemd/system/unifi.service`) sets:
+```
+Environment="UNIFI_JVM_OPTS=-Xmx512M -XX:+UseParallelGC"
+```
+
+But `/etc/default/unifi` (loaded via `EnvironmentFile`) overrides it to:
+```
+UNIFI_JVM_OPTS="-Dunifi-os.server=true -Dorg.xerial.snappy.tempdir=/usr/lib/unifi/run"
+```
+
+This **removes** the `-Xmx512M` flag. The JVM then uses its ergonomic default of ~730MB max heap (1/4 of 3GB VM). Combined with all other services, the VM naturally grows past 90%.
+
+### Fix: env-overrides File
+
+The systemd service loads EnvironmentFiles in order — the last one wins:
+1. `/etc/default/unifi` (image-managed, overrides service unit)
+2. `/var/lib/unifi/env-overrides` (persistent volume, our override)
+
+Create/edit the env-overrides file via the persistent volume:
+```bash
+# SSH to UniFi VM
+sshpass -p '<password>' ssh root@10.10.0.51
+
+# Write env-overrides inside the container
+su - uosserver -c 'podman exec uosserver bash -c "cat > /var/lib/unifi/env-overrides << EOF
+UNIFI_JVM_OPTS=\"-Dunifi-os.server=true -Dorg.xerial.snappy.tempdir=/usr/lib/unifi/run -Xmx512M -XX:+UseParallelGC\"
+EOF"'
+
+# Restart UniFi Network Application service
+su - uosserver -c 'podman exec uosserver systemctl restart unifi'
+```
+
+### Verification
+```bash
+# Check JVM flags — should show -Xmx512M
+su - uosserver -c 'podman exec uosserver bash -c "ps aux | grep ace.jar"'
+
+# Check VM memory — should be under 80%
+free -m
+```
+
+### Notes
+- The env-overrides file is in the `/var/lib/unifi` persistent podman volume — survives container restarts
+- After UniFi OS firmware updates, verify the file still exists and the -Xmx flag is active
+- With -Xmx512M: estimated steady-state ~75% of 3GB VM (was 97%+ without it)
+
 ## References
 - Memory overcommit: https://pve.proxmox.com/wiki/Memory
 - Balloon driver: https://pve.proxmox.com/wiki/Balloning
 - Incident #160 fix: GitOps commit reducing allocations (Feb 23, 2026)
+- Incident #265 fix: UniFi JVM heap limit restored (Feb 25, 2026)
