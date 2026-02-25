@@ -8,7 +8,6 @@
   "automerge": true,
   "automergeType": "branch",
   "platformAutomerge": false,
-  "minimumReleaseAge": "1 days",
   "internalChecksFilter": "flexible",
   "prCreation": "immediate",
   "vulnerabilityAlerts": {
