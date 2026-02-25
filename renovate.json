@@ -9,7 +9,7 @@
   "automergeType": "branch",
   "platformAutomerge": false,
   "minimumReleaseAge": "1 days",
-  "internalChecksFilter": "strict",
+  "internalChecksFilter": "flexible",
   "prCreation": "immediate",
   "vulnerabilityAlerts": {
     "enabled": true,
@@ -105,9 +105,13 @@
       "groupName": "mcp-dockerfiles"
     },
     {
-      "description": "Group Terraform updates",
+      "description": "Group non-major Terraform updates",
       "matchManagers": [
         "terraform"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "minor"
       ],
       "groupName": "terraform"
     },
