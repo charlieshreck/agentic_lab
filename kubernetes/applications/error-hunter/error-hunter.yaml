@@ -98,6 +98,16 @@ data:
         "knowledge-reconcile-", "error-hunter-sweep-", "network-entity-discovery-",
     )
 
+    # Media apps using Recreate strategy (RWO Mayastor PVCs).
+    # Coroot fires transient critical alerts during normal rollouts (~25s gap).
+    # These are redundant — pod/deployment checks catch real failures.
+    # See: agentic_lab/runbooks/media/coroot-recreate-strategy-alerts.md
+    MEDIA_RECREATE_APPS = frozenset({
+        "cleanuparr", "configarr", "huntarr", "maintainerr", "notifiarr",
+        "overseerr", "prowlarr", "radarr", "recomendarr", "sabnzbd",
+        "sonarr", "tautulli", "transmission",
+    })
+
     # Max concurrent screens per sweep
     # Minimum actionable findings to justify creating a screen session
     MIN_FINDINGS_FOR_SCREEN = 1
@@ -1384,6 +1394,14 @@ data:
                 check = anom.get("check", anom.get("type", "unknown"))
                 sev = str(anom.get("severity", "warning")).lower()
                 msg = anom.get("message", f"{check} anomaly on {app_name}")
+
+                # Skip transient Coroot anomalies for media Recreate-strategy apps.
+                # Format: "app@namespace" or just "app" — extract the base name.
+                base_app = app_name.split("@")[0] if "@" in app_name else app_name
+                if base_app in MEDIA_RECREATE_APPS:
+                    logger.debug(f"Skipping transient Coroot media anomaly: {app_name}/{check}")
+                    continue
+
                 findings.append(make_finding(
                     "metrics", "coroot_anomaly", "global",
                     f"coroot/{app_name}/{check}",
@@ -2631,6 +2649,24 @@ data:
                 existing = await dedup_incident_to_finding(row["id"], row["alert_name"])
                 if existing:
                     continue  # Already linked to an existing finding
+
+                # Auto-resolve transient Coroot media Recreate-strategy rollout alerts.
+                # These fire during normal rollouts (~25s gap) and self-heal immediately.
+                # Real failures are caught by pod/deployment checks independently.
+                alert_name = row.get("alert_name", "")
+                source = row.get("source", "")
+                if source == "coroot" and "@media" in alert_name:
+                    app_name = alert_name.split("@")[0]
+                    if app_name in MEDIA_RECREATE_APPS:
+                        await pg_execute(
+                            """UPDATE incidents SET status = 'resolved', resolved_at = NOW(),
+                               resolution_summary = $2 WHERE id = $1""",
+                            row["id"],
+                            f"Auto-resolved: transient Coroot Recreate-strategy rollout alert for {app_name}@media"
+                        )
+                        logger.info(f"Auto-resolved transient Coroot media incident #{row['id']}: {alert_name}")
+                        continue
+
                 findings.append(make_finding(
                     "kao_incident", row["alert_name"], "global",
                     f"incident/{row['id']}", row.get("severity", "warning"),

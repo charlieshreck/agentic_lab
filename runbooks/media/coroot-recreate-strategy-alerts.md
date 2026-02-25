@@ -34,26 +34,30 @@ curl -s -X POST http://10.10.0.22:3456/webhook/screen-resolve \
   -d '{"type":"incident","id":ID,"summary":"Transient Coroot alert from Recreate-strategy rollout. Pod healthy, 0 restarts, logs clean, ArgoCD synced. Known pattern — RWO PVC requires Recreate strategy."}'
 ```
 
-## Systemic Fix (TODO)
-The recurring alert pattern needs one of these permanent fixes:
+## Systemic Fix (IMPLEMENTED 2026-02-25)
 
-### Option 1: Coroot SLO Configuration (Recommended)
-Configure per-application availability SLOs in Coroot UI to tolerate brief rollout downtime:
-- Navigate to Coroot -> each media app -> SLO settings
-- Set availability SLO to 99% (allows ~15 min/day downtime, more than enough for rollouts)
-- This prevents Coroot from creating critical incidents for brief gaps
+Error-hunter now auto-suppresses Coroot media Recreate-strategy alerts via two filters:
 
-### Option 2: Error-Hunter Filter
-Add a filter in the error-hunter ingest pipeline to suppress brief Coroot incidents:
-- If source=coroot AND namespace=media AND duration < 2 minutes -> auto-resolve
-- Requires code change in error-hunter
+### Filter 1: KAO Incident Auto-Resolve
+In `check_open_incidents()`: Coroot-sourced incidents matching `{app}@media` where `app` is in
+`MEDIA_RECREATE_APPS` are auto-resolved in PostgreSQL instead of creating findings.
 
-### Option 3: Coroot Webhook Template Filter
-Modify the Coroot CR notification template to exclude media namespace:
-- File: `monit_homelab/kubernetes/platform/coroot-config/coroot-cr.yaml`
-- Limitation: Coroot CR webhook config doesn't support per-namespace filtering
+### Filter 2: Coroot Anomaly Sweep Skip
+In `check_observability()`: Coroot anomalies for apps in `MEDIA_RECREATE_APPS` are skipped
+entirely during the sweep. Real failures are caught by pod/deployment checks independently.
+
+### Constant
+`MEDIA_RECREATE_APPS` frozenset defined near top of error-hunter code (13 media apps).
+
+### Safety
+Real media app failures are still detected via:
+- `check_pods_per_cluster()` — catches CrashLoopBackOff, pod not running
+- `check_pods_per_cluster()` — catches deployment unavailable (0 replicas)
+- ArgoCD health checks — catches Degraded/Missing apps
+- Gatus endpoint checks — catches service unreachable
 
 ## History
 - 2026-02-21: Incident #109 first seen (cleanuparr@media)
 - 2026-02-24: Incident #109 re-dispatched 3+ times, also prowlarr@media (#225)
 - Pattern confirmed across multiple media deployments
+- 2026-02-25: Systemic fix implemented — error-hunter filters added
