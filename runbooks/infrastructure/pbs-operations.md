@@ -52,6 +52,27 @@ All hosts have identical schedule configuration:
 
 ## Troubleshooting
 
+### API Briefly Unreachable During Backup Window (02:00-02:15 UTC)
+
+**Symptom**: `pbs_unreachable` finding fires around 02:03 UTC. Error: `PBS API unreachable: ` (empty message = timeout).
+
+**Root cause**: The PBS proxy (`proxmox-backup-proxy`) logs `ENOTCONN` (os error 107) on the Unix socket to the API backend when multiple backup jobs start simultaneously at 02:00 UTC. This lasts 2-5 minutes while the jobs initialise (ct-100, vm-109, vm-200 all start together).
+
+**Verification**:
+```bash
+# Check PBS API is actually working now
+curl -s --max-time 10 -k -X POST https://10.10.0.151:8007/api2/json/access/ticket \
+  -d "username=root@pam&password=H4ckwh1z" 2>&1 | grep -c '"status":200'
+
+# Check proxy journal for ENOTCONN pattern
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 \
+  "journalctl -u proxmox-backup-proxy --since '10 minutes ago' --no-pager | grep ENOTCONN"
+```
+
+**Expected**: Single `pbs_unreachable` finding at ~02:03, then API recovers by 02:08. Backups complete successfully by ~02:35.
+
+**Resolution**: Transient. Auto-suppressed in error-hunter for 02:00-02:15 UTC window (fix applied Feb 2026, finding #915). If the alert fires outside that window, investigate as a real outage.
+
 ### Stale NFS File Handles (Most Common Failure — Feb 2026)
 
 When ALL backups fail with `unable to open chunk store at "/mnt/pbs-datastore/.chunks"`:
