@@ -192,6 +192,53 @@ sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "systemctl status qemu-guest-agent --
 
 **Note**: Plan PBS restart during a maintenance window (avoid 02:00 backup window).
 
+## Monit Cluster Control Plane Instability (Incident #258 — Feb 2026)
+
+### Known Cascading Pattern: PBS Backup I/O Starves Monit Cluster
+
+**Trigger**: PBS daily backup at 02:00 UTC generates massive disk I/O on Pihanga host.
+
+**Impact on monit cluster VM** (also on Pihanga):
+- Load average spikes to **97+** (on 6-CPU VM) at ~02:07-02:12 UTC
+- iowait hits **>90%** across all CPUs for ~10 minutes
+- etcd becomes unresponsive (gRPC connection failures)
+- kube-controller-manager and kube-scheduler fail liveness probes, restart multiple times
+- apiserver logs handler timeouts and etcd connection errors
+- Certificate histogram metrics produce anomalous values during disruption
+- Can trigger **false-positive KubeClientCertificateExpiration** critical alert
+
+**Timeline** (typical):
+| Time | Event |
+|------|-------|
+| 02:00 | PBS vzdump starts on all hosts |
+| 02:07 | I/O storm begins on Pihanga, monit VM load spikes |
+| 02:12 | Peak load (~97), iowait >90%, control plane components start failing |
+| 02:25 | Controller-manager and scheduler killed by liveness probes |
+| 02:30 | I/O subsides, control plane recovers |
+| 02:35 | All metrics normalize, false-positive alerts clear |
+
+**Verification**:
+```bash
+# Check current monit node load and iowait
+# (via VictoriaMetrics)
+node_load1{instance=~"10.10.0.30.*"}
+rate(node_cpu_seconds_total{mode="iowait",instance=~"10.10.0.30.*"}[5m])
+
+# Check certificate expiry is actually fine (should be >180 days)
+histogram_quantile(0.01, sum by (job, le) (rate(apiserver_client_certificate_expiration_seconds_bucket{job="apiserver"}[5m])))
+
+# Check control plane component health
+kubectl --context admin@monitoring-cluster get componentstatuses
+```
+
+**Auto-resolve if**: Time is 01:45-03:00 UTC AND certificates show >7 days remaining AND control plane components are currently Healthy.
+
+**Root fix needed**: Reduce I/O contention from PBS backups on Pihanga. Options:
+1. Stagger backup start times (don't backup all hosts at 02:00 simultaneously)
+2. Add I/O throttling to vzdump (`--bwlimit` parameter)
+3. Move monit cluster VM to a different host (breaks DR isolation)
+4. Use ionice/cgroup limits on vzdump processes
+
 ## Monitoring
 
 ### PBS Health
