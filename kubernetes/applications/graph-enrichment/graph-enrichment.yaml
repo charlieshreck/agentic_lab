@@ -654,7 +654,7 @@ spec:
           restartPolicy: OnFailure
           initContainers:
             - name: install-deps
-              image: python:3.12-slim
+              image: python:3.14-slim
               command:
                 - sh
                 - -c
@@ -666,7 +666,7 @@ spec:
                   mountPath: /app/deps
           containers:
             - name: enrichment
-              image: python:3.12-slim
+              image: python:3.14-slim
               command:
                 - sh
                 - -c

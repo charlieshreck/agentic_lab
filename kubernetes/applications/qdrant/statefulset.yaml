@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
       - name: qdrant
-        image: qdrant/qdrant:v1.7.4
+        image: qdrant/qdrant:v1.17.0
         ports:
         - containerPort: 6333
           name: http
@@ -64,7 +64,7 @@ spec:
       # Sidecar: Creates collections on startup, then idles
       # Runs alongside Qdrant, waits for ready, creates collections (idempotent)
       - name: init-collections
-        image: curlimages/curl:8.5.0
+        image: curlimages/curl:8.18.0
         command:
         - /bin/sh
         - -c

@@ -1296,7 +1296,7 @@ spec:
           restartPolicy: OnFailure
           containers:
           - name: discovery
-            image: python:3.11-slim
+            image: python:3.14-slim
             command:
             - /bin/bash
             - -c

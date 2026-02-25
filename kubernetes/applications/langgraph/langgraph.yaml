@@ -2414,7 +2414,7 @@ spec:
     spec:
       initContainers:
         - name: install-deps
-          image: python:3.11-slim
+          image: python:3.14-slim
           command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
           volumeMounts:
             - name: code
@@ -2423,7 +2423,7 @@ spec:
               mountPath: /app/deps
       containers:
         - name: langgraph
-          image: python:3.11-slim
+          image: python:3.14-slim
           command: ['sh', '-c', 'cd /app && PYTHONPATH=/app/deps python /code/main.py']
           ports:
             - containerPort: 8000
