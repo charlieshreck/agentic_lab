@@ -111,7 +111,19 @@ sshpass -p 'H4ckwh1z' ssh root@10.10.0.10 "journalctl -u pvedaemon | grep vzdump
 1. Check datastore consistency
 2. Run manual verify via PBS UI or API
 
-## Memory Pressure (Incident #163 — Feb 2026)
+## Memory Pressure (Incident #163 — Feb 2026, recurring nightly)
+
+### Known Recurring Pattern: Backup Window (02:00–02:35 UTC daily)
+
+**This alert fires every night** at ~02:00 UTC when PBS backup jobs start. This is expected:
+- PBS aggressively caches backup data in RAM during `vzdump` jobs
+- With 4GB allocation, PBS uses ~97% during active backups
+- **Memory pressure is always 0** — no OOM risk, no swapping
+- Alert clears by ~02:35 UTC when backups complete
+
+**Auto-resolve if**: Time is 01:45–03:15 UTC AND Proxmox task list shows active `vzdump` AND memory pressure = 0.
+
+**Recommendation**: Add time-based alert suppression for `memory - pbs` between 01:45–03:15 UTC to eliminate this nightly false positive.
 
 ### Symptoms
 - Pulse/KAO alert: `VM memory at >85%` for `pbs` on Pihanga
