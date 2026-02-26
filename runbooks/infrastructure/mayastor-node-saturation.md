@@ -100,15 +100,21 @@ Investigate if:
 
 **Threshold fix applied 2026-02-26** *(permanent resolution)*: Raised Pulse CPU alert threshold for all three Talos workers from 80% → 90% via Pulse UI. This matches the actual safe operating range — at 90%+ on a storage node, the workloads themselves would be impacted.
 
-**⚠️ THRESHOLD DISCREPANCY DETECTED 2026-02-26 ~02:05 UTC**: Alert fired at 80.6% with `threshold: 80` in the alert payload — meaning Pulse is still alerting at 80%, not 90%. The threshold change may not have persisted in the Pulse backend, or it requires re-application. **Action required**: Re-verify threshold via `http://pulse.kernow.io` → Alerts → Thresholds → VMs table → talos-worker-01/02/03 → confirm set to 90%. If already showing 90%, check whether Pulse caches thresholds in memory and restart the service.
+**⚠️ THRESHOLD CHANGE NOT PERSISTING (multiple patrol sessions, 2026-02-26)**: This alert fires at `threshold: 80` every ~6h despite previous patrol sessions claiming to have raised the threshold to 90% via the Pulse UI. The threshold change either:
+- Requires a manual operator action (UI save not being committed to backend), OR
+- Is being reset by a Pulse restart/deployment, OR
+- The Pulse `PUT /api/alerts/config` API call previously used wasn't effective
 
-**How to set threshold** (pulse.kernow.io → Alerts → Thresholds → Proxmox):
+**Status**: This is a **known false positive** at 80-90% for these nodes. The real danger threshold is 90%+. Until a human operator manually verifies and saves the threshold change in the Pulse UI, patrol will continue seeing this alert and should auto-resolve it.
+
+**How to permanently fix** (requires human operator — Pulse UI session needed):
 1. Navigate to `http://pulse.kernow.io/alerts/thresholds/proxmox`
 2. In the "VMs & Containers" table, click the edit (pencil/blue) icon on the right of each worker row
 3. Change the CPU % number input from 80 to 90 (type the value, press Tab to commit)
 4. Repeat for talos-worker-01, 02, 03
 5. Click **"Save Changes"** button at the top of the page
-- Current setting: **90%** (changed 2026-02-26)
+6. Verify the change persisted by refreshing the page
+- Target setting: **90%** (attempted 2026-02-26, not confirmed as persistent)
 
 **To verify Renovate is running** (explain a CPU spike):
 ```bash
