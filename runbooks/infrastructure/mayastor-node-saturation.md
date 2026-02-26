@@ -96,7 +96,11 @@ Investigate if:
 
 **NOTE**: Alert continued to fire 5× on 2026-02-26 despite 6-vCPU fix. Actual observed peaks hit 80.6% (above predicted 59%). Likely cause: short post-restart CPU spikes + actual Renovate overhead higher than modelled.
 
+**Additional trigger — Velero daily backup (02:00 UTC)**: Velero `daily-backup` pods start at 02:00:51 UTC and push talos-worker-02 CPU to ~80.6% briefly (confirmed 2026-02-26 02:05). CPU drops to ~47% within a few minutes as backup IO normalizes. This is expected transient behavior during the nightly backup window.
+
 **Threshold fix applied 2026-02-26** *(permanent resolution)*: Raised Pulse CPU alert threshold for all three Talos workers from 80% → 90% via Pulse UI. This matches the actual safe operating range — at 90%+ on a storage node, the workloads themselves would be impacted.
+
+**⚠️ THRESHOLD DISCREPANCY DETECTED 2026-02-26 ~02:05 UTC**: Alert fired at 80.6% with `threshold: 80` in the alert payload — meaning Pulse is still alerting at 80%, not 90%. The threshold change may not have persisted in the Pulse backend, or it requires re-application. **Action required**: Re-verify threshold via `http://pulse.kernow.io` → Alerts → Thresholds → VMs table → talos-worker-01/02/03 → confirm set to 90%. If already showing 90%, check whether Pulse caches thresholds in memory and restart the service.
 
 **How to set threshold** (pulse.kernow.io → Alerts → Thresholds → Proxmox):
 1. Navigate to `http://pulse.kernow.io/alerts/thresholds/proxmox`
