@@ -98,6 +98,40 @@ increased to 4GB (Incident #156/160). The capacity estimate is therefore stale. 
 persistently run at ~93% memory usage. **Services are healthy despite this.** This is a capacity
 constraint, not a failure. Resolution requires a hardware decision or architectural change.
 
+## Incident #215 Status (Feb 26, 2026 - Ruapehu Memory Pressure)
+
+**Alert**: Ruapehu node memory at 88.2% (85% warning threshold) — sustained 7+ hours (13:33-20:32)
+
+**Investigation Result**:
+- **Terraform fix already exists**: `prod_homelab/infrastructure/terraform/variables.tf` has correct allocations
+  - Workers: 9GB each (vs 12GB running) ✅ Code ready
+  - Control plane: 5GB ✅
+  - Plex: 7GB ✅
+  - UniFi: 3GB ✅
+  - Total allocation would be: 42GB (vs current 49GB running on 62.6GB host)
+
+- **Actual VMs still at old allocations**:
+  - talos-cp-01: 4GB allocated, 3.1GB actual
+  - talos-worker-01: 12GB allocated, 7.3GB actual
+  - talos-worker-02: 12GB allocated, 8.8GB actual
+  - talos-worker-03: 12GB allocated, 8.7GB actual
+  - plex: 6GB allocated, 4.8GB actual
+  - unifi: 3GB allocated, 1.2GB actual
+  - **Total configured: 49GB on 62.6GB host = ~78% before TrueNAS**
+
+- **Root cause**: Terraform fix (correct memory values) is committed to git but `terraform apply` has not been executed
+
+**Blockers to Remediation**:
+- Terraform state is incomplete (only contains data sources, not VM resources)
+- Full `terraform apply` would attempt to recreate resources (23 to add, 1 to destroy)
+- Safe execution requires importing existing VMs or careful state management
+
+**Recommended Next Step**:
+1. Investigate Terraform state synchronization
+2. Either: (a) Import existing VMs into state, or (b) manually adjust via Proxmox UI
+3. Once resolved, execute `terraform apply` to synchronize all allocations
+4. This should reduce Ruapehu memory pressure from 88% to ~70% (42GB + host overhead)
+
 ### To Apply Fix
 ```bash
 cd /home/prod_homelab/infrastructure/terraform
