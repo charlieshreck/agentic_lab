@@ -2558,7 +2558,6 @@ data:
             # Agentic cluster — platform
             ("ai-platform", "error-hunter", "agentic", "ghcr.io/charlieshreck/error-hunter"),
             ("ai-platform", "langgraph", "agentic", "ghcr.io/charlieshreck/kao-langgraph"),
-            ("ai-platform", "kernow-hub", "agentic", "ghcr.io/charlieshreck/kernow-hub"),
             # Prod cluster — media apps (pinned tags)
             ("media", "sonarr", "prod", "ghcr.io/linuxserver/sonarr"),
             ("media", "radarr", "prod", "ghcr.io/linuxserver/radarr"),
