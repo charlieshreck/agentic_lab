@@ -81,14 +81,22 @@ Total = 5 + 27 + 7 + 3 + 16 = 58GB allocated
 Available for host overhead = 62.6GB - 58GB = 4.6GB (acceptable)
 ```
 
-**Pihanga Host** (Incident #156 fix - Feb 23, 2026):
+**Pihanga Host** (28GB physical RAM):
 ```hcl
-pbs.memory           = 4096   # 4GB (increased from 2GB due to OOM during backups)
-talos-monitor.memory = 20480  # 20GB (K8s control plane, single-node monit cluster)
+pbs.memory                   = 4096   # 4GB (increased from 2GB due to OOM during backups)
+talos-monitor.memory         = 24576  # 24GB max (balloon min 18GB)
+talos-monitor.memory_minimum = 18432  # 18GB min
 
-Total = 4 + 20 = 24GB allocated
-Available for host overhead = 30.27GB - 24GB = 6.27GB (acceptable)
+Total max allocation = 4 + 24 = 28GB
+Host overhead = ~3.7GB
+OVER-COMMITTED: 28 + 3.7 = 31.7GB on 28GB host
+Actual usage at 18-19GB workload: 18.5 + 4 + 3.7 ≈ 26.2GB = 93-94%
 ```
+
+**NOTE (Feb 26, 2026)**: The talos-monitor comment in variables.tf says "pbs=2GB" but PBS was
+increased to 4GB (Incident #156/160). The capacity estimate is therefore stale. Pihanga will
+persistently run at ~93% memory usage. **Services are healthy despite this.** This is a capacity
+constraint, not a failure. Resolution requires a hardware decision or architectural change.
 
 ### To Apply Fix
 ```bash
@@ -210,6 +218,33 @@ As of Feb 25 2026, the JVM includes `-Xmx512M` by default in the running process
 The previous env-overrides file approach (incident #265 initial fix) does NOT persist —
 the path `/var/lib/unifi/env-overrides` doesn't exist at the VM host level. However, the
 heap cap is working natively in the current UniFi OS version. Monitor after firmware updates.
+
+## TrueNAS-Media VM (VMID 109) — ZFS ARC False Positive
+
+**Pattern**: Pulse reports TrueNAS VM at 85-97% memory continuously. This is EXPECTED.
+
+ZFS ARC (Adaptive Replacement Cache) is designed to fill all available RAM. TrueNAS will
+always show near-100% memory utilization because ZFS aggressively caches disk data in RAM
+to accelerate NFS reads. ZFS releases ARC automatically under memory pressure.
+
+**Diagnosis**: Compare Proxmox `mem` (host-view) vs `maxmem`:
+- If `mem/maxmem` < 60%: The VM's balloon has reduced allocation → check if this is causing ARC eviction
+- If `mem/maxmem` > 85%: ZFS ARC filling available guest RAM → **NORMAL, not an issue**
+
+**Verification** (guest exec via Proxmox SSH):
+```bash
+# NOTE: Guest agent may not return filesystem info (known issue for TrueNAS)
+# Check via TrueNAS web API instead:
+curl -s http://10.10.0.100/api/v2.0/reporting/get_data -H "Authorization: Bearer $API_KEY"
+```
+
+**Alert on TrueNAS**: Only escalate if:
+- NFS mounts are failing (mount-canary-writer job fails)
+- Dependent services (sonarr, radarr, transmission) are CrashLooping
+- TrueNAS management UI is unreachable
+
+**Note**: The Proxmox guest agent for TrueNAS sometimes returns "no filesystem info". This is a
+QEMU guest agent compatibility issue with TrueNAS/FreeBSD, not a sign of VM problems.
 
 ## References
 - Memory overcommit: https://pve.proxmox.com/wiki/Memory

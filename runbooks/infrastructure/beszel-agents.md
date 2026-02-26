@@ -177,6 +177,30 @@ For bulk deployment, use the playbook at:
 With inventory at:
 `/home/monit_homelab/ansible/inventory/beszel-agents.yml`
 
+## Version Drift Checks
+
+Beszel agents typically auto-update when a new version is available. If version drift is reported:
+
+```bash
+# Check current version on agent
+ssh root@<agent-ip> "/opt/beszel-agent/beszel-agent -v"
+
+# Output: beszel-agent 0.18.4
+
+# Check if newer version available
+ssh root@<agent-ip> "cd /opt/beszel-agent && ./beszel-agent update"
+
+# Output: "You already have the latest version 0.18.4."
+```
+
+If the agent reports an older version than hub:
+1. Verify current version with `-v` flag
+2. Run update command to trigger if needed
+3. Check binary modification time: `ls -la /opt/beszel-agent/beszel-agent`
+4. If modification date is recent (within last 7 days), update was already applied — finding is stale
+
+**Example (Feb 2026):** Finding reported Plex-VM at 0.18.3 but agent was actually at 0.18.4 (binary updated Feb 20). Resolved as stale.
+
 ## Related
 
 - Coroot agents for Talos nodes: See `/home/monit_homelab/kubernetes/platform/coroot-agent-*/`
