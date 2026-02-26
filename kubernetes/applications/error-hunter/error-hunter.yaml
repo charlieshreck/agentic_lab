@@ -26,7 +26,7 @@ data:
     import asyncio
     import re
     from typing import TypedDict, Optional, List, Dict, Any
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from langgraph.graph import StateGraph, END
     from fastapi import FastAPI, HTTPException, Request
@@ -1915,7 +1915,6 @@ data:
             except Exception as e:
                 # PBS proxy briefly returns ENOTCONN (~2-5 min) as backup jobs start at 02:00 UTC
                 # Suppress false-positive during 02:00-02:15 window to avoid noise
-                from datetime import datetime, timezone
                 utc_now = datetime.now(timezone.utc)
                 if utc_now.hour == 2 and utc_now.minute < 15:
                     logger.info(f"PBS API unreachable during backup startup window (02:00-02:15 UTC): {e}")
@@ -2419,7 +2418,6 @@ data:
 
         # --- Huntarr health (scheduled 00:00-08:00 UTC only) ---
         try:
-            from datetime import datetime, timezone
             utc_hour = datetime.now(timezone.utc).hour
             # Huntarr runs 00:00-08:00 UTC via CronJob scale schedule
             if 0 <= utc_hour < 8:
