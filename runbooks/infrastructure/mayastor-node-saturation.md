@@ -77,7 +77,7 @@ Investigate if:
 
 ## Related Alert: Pulse VM CPU High (> 80%)
 
-**Pattern** (confirmed 2026-02-25 and 3× on 2026-02-26): Pulse fires `cpu - talos-worker-XX` at 80% threshold during Renovate runs.
+**Pattern** (confirmed 2026-02-25 and 5× on 2026-02-26): Pulse fires `cpu - talos-worker-XX` at 80% threshold during Renovate runs.
 
 **Breakdown on 4-vCPU worker VMs (pre-fix):**
 - Mayastor io-engine SPDK busy-polling: **~2 vCPUs constant** = ~50% VM CPU floor on 4 vCPUs
@@ -94,7 +94,17 @@ Investigate if:
 - Total baseline: ~42%
 - With Renovate peak: ~42% + 17% = **~59%** — well below 80% threshold
 
-**Verification**: Monitor the next Renovate run (~6 hours after restart). If CPU stays below 80%, the fix is sufficient.
+**NOTE**: Alert continued to fire 5× on 2026-02-26 despite 6-vCPU fix. Actual observed peaks hit 80.6% (above predicted 59%). Likely cause: short post-restart CPU spikes + actual Renovate overhead higher than modelled.
+
+**Threshold fix applied 2026-02-26** *(permanent resolution)*: Raised Pulse CPU alert threshold for all three Talos workers from 80% → 90% via Pulse UI. This matches the actual safe operating range — at 90%+ on a storage node, the workloads themselves would be impacted.
+
+**How to set threshold** (pulse.kernow.io → Alerts → Thresholds → Proxmox):
+1. Navigate to `http://pulse.kernow.io/alerts/thresholds/proxmox`
+2. In the "VMs & Containers" table, click the edit (pencil/blue) icon on the right of each worker row
+3. Change the CPU % number input from 80 to 90 (type the value, press Tab to commit)
+4. Repeat for talos-worker-01, 02, 03
+5. Click **"Save Changes"** button at the top of the page
+- Current setting: **90%** (changed 2026-02-26)
 
 **To verify Renovate is running** (explain a CPU spike):
 ```bash
@@ -103,11 +113,7 @@ kubectl get pods -n renovate --context admin@homelab-prod
 # Renovate status "Succeeded" = completed, CPU should already be dropping
 ```
 
-**If alert still fires after 6-vCPU fix**, next options:
-1. Raise Pulse CPU alert threshold for worker VMs via Pulse UI (pulse.kernow.io → Alert Rules → guest overrides)
-   - Resource IDs: `Ruapehu:Ruapehu:401`, `Ruapehu:Ruapehu:402`, `Ruapehu:Ruapehu:403`
-   - Raise trigger from 80% → 90%, clear from 75% → 85%
-2. Or increase workers to 8 vCPUs (further Terraform change in `variables.tf`)
+**If alert fires again (above 90%)**: Investigate — that would be abnormal even with Renovate + Mayastor.
 
 ## Long-Term Improvements
 
