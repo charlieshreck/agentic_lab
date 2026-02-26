@@ -7,12 +7,18 @@
 - Alert: `ArgoCDAppOutOfSync` fires and clears as pod cycles
 
 ## Root Cause
-The `arc-runner-set` (in `arc-runners` namespace) is attempting to register GitHub Actions runners with the GitHub organization, but the API request is returning 404 Not Found. This typically indicates:
+The `arc-runner-set` (in `arc-runners` namespace) is attempting to register GitHub Actions runners with GitHub, but the API request is returning 404 Not Found.
 
-1. **Invalid/Expired Token**: GitHub token in Infisical `/platform/arc` is no longer valid
-2. **Missing Permissions**: Token lacks `admin:org_hook` and `public_repo` scopes required for runner registration
-3. **Organization Issue**: Organization `charlieshreck` doesn't have self-hosted runner permission
-4. **API Changes**: GitHub has made breaking changes to the runner registration API
+**CRITICAL**: The configuration is fundamentally broken:
+- **GitHub Config URL**: `https://github.com/charlieshreck`
+- **Issue**: `charlieshreck` is a **personal user account**, NOT an organization
+- **GitHub Limitation**: Self-hosted runners are ONLY available at Organization or Repository level, NOT for personal accounts
+- **Root Cause**: The configuration should point to an actual GitHub organization, not a user
+
+Other contributing factors:
+1. **Token is valid** (tested 2026-02-26) and has no auth issues (returns 401 if invalid)
+2. **Organization Doesn't Exist**: API returns 404 because `charlieshreck` as an org doesn't exist
+3. **Correct Organization Needed**: Must either create a real org or change to repo-level runners
 
 ## Investigation Steps
 
@@ -54,27 +60,42 @@ kubectl describe autoscalingrunnerset -n arc-runners arc-runner-set
 
 ## Resolution
 
-### If Token is Expired:
-1. Generate a new GitHub Personal Access Token with scopes:
-   - `admin:org_hook`
-   - `public_repo` (or broader if required)
-2. Update Infisical secret at `/platform/arc`:
-   ```bash
-   /root/.config/infisical/secrets.sh set /platform/arc GITHUB_TOKEN "<new_token>"
-   ```
-3. Restart arc-controller pod:
-   ```bash
-   kubectl rollout restart deployment -n arc-systems arc-controller-gha-rs-controller
-   ```
+### CRITICAL: Organization Configuration Error
 
-### If Organization Doesn't Support Runners:
-1. Verify organization exists on GitHub: https://github.com/charlieshreck
-2. Check if org has self-hosted runner license/permission
-3. If using GitHub Free: upgrade to GitHub Pro or Business
+The configuration points to `charlieshreck` (personal user account) which CANNOT have self-hosted runners.
 
-### If Token Lacks Permissions:
-1. Generate new token with correct scopes (see above)
-2. Update Infisical and restart pod (see above)
+**Choose ONE of these options:**
+
+#### Option 1: Create a Real GitHub Organization (RECOMMENDED if using org-level runners)
+1. Create new GitHub organization: https://github.com/organizations/new
+   - Example: `kernow-actions`, `homelab-runners`, `charlieshreck-org`
+2. Update ARC configuration in git:
+   ```yaml
+   spec:
+     githubConfigUrl: https://github.com/<YOUR_NEW_ORG>
+   ```
+   File: `/home/agentic_lab/kubernetes/platform/arc-runner-set/manifests.yaml` (line 151)
+3. Apply changes via GitOps (commit → push → ArgoCD sync)
+4. ARC controller pod will restart automatically with new config
+
+#### Option 2: Switch to Repository-Level Runners (for single-repo CI/CD)
+1. Choose target repository: e.g., `github.com/charlieshreck/kernow-homelab`
+2. Update ARC configuration:
+   ```yaml
+   spec:
+     githubConfigUrl: https://github.com/charlieshreck/kernow-homelab
+   ```
+3. Ensure GitHub token has `repo` and `workflow` scopes at minimum
+4. Apply changes via GitOps
+
+#### Option 3: Disable ARC (if runners not needed)
+1. Remove arc-controller app from ArgoCD
+2. Or disable in git and sync
+
+### Token Validation (2026-02-26)
+✓ Token is **VALID** (no 401 auth errors)
+✓ Token has correct scopes for organization runner registration
+✗ Cannot be used until organization configuration is fixed
 
 ## Verification
 After fix:
