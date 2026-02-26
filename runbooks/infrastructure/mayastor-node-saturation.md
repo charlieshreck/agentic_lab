@@ -75,12 +75,30 @@ Investigate if:
 - Application pods are unable to write to PVCs (I/O errors)
 - Other nodes in the cluster also show high load
 
+## Related Alert: Pulse VM CPU High (> 80%)
+
+**Pattern** (confirmed 2026-02-25 and 2026-02-26): Pulse fires `cpu - talos-worker-XX` at 80% threshold during Renovate runs.
+
+**Breakdown on 4-vCPU worker VMs:**
+- Mayastor io-engine SPDK busy-polling: **~2 vCPUs constant** = ~50-60% VM CPU floor
+- Renovate (runs every 30 min, duration ~30-60 min): **~1 vCPU** = another ~25%
+- Combined peak: ~75-80%+ → crosses 80% threshold
+
+**Resolution**: This self-heals when Renovate finishes (~30 min). Root cause is insufficient headroom on 4-vCPU VMs.
+
+**Structural fix**: Increase workers from 4→6 vCPUs (see Long-Term Improvements below). With 6 vCPUs:
+- Mayastor: 2/6 = 33% floor
+- Renovate peak: 1/6 = 17% additional
+- Combined: ~50% — well below 80% threshold
+
+Worker-01 baseline CPU (without Renovate): ~59% on 4 vCPUs. Worker-02 with Renovate: ~81%.
+
 ## Long-Term Improvements
 
 1. **Nexus rebalancing**: Delete and recreate PVCs to redistribute nexuses across all three worker nodes. This is disruptive and requires application downtime.
 
 2. **More io-engine CPU cores**: Change the SPDK reactor CPU list from `-l1,2` to `-l0,1,2,3` to use all 4 cores. This halves the per-core contribution to load average. Requires Mayastor Helm chart customization (not a simple values change).
 
-3. **More vCPUs on worker-03**: Increase VM from 4 to 6-8 vCPUs via Terraform. Gives more scheduling headroom. The io-engine would still only use CPUs 1-2 but kernel and other pods would have more room.
+3. **Increase worker vCPUs from 4→6** *(applied in Terraform 2026-02-26)*: Gives more scheduling headroom for workloads like Renovate. The io-engine would still only use CPUs 1-2 but kernel and other pods have more room. Requires `terraform apply` + VM restart cycle. Change is in `prod_homelab/infrastructure/terraform/variables.tf`.
 
-4. **Extend null-route to all Mayastor nodes**: If workers 01/02 ever cross the 2.0 threshold, update the AlertManager route to use `alertname: NodeSystemSaturation` without an instance filter (and rely on the `cluster: production` label instead).
+4. **Extend null-route to all Mayastor nodes**: If workers 01/02 ever cross the NodeSystemSaturation 2.0 threshold, update the AlertManager route to use `alertname: NodeSystemSaturation` without an instance filter (and rely on the `cluster: production` label instead).
