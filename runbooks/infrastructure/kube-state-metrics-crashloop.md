@@ -1,17 +1,31 @@
-# kube-state-metrics CrashLoop (Monit Cluster)
+# kube-state-metrics CrashLoop
 
 ## Symptom
 `HomelabPodCrashLooping` alert fires for `kube-prometheus-stack-kube-state-metrics-*` in the monitoring namespace. Pod shows repeated restarts, exit code 2.
 
-## Root Cause
-The monit cluster runs on VMs hosted on Pihanga (10.10.0.20). PBS backups cause heavy I/O on the Pihanga host, which degrades the K8s API server's responsiveness. kube-state-metrics connects to the API server on startup — when the API is slow, it exits with code 2 and is restarted by Kubernetes, creating a crash loop.
+## Affected Clusters
 
-Prior to Feb 2026: All 3 Proxmox hosts (Hikurangi, Ruapehu, Pihanga) ran PBS backups simultaneously at 02:00 UTC, creating a severe I/O storm.
+| Cluster | Managed By | Fix Status |
+|---------|-----------|------------|
+| monit | ArgoCD via `kube-prometheus-stack-app.yaml` in monit_homelab | Fixed Feb 26 2026 (commit f4a448c) |
+| prod | ArgoCD via `kube-state-metrics-resources-app.yaml` in prod_homelab | Fixed Feb 26 2026 |
+
+**Note**: The prod cluster kube-prometheus-stack is an orphaned deployment (ArgoCD app was moved to monit). A separate `kube-state-metrics-resources` ArgoCD app in `prod_homelab/kubernetes/argocd-apps/platform/` manages only the resource requests via SSA.
+
+## Root Cause
+PBS backups cause heavy I/O on the host running the cluster's VMs, which degrades the K8s API server's responsiveness. kube-state-metrics connects to the API server on startup — when the API is slow, it exits with code 2 and is restarted by Kubernetes, creating a crash loop.
+
+| Cluster | Hosted On | PBS Backup Window |
+|---------|-----------|------------------|
+| monit | Pihanga (10.10.0.20) | 02:45 UTC |
+| prod | Ruapehu (10.10.0.10) | 02:20 UTC |
+
+Prior to Feb 2026: All 3 Proxmox hosts ran PBS backups simultaneously at 02:00 UTC, creating a severe I/O storm.
 
 After stagger fix (Feb 25 2026): Hikurangi 02:00, Ruapehu 02:20, Pihanga 02:45 — reduced but did not eliminate restarts.
 
 ## Known Pattern
-- **Crash window**: 02:45–03:30 UTC (during/after Pihanga PBS backup)
+- **Crash window**: 02:20–03:30 UTC (during/after Ruapehu or Pihanga PBS backup)
 - **Exit code**: 2 (app crash, NOT OOMKill which would be 137)
 - **QoS before fix**: BestEffort (no resource requests set) — most vulnerable to eviction
 - **QoS after fix**: Burstable (50m CPU / 64Mi RAM requests added Feb 26 2026)
@@ -21,14 +35,12 @@ After stagger fix (Feb 25 2026): Hikurangi 02:00, Ruapehu 02:20, Pihanga 02:45 �
 1. Check current pod status:
    ```
    kubectl_get_pods(namespace="monitoring", cluster="monit")
+   kubectl_get_pods(namespace="monitoring", cluster="prod")
    ```
    - If Running/Ready → self-healed, likely transient during backup window
 
-2. Check if in backup window (02:45–03:30 UTC):
-   ```
-   Current time UTC?
-   ```
-   If YES → expected transient during Pihanga backup
+2. Check if in backup window (02:20–03:30 UTC):
+   If YES → expected transient during PBS backup
 
 3. Check restart rate metric:
    ```
@@ -49,32 +61,34 @@ Auto-resolve as known-pattern transient during PBS backup window.
 ### If pod is stuck in CrashLoop outside backup window
 This is a real issue requiring investigation:
 
-1. Check logs: `kubectl_logs(pod_name=..., namespace="monitoring", cluster="monit", previous=True)`
-2. Check node events: `kubectl_get_events(namespace="monitoring", cluster="monit")`
+1. Check logs: `kubectl_logs(pod_name=..., namespace="monitoring", cluster="monit"|"prod", previous=True)`
+2. Check node events: `kubectl_get_events(namespace="monitoring", cluster=...)`
 3. Check if API server is reachable from within the cluster
-4. Check Pihanga host memory/CPU: `proxmox_get_vm_status`
+4. Check Pihanga/Ruapehu host memory/CPU: `proxmox_get_vm_status`
 
 ### If crash loop is severe (> 10 restarts/hour)
-1. Check if PBS backup is running on Pihanga (SSH to Pihanga, check processes)
+1. Check if PBS backup is running (SSH to Pihanga or Ruapehu, check processes)
 2. If backup running and causing I/O storm: wait for backup to complete (usually < 30 min)
-3. If budget allows, consider pushing Pihanga backup schedule to 04:00+ UTC
+3. Consider pushing backup schedules further apart
 
 ## Applied Fixes (Chronological)
 
-| Date | Fix | Result |
-|------|-----|--------|
-| Feb 25 2026 | Staggered PBS backup schedules (Hikurangi 02:00, Ruapehu 02:20, Pihanga 02:45) | Reduced crash frequency, not eliminated |
-| Feb 26 2026 | Added resource requests to kube-state-metrics (50m CPU / 64Mi RAM) — changes QoS from BestEffort to Burstable | Reduces eviction risk during I/O pressure |
+| Date | Cluster | Fix | Result |
+|------|---------|-----|--------|
+| Feb 25 2026 | All | Staggered PBS backup schedules (Hikurangi 02:00, Ruapehu 02:20, Pihanga 02:45) | Reduced crash frequency, not eliminated |
+| Feb 26 2026 | monit | Added resource requests to kube-state-metrics (50m/64Mi) in `kube-prometheus-stack-app.yaml` — QoS BestEffort → Burstable | Reduces eviction risk during I/O pressure |
+| Feb 26 2026 | prod | Created `kube-state-metrics-resources` ArgoCD app in prod_homelab with SSA resource patch — QoS BestEffort → Burstable | Same fix for orphaned prod deployment |
 
 ## Potential Further Improvements
 
 1. **Push Pihanga backup later**: Change from 02:45 to 04:00 UTC in `/etc/pve/jobs.cfg` on Pihanga
 2. **Increase liveness probe tolerance**: Set `failureThreshold: 5` in helm values (default is 3 × 10s = 30s timeout)
-3. **API server resource limits**: Ensure API server on monit cluster has adequate CPU during I/O spikes
+3. **Properly re-adopt prod kube-prometheus-stack into GitOps**: The prod deployment is orphaned; consider a full ArgoCD Application with the complete helm values
 
 ## Related Incidents
-- Incident #262: First identification of PBS I/O storm root cause
-- Incidents #300, #302, #303: Post-stagger fix, still occurring during Pihanga window
+- Incident #262: First identification of PBS I/O storm root cause (prod cluster)
+- Incidents #300, #302, #303: Post-stagger fix, monit cluster during Pihanga window
+- Incident #923: Prod cluster BestEffort QoS fix applied
 
 ## Related Runbooks
 - `infrastructure/pbs-operations.md` — PBS backup management
