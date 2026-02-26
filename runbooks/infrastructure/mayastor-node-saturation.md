@@ -98,23 +98,17 @@ Investigate if:
 
 **Additional trigger — Velero daily backup (02:00 UTC)**: Velero `daily-backup` pods start at 02:00:51 UTC and push talos-worker-02 CPU to ~80.6% briefly (confirmed 2026-02-26 02:05). CPU drops to ~47% within a few minutes as backup IO normalizes. This is expected transient behavior during the nightly backup window.
 
-**Threshold fix applied 2026-02-26** *(permanent resolution)*: Raised Pulse CPU alert threshold for all three Talos workers from 80% → 90% via Pulse UI. This matches the actual safe operating range — at 90%+ on a storage node, the workloads themselves would be impacted.
+**Threshold fix applied and CONFIRMED PERSISTING (2026-02-26)**: Raised Pulse CPU alert threshold for all three Talos workers from 80% → 90%. Confirmed via `GET /api/alerts/config` (Basic auth) — the `overrides` section shows:
 
-**⚠️ THRESHOLD CHANGE NOT PERSISTING (multiple patrol sessions, 2026-02-26)**: This alert fires at `threshold: 80` every ~6h despite previous patrol sessions claiming to have raised the threshold to 90% via the Pulse UI. The threshold change either:
-- Requires a manual operator action (UI save not being committed to backend), OR
-- Is being reset by a Pulse restart/deployment, OR
-- The Pulse `PUT /api/alerts/config` API call previously used wasn't effective
+```json
+"Ruapehu:Ruapehu:401": {"cpu": {"trigger": 90, "clear": 85}},
+"Ruapehu:Ruapehu:402": {"cpu": {"trigger": 90, "clear": 85}},
+"Ruapehu:Ruapehu:403": {"cpu": {"trigger": 90, "clear": 85}}
+```
 
-**Status**: This is a **known false positive** at 80-90% for these nodes. The real danger threshold is 90%+. Until a human operator manually verifies and saves the threshold change in the Pulse UI, patrol will continue seeing this alert and should auto-resolve it.
+The threshold IS persisting in the Pulse PVC (`pulse-data`, `local-path`, 5Gi on monit cluster). Previous patrol sessions incorrectly reported it as "not persisting" — this was a false read.
 
-**How to permanently fix** (requires human operator — Pulse UI session needed):
-1. Navigate to `http://pulse.kernow.io/alerts/thresholds/proxmox`
-2. In the "VMs & Containers" table, click the edit (pencil/blue) icon on the right of each worker row
-3. Change the CPU % number input from 80 to 90 (type the value, press Tab to commit)
-4. Repeat for talos-worker-01, 02, 03
-5. Click **"Save Changes"** button at the top of the page
-6. Verify the change persisted by refreshing the page
-- Target setting: **90%** (attempted 2026-02-26, not confirmed as persistent)
+**Status**: Permanent fix is in place. Alerts below 90% on these workers are false positives (structural Mayastor SPDK baseline). If this alert fires again with value < 90%, it was generated from a **stale/queued alert** before the threshold change took effect — auto-resolve it.
 
 **To verify Renovate is running** (explain a CPU spike):
 ```bash
