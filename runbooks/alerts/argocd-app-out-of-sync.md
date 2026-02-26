@@ -315,6 +315,93 @@ spec:
 
 Never include `recurse: false` or empty `jsonnet: {}` unless absolutely necessary.
 
+---
+
+### Incident (2026-02-26) — OCI Helm chart GHCR authentication failure
+
+**Alert**: ArgoCDAppOutOfSync — arc-controller and arc-runner-set (sync_status: Unknown, phase: Error)
+**Status**: RESOLVED
+**Root Cause**: Two bugs in the `ghcr-oci-helm` SealedSecret (argocd namespace):
+1. Label was `argocd.argoproj.io/secret-type: repository` — requires exact URL match; with `url: ghcr.io` it never matched `oci://ghcr.io/actions/...`
+2. After fixing to `repo-creds`, URL was scoped to `ghcr.io/charlieshreck` — too narrow; ARC charts are at `ghcr.io/actions/` which doesn't match
+
+**Key insight**: `ghcr.io/actions/actions-runner-controller-charts` is NOT publicly accessible. Anonymous token requests return 403; charlieshreck PAT returns 200. Must always use authenticated GHCR access for these charts.
+
+**Verification**:
+```bash
+# Test anonymous GHCR access (returns 403 if auth required)
+curl -s -o /dev/null -w "%{http_code}" \
+  "https://ghcr.io/token?scope=repository:actions/actions-runner-controller-charts:pull&service=ghcr.io"
+
+# Test authenticated access (should return 200)
+GITHUB_TOKEN=$(/root/.config/infisical/secrets.sh get /external/github TOKEN)
+curl -s -o /dev/null -w "%{http_code}" \
+  -u "charlieshreck:${GITHUB_TOKEN}" \
+  "https://ghcr.io/token?scope=repository:actions/actions-runner-controller-charts:pull&service=ghcr.io"
+```
+
+**Fix**: Re-seal `prod_homelab/kubernetes/platform/argocd-credentials/ghcr-repo-creds.yaml` with:
+- `argocd.argoproj.io/secret-type: repo-creds` (prefix matching)
+- `url: ghcr.io` (all GHCR, not scoped)
+- `type: helm`, `enableOCI: true`, `username: charlieshreck`, `password: <PAT>`
+
+```bash
+# Get token from Infisical
+GITHUB_TOKEN=$(/root/.config/infisical/secrets.sh get /external/github TOKEN)
+
+# Create plain secret YAML via Python (avoid base64 wrapping issues)
+python3 - <<'PYEOF'
+import base64, subprocess
+token = subprocess.check_output([...]).decode().strip()
+# Write /tmp/ghcr-plain-secret.yaml with proper single-line base64
+PYEOF
+
+# Seal with prod cluster's Sealed Secrets controller
+kubeseal \
+  --controller-name=sealed-secrets-controller \
+  --controller-namespace=kube-system \
+  --context=admin@homelab-prod \
+  --format yaml \
+  -f /tmp/ghcr-plain-secret.yaml \
+  -w /tmp/ghcr-sealed.yaml
+
+# Add repo-creds label to template.metadata.labels, copy to repo, commit+push
+```
+
+Also removed invalid `credentialTemplates` key from `argocd-cm.yaml` (not a real ArgoCD ConfigMap field; credentials are controlled via Kubernetes Secrets with `argocd.argoproj.io/secret-type` labels, not ConfigMap).
+
+**Commits**: `789426b`, `3e48198`, `e84ca46` in prod_homelab/kernow-homelab
+**Knowledge base event**: `7fa99516-68b6-4658-803f-b7f7e7ca96e4`
+
+---
+
+### Common Cause 8: OCI Helm Chart GHCR Authentication Failure (Unknown sync status)
+
+**Symptoms:**
+- Apps using `oci://ghcr.io/...` sources show `sync_status: Unknown`, `health: Healthy`
+- phase: Error in ArgoCD Application
+- Repo-server logs show: `response status code 403: denied: requested access to the resource is denied`
+- The 403 is on the GHCR token endpoint, not the actual manifest
+
+**Root Cause:**
+GHCR requires authentication for OCI Helm charts even when packages appear public. Anonymous token requests are denied. The ArgoCD `repo-creds` SealedSecret must be correctly configured.
+
+**Check repo-creds secret**:
+```bash
+# Verify secret exists and has correct label
+kubectl get secret ghcr-oci-helm -n argocd --context=admin@homelab-prod \
+  -o jsonpath='{.metadata.labels}'
+
+# Should show: {"argocd.argoproj.io/secret-type":"repo-creds"}
+# NOT "repository" — that requires exact URL match
+```
+
+**Fix**: See Incident (2026-02-26) above. Key rules:
+1. Label must be `repo-creds` (not `repository`) for prefix URL matching
+2. URL must be `ghcr.io` (full registry, not `ghcr.io/charlieshreck`) to match all GHCR OCI repos
+3. Use kubeseal with prod cluster's controller: `--controller-name=sealed-secrets-controller --controller-namespace=kube-system`
+4. After fixing: restart argocd-repo-server to force credential reload if needed
+
 ## Detection Methods
 
 | Method | Status |
