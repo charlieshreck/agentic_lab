@@ -9,15 +9,35 @@
 
 ## Root Cause
 
-TrueNAS with heavy disk I/O (5 storage devices) has aggressive ZFS ARC (Adaptive Replacement Cache) that consumes most available RAM. The default 9GB allocation leaves minimal headroom for:
-- ZFS metadata and block pointers
-- NFS/SMB protocol buffers
-- Network stack buffers
-- Application overhead
+TrueNAS/FreeBSD ZFS ARC (Adaptive Replacement Cache) is **designed** to fill all available RAM. This is NOT a memory leak — ZFS ARC maximizes cache hit rates by using every available page. The ARC releases memory immediately when applications request it. At 16GB, ZFS ARC typically fills 95-97% from the OS perspective.
 
-With 4x 8TB RAID arrays + 2x NVMe devices actively reading/writing, memory pressure is inevitable at <10GB.
+**This is a false positive.** The Proxmox host shows ~58% actual physical page usage (9.3 GiB of 16 GiB). The 97% figure comes from the in-guest FreeBSD kernel reporting ARC-held pages as "used".
 
-## Fix: Increase VM Memory
+### Distinction: Host vs Guest Memory
+
+| Metric | Value | Meaning |
+|--------|-------|---------|
+| Proxmox `mem` (host view) | 9.3 GiB / 16 GiB = 58% | Actual physical pages used on host |
+| Pulse alert value (guest view) | 97% | FreeBSD reports ZFS ARC as "used" memory |
+| ZFS ARC memory | ~15 GiB | Reclaimable cache — not real pressure |
+
+### Recommended Fix: Pulse Override (not memory increase)
+
+The correct fix is to raise the pulse alert threshold for this VM, NOT to increase memory further (adding more RAM will just lead to ~97% ZFS ARC usage again).
+
+```bash
+TOKEN="<pulse_api_token>"  # from Infisical /observability/pulse API_TOKENS
+curl -sk -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"overrides":{"Ruapehu:Ruapehu:109":{"memory":{"trigger":99,"clear":95}}}}' \
+  https://pulse.kernow.io/api/alerts/config
+```
+
+**Applied**: 2026-02-26 — threshold now 99%/95% for Ruapehu:Ruapehu:109.
+
+---
+
+## Legacy Fix: Increase VM Memory
 
 ### Step 1: Edit Proxmox Config (Ruapehu)
 
@@ -113,7 +133,8 @@ alert:
 
 | Date | Memory % | Action | Result |
 |------|----------|--------|--------|
-| 2026-02-22 | 92.7% | Increased from 9GB → 16GB | ✅ Resolves pressure |
+| 2026-02-22 | 92.7% | Increased from 9GB → 16GB | ✅ Reduced host pressure; guest still fills to ~97% (ZFS ARC) |
+| 2026-02-26 | 97.2% | Set pulse override threshold 99%/95% for Ruapehu:Ruapehu:109 | ✅ False positive resolved — no more patrol triggers for ZFS ARC |
 
 ## Follow-up: Terraform IaC
 

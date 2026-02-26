@@ -222,18 +222,20 @@ infrastructure-mcp proxmox_list_nodes --host ruapehu
 - **VMs**: talos-cp-01 (4GB), talos-worker-01..03 (9GB each), plex (7GB), unifi (2GB)
 - **Safe total**: 51GB allocated (~81%)
 
-### Pihanga (28GB - Monitoring + Backup)
+### Pihanga (28.2GB - Monitoring + Backup)
 - **Terraform**: `monit_homelab/terraform/talos-single-node/variables.tf`
-- **VMs**: talos-monitor (20GB max, 14GB min with balloon), pbs (2GB)
-- **Memory budget**:
-  - talos-monitor: 20GB max, 14GB balloon min
-  - pbs: ~2GB
-  - Proxmox host overhead: ~5.7GB
-  - Total worst case: ~27.7GB / 28.2GB = ~98% (normal without balloon reclaim)
-  - With balloon active: ~21.7GB / 28.2GB = ~77%
-- **Key**: Pod working set on talos-monitor is only ~7.2GB — Linux fills the rest with page cache
-- **Fix**: Balloon driver enabled with `floating = 14336` (14GB min), allows Proxmox to reclaim up to 6GB
-- **Terraform file to edit**: `monit_homelab/terraform/talos-single-node/main.tf` (memory block)
+- **VMs**: talos-monitor (24GB max, 18GB min with balloon), pbs (4GB)
+- **Memory budget** (current as of 2026-02-26):
+  - talos-monitor: 24GB max, 18GB balloon min (monitoring stack grew to need 18GB baseline)
+  - pbs: 4GB (increased from 2GB in incident #163 to prevent OOM during backup)
+  - Proxmox host overhead: ~3.8GB
+  - Total at balloon minimum: 18 + 4 + 3.8 = ~25.8GB / 28.2GB = ~91-93% ← **this is expected and documented in Terraform**
+- **Key**: Pihanga WILL run at 91-93% host memory with current config. Services are healthy. The Terraform variables.tf comment explicitly acknowledges this: `# → node runs ~93% memory (expected, services healthy)`
+- **Inside VM**: talos-monitor reports ~50% (node_exporter) — services not under memory pressure
+- **IO pressure**: ~2.5% PSI on talos-monitor (write-heavy monitoring workloads: VictoriaMetrics, Coroot, Prometheus)
+- **Pulse override**: Set threshold 96%/91% for Pihanga-Pihanga to prevent false patrol triggers (2026-02-26)
+- **Real fix would be**: Hardware RAM upgrade on Pihanga (architectural change, not quick fix)
+- **Terraform file to edit**: `monit_homelab/terraform/talos-single-node/variables.tf` (memory_minimum field)
 
 ## Alert Rules
 
@@ -279,6 +281,14 @@ The Proxmox node memory alert should trigger at:
   - Result: 51GB allocated (81% utilization, under 85% threshold)
 - **Time to fix**: 10 minutes (commit → push → Terraform apply + VM restart)
 - **Root cause**: No periodic memory review during VM allocation planning
+
+### 2026-02-26 (Pihanga) — Recurring, Accepted State
+- **Host**: Pihanga - 28.2GB RAM
+- **Alert**: 92.8% (warning, firing since 2026-02-25)
+- **Cause**: talos-monitor (24GB max, 18GB min) + PBS (4GB) = 28GB allocated. Host overhead ~3.8GB. System runs at 91-93% by design.
+- **Fix**: Set pulse alert threshold override to 96%/91% for `Pihanga-Pihanga`. Terraform already documents this as expected: `# → node runs ~93% memory (expected, services healthy)`
+- **Not fixed**: Root over-allocation constraint unchanged. Real fix = RAM upgrade.
+- **Note**: Terraform state mismatch observed — code has 9GiB workers/5GiB CP but Proxmox shows 12GiB/4GiB. Pending terraform apply, but worker-02 currently at 8.11GiB (reducing to 9GiB = 90% usage). Needs human review.
 
 ## Implementation Notes
 
