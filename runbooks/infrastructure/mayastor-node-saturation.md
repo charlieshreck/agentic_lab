@@ -77,21 +77,37 @@ Investigate if:
 
 ## Related Alert: Pulse VM CPU High (> 80%)
 
-**Pattern** (confirmed 2026-02-25 and 2026-02-26): Pulse fires `cpu - talos-worker-XX` at 80% threshold during Renovate runs.
+**Pattern** (confirmed 2026-02-25 and 3× on 2026-02-26): Pulse fires `cpu - talos-worker-XX` at 80% threshold during Renovate runs.
 
-**Breakdown on 4-vCPU worker VMs:**
-- Mayastor io-engine SPDK busy-polling: **~2 vCPUs constant** = ~50-60% VM CPU floor
-- Renovate (runs every 30 min, duration ~30-60 min): **~1 vCPU** = another ~25%
-- Combined peak: ~75-80%+ → crosses 80% threshold
+**Breakdown on 4-vCPU worker VMs (pre-fix):**
+- Mayastor io-engine SPDK busy-polling: **~2 vCPUs constant** = ~50% VM CPU floor on 4 vCPUs
+- General K8s overhead (Cilium, ArgoCD, coroot, cert-manager, etc.): **~9%** additional
+- Total baseline: **~59%** (observed on worker-01 without Renovate)
+- Renovate (`schedule: "0 */6 * * *"`, runs every 6h, limit: 1 vCPU): **~21%** additional
+- Combined peak: **~80%** → crosses threshold
 
-**Resolution**: This self-heals when Renovate finishes (~30 min). Root cause is insufficient headroom on 4-vCPU VMs.
+**Structural fix applied 2026-02-26**: Workers increased from 4→6 vCPUs via Terraform + VM rolling restart.
 
-**Structural fix**: Increase workers from 4→6 vCPUs (see Long-Term Improvements below). With 6 vCPUs:
-- Mayastor: 2/6 = 33% floor
-- Renovate peak: 1/6 = 17% additional
-- Combined: ~50% — well below 80% threshold
+**Expected baseline on 6-vCPU workers (post-fix):**
+- Mayastor SPDK: 2/6 = 33%
+- K8s overhead: ~9%
+- Total baseline: ~42%
+- With Renovate peak: ~42% + 17% = **~59%** — well below 80% threshold
 
-Worker-01 baseline CPU (without Renovate): ~59% on 4 vCPUs. Worker-02 with Renovate: ~81%.
+**Verification**: Monitor the next Renovate run (~6 hours after restart). If CPU stays below 80%, the fix is sufficient.
+
+**To verify Renovate is running** (explain a CPU spike):
+```bash
+kubectl get pods -n renovate --context admin@homelab-prod
+# Renovate status "Running" = spike in progress, will self-heal in ~30 min
+# Renovate status "Succeeded" = completed, CPU should already be dropping
+```
+
+**If alert still fires after 6-vCPU fix**, next options:
+1. Raise Pulse CPU alert threshold for worker VMs via Pulse UI (pulse.kernow.io → Alert Rules → guest overrides)
+   - Resource IDs: `Ruapehu:Ruapehu:401`, `Ruapehu:Ruapehu:402`, `Ruapehu:Ruapehu:403`
+   - Raise trigger from 80% → 90%, clear from 75% → 85%
+2. Or increase workers to 8 vCPUs (further Terraform change in `variables.tf`)
 
 ## Long-Term Improvements
 
