@@ -154,6 +154,18 @@ To verify the fix is working:
    - Medium (1,000-10,000): 768Mi request / 1.5Gi limit with NODE_OPTIONS max 1Gi
    - Large (> 10,000): 1Gi request / 2-3Gi limit with NODE_OPTIONS max 1.5-2Gi
 
+## Incident History
+
+### Incident #360 (2026-02-27)
+- **Alert**: HomelabPodOOMKilled (karakeep)
+- **Pod killed**: karakeep-f8995dc75-qncr6
+- **Memory growth pattern**: ~3-4 MB per 5 minutes (steady)
+- **OOM kill point**: ~605 MB after ~20 minutes
+- **Current pod**: karakeep-75cb844778-lpqxd (healthy, 571 MB)
+- **Recovery**: Automatic via Kubernetes replica set rollout
+- **Status**: RESOLVED — NODE_OPTIONS safety valve is functioning correctly
+- **Next run baseline**: Monitor for recurrence to confirm the heap limit prevents future OOMKills
+
 ## References
 
 - Karakeep GitHub: https://github.com/karakeep-app/karakeep
