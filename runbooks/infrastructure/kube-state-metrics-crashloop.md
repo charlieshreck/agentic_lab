@@ -78,17 +78,30 @@ This is a real issue requiring investigation:
 | Feb 25 2026 | All | Staggered PBS backup schedules (Hikurangi 02:00, Ruapehu 02:20, Pihanga 02:45) | Reduced crash frequency, not eliminated |
 | Feb 26 2026 | monit | Added resource requests to kube-state-metrics (50m/64Mi) in `kube-prometheus-stack-app.yaml` — QoS BestEffort → Burstable | Reduces eviction risk during I/O pressure |
 | Feb 26 2026 | prod | Created `kube-state-metrics-resources` ArgoCD app in prod_homelab with SSA resource patch — QoS BestEffort → Burstable | Same fix for orphaned prod deployment |
+| Feb 27 2026 | monit | Added AlertManager `time_interval` route to suppress TargetDown for kube-state-metrics during 01:00–05:00 UTC backup window (`kube-prometheus-stack-app.yaml`, commit 3c8191a) | Eliminates false patrol alerts during backup window; alert still fires outside window |
+
+## Patrol Decision Guide (for Auto-Resolution)
+
+The TargetDown alert for kube-state-metrics during 01:00–05:00 UTC is now suppressed in AlertManager.
+If you still receive an incident (#349 pattern), check:
+
+1. **Was the alert raised between 01:00–05:00 UTC?** If yes → likely backup window bleed, auto-resolve as transient.
+2. **Is the pod Running/Ready now?** If yes → self-healed, auto-resolve.
+3. **Has it been down > 1 hour continuously?** If yes → this is a REAL outage, escalate.
 
 ## Potential Further Improvements
 
 1. **Push Pihanga backup later**: Change from 02:45 to 04:00 UTC in `/etc/pve/jobs.cfg` on Pihanga
 2. **Increase liveness probe tolerance**: Set `failureThreshold: 5` in helm values (default is 3 × 10s = 30s timeout)
 3. **Properly re-adopt prod kube-prometheus-stack into GitOps**: The prod deployment is orphaned; consider a full ArgoCD Application with the complete helm values
+4. **Remove deprecated `endpoints` resource**: ksm enumerates `endpoints` (deprecated since k8s 1.33) — removing it reduces API pressure at startup
 
 ## Related Incidents
 - Incident #262: First identification of PBS I/O storm root cause (prod cluster)
 - Incidents #300, #302, #303: Post-stagger fix, monit cluster during Pihanga window
 - Incident #923: Prod cluster BestEffort QoS fix applied
+- Incident #114: monit TargetDown, 2026-02-21 to 2026-02-24 (previously resolved manually)
+- Incident #349 (Finding #936): Feb 27 2026 — triggered AlertManager time_interval fix
 
 ## Related Runbooks
 - `infrastructure/pbs-operations.md` — PBS backup management
