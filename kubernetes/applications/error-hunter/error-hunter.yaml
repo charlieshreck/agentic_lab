@@ -2674,6 +2674,21 @@ data:
                     logger.info(f"Auto-resolved pulse-check incident #{row['id']}")
                     continue
 
+                # Auto-resolve Plex VM CPU alerts from Pulse.
+                # Plex legitimately spikes to 80-95%+ during transcoding, library scans,
+                # and media analysis. These are always transient (minutes) and self-heal.
+                # Real Plex failures are caught by plex_unreachable and Coroot checks.
+                if source == "pulse" and "cpu" in alert_name.lower() and "plex" in alert_name.lower():
+                    await pg_execute(
+                        """UPDATE incidents SET status = 'resolved', resolved_at = NOW(),
+                           resolution_summary = $2 WHERE id = $1""",
+                        row["id"],
+                        "Auto-resolved: Plex VM CPU spike from Pulse — expected transient behavior "
+                        "during transcoding/library scanning. Plex health monitored separately."
+                    )
+                    logger.info(f"Auto-resolved Plex CPU pulse incident #{row['id']}: {alert_name}")
+                    continue
+
                 if source == "coroot" and "@media" in alert_name:
                     app_name = alert_name.split("@")[0]
                     if app_name in MEDIA_RECREATE_APPS:
