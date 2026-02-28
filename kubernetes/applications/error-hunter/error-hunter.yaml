@@ -610,26 +610,30 @@ data:
         # Create unified estate work queue view
         await pg_execute("""
             CREATE OR REPLACE VIEW estate_work_queue AS
-            SELECT
-                'finding' as item_type, id, check_name as name, severity,
-                classification as priority, status, description,
-                first_seen as detected_at, last_seen as last_updated,
-                NULL::timestamptz as resolved_at, incident_id,
-                evidence::text as metadata
-            FROM error_hunter_findings
-            WHERE status NOT IN ('resolved', 'ignored')
-            UNION ALL
-            SELECT
-                'incident' as item_type, id, alert_name as name, severity,
-                CASE WHEN severity = 'critical' THEN 'fix_now' ELSE 'create_rule' END as priority,
-                status, description, detected_at, updated_at as last_updated,
-                resolved_at, NULL::integer as incident_id,
-                enrichment::text as metadata
-            FROM incidents
-            WHERE status NOT IN ('resolved', 'false_positive')
-            ORDER BY
-                CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END,
-                detected_at ASC
+            SELECT item_type, id, name, severity, priority, status, description,
+                   detected_at, last_updated, resolved_at, incident_id, metadata
+            FROM (
+                SELECT
+                    'finding' as item_type, id, check_name as name, severity,
+                    classification as priority, status, description,
+                    first_seen as detected_at, last_seen as last_updated,
+                    NULL::timestamptz as resolved_at, incident_id,
+                    evidence::text as metadata,
+                    CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END as severity_order
+                FROM error_hunter_findings
+                WHERE status NOT IN ('resolved', 'ignored', 'superseded', 'escalated')
+                UNION ALL
+                SELECT
+                    'incident' as item_type, id, alert_name as name, severity,
+                    CASE WHEN severity = 'critical' THEN 'fix_now' ELSE 'create_rule' END as priority,
+                    status, description, detected_at, updated_at as last_updated,
+                    resolved_at, NULL::integer as incident_id,
+                    enrichment::text as metadata,
+                    CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END as severity_order
+                FROM incidents
+                WHERE status NOT IN ('resolved', 'false_positive', 'closed', 'escalated')
+            ) combined
+            ORDER BY severity_order, detected_at ASC
         """)
 
         logger.info("init_db: schema extensions applied")
@@ -2761,7 +2765,7 @@ data:
                        EXTRACT(EPOCH FROM (NOW() - last_seen)) / 3600 AS age_hours
                 FROM error_hunter_findings
                 WHERE status = 'dispatched'
-                  AND last_seen < NOW() - INTERVAL '4 hours'
+                  AND last_seen < NOW() - INTERVAL '1 hour'
                 ORDER BY last_seen ASC
             """)
 

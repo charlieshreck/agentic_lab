@@ -49,7 +49,7 @@ FROM (
         evidence::text as metadata,
         CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END as severity_order
     FROM error_hunter_findings
-    WHERE status NOT IN ('resolved', 'ignored')
+    WHERE status NOT IN ('resolved', 'ignored', 'superseded', 'escalated')
     UNION ALL
     SELECT
         'incident' as item_type, id, alert_name as name, severity,
@@ -59,7 +59,7 @@ FROM (
         enrichment::text as metadata,
         CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END as severity_order
     FROM incidents
-    WHERE status NOT IN ('resolved', 'false_positive')
+    WHERE status NOT IN ('resolved', 'false_positive', 'closed', 'escalated')
 ) combined
 ORDER BY severity_order, detected_at ASC;
 
