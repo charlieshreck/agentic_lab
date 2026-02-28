@@ -1,9 +1,9 @@
 # Runbook: TrueNAS-Media Taranaki Pool Saturation (Orphaned Downloads)
 
-**Status**: Incident #385 (2026-02-28)
-**Severity**: Warning
-**Auto-trigger**: At 88% pool usage
-**Root Cause**: Orphaned Transmission downloads in `/mnt/Taranaki/Tarriance/hopuhopu_katoa`
+**Status**: Incidents #385, #386, #387 (2026-02-28, recurring)
+**Severity**: Warning (88%) / Critical (96%)
+**Auto-trigger**: At 88% pool usage (warning), 96% (critical)
+**Root Cause**: Orphaned Transmission downloads + SABnzbd import failures in `/mnt/Taranaki/Tarriance/hopuhopu_katoa`
 
 ## Problem
 
@@ -18,12 +18,27 @@ The Taranaki ZFS pool on **TrueNAS-Media** (VM 109, IP 10.10.0.100) fills to 88-
 
 | Component | What It Does | Issue |
 |-----------|--------------|-------|
-| Transmission | Downloads torrents to `/downloads` → `/mnt/Taranaki/Tarriance/hopuhopu_katoa` | No connection to Sonarr |
+| Transmission | Downloads torrents to `/downloads` → `/mnt/Taranaki/Tarriance/hopuhopu_katoa` | No connection to Sonarr — orphaned forever |
+| SABnzbd | Downloads usenet content to same staging area | Completed downloads not always cleaned after import |
 | Sonarr | Imports from SABnzbd only | Ignores Transmission downloads entirely |
-| Cleanuparr DownloadCleaner | Deletes files **after import** | No import events = no cleanup |
-| Tarriance (NFS) | Holds download folder | Becomes a black hole for orphaned files |
+| Radarr | Imports from SABnzbd | Sometimes gets stuck in `importBlocked` state |
+| Cleanuparr DownloadCleaner | Deletes files **after import** | No import events from Transmission = no cleanup |
+| Cleanuparr QueueCleaner | Removes failed queue items (4 strikes, every 20 min) | Handles stuck SABnzbd imports but slowly |
+| Tarriance (NFS) | Holds download folder | Only 230 GiB pool — too small for 4K content staging |
 
-**Result**: Pool usage: 0.09TB used / 0.22TB total = 41% baseline → 88-96% when new downloads arrive.
+**Result**: Pool usage: ~100GB baseline (orphaned files) → 88-96% when large downloads (especially 4K) arrive.
+
+### Pattern (observed 2026-02-28)
+1. SABnzbd grabs multiple items (Futurama S01 batch + Shawshank 4K + FernGully 2)
+2. Pool spikes to 88% → 96% during download phase
+3. Sonarr/Radarr import most files to Tongariro pool (large media storage)
+4. Some imports get stuck (`importBlocked`) — 1.4 GB FernGully 2 example
+5. Pool drops back to ~44% after import, but orphaned files persist
+6. Alert fires during spike, self-heals within hours
+
+### Self-Healing Pattern
+This alert **typically self-resolves** within 1-2 hours as arr apps import and move files.
+Only investigate if pool stays above 85% for more than 2 hours.
 
 ## Diagnosis
 
@@ -129,15 +144,21 @@ This allows Cleanuparr to track and delete imports normally.
 3. **Verify imports**: Ensure Sonarr/Radarr are importing correctly
 4. **Check logs**: Look for import failures that might block cleanup
 
+## Known Limitation
+
+**SSH to TrueNAS-Media is unreachable from Synapse LXC** (10.10.0.22). Port 22 is closed.
+Manual cleanup requires SSH from Ruapehu (10.10.0.10) which can reach the VM directly.
+
 ## Related Issues
 
-- **Incident #160**: Ruapeuh memory pressure (similar resource saturation pattern)
+- **Incident #160**: Ruapehu memory pressure (similar resource saturation pattern)
+- **Incidents #385, #386, #387**: Same-day recurrence (2026-02-28) — all self-healed
 - **Known issue (2026-02-23)**: TrueNAS-Media NFS permissions broken for some UIDs (may prevent imports)
 
 ## References
 
 - TrueNAS-Media: VMID 109, IP 10.10.0.100
 - Tarriance NFS: `10.40.0.10:/mnt/Taranaki/Tarriance/hopuhopu_katoa`
-- Cleanuparr: `cleanuparr-dd9bf5875-4r8w4` (media namespace, enabled)
+- Cleanuparr: media namespace, enabled (queue cleaner every 20 min, download cleaner hourly)
 - Sonarr: Uses SABnzbd (Usenet), NOT Transmission
-- Radarr: Unknown (check if also uses SABnzbd)
+- Radarr: Uses SABnzbd (confirmed 2026-02-28) — can get stuck in `importBlocked` state
