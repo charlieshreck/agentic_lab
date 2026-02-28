@@ -95,6 +95,7 @@ If you still receive an incident (#349 pattern), check:
 2. **Increase liveness probe tolerance**: Set `failureThreshold: 5` in helm values (default is 3 × 10s = 30s timeout)
 3. **Properly re-adopt prod kube-prometheus-stack into GitOps**: The prod deployment is orphaned; consider a full ArgoCD Application with the complete helm values
 4. **Remove deprecated `endpoints` resource**: ksm enumerates `endpoints` (deprecated since k8s 1.33) — removing it reduces API pressure at startup
+5. **Window boundary leak**: AlertManager re-evaluates suppressed alerts when `active_time_intervals` expires. If the RESOLVED notification fires at 05:00 UTC exactly, it escapes the null route and reaches alerting-pipeline. Fix: extend the window to 06:00 UTC, or suppress TargetDown kube-state-metrics globally (only alerting on extended outages > 30m via a separate alert)
 
 ## Related Incidents
 - Incident #262: First identification of PBS I/O storm root cause (prod cluster)
@@ -102,6 +103,7 @@ If you still receive an incident (#349 pattern), check:
 - Incident #923: Prod cluster BestEffort QoS fix applied
 - Incident #114: monit TargetDown, 2026-02-21 to 2026-02-24 (previously resolved manually)
 - Incident #349 (Finding #936): Feb 27 2026 — triggered AlertManager time_interval fix
+- Incident #348 (Finding #952): Feb 28 2026 — First incident after time_interval fix; alert leaked at 05:00 UTC window boundary (AlertManager re-evaluates suppressed alerts when window ends; pod was already healthy for 2h+ but resolved notification escaped to pipeline)
 
 ## Related Runbooks
 - `infrastructure/pbs-operations.md` — PBS backup management
