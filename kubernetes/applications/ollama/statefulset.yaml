@@ -24,7 +24,7 @@ spec:
     spec:
       initContainers:
       - name: model-puller
-        image: ollama/ollama:0.17.4
+        image: ollama/ollama:0.17.5
         command:
         - /bin/sh
         - -c
@@ -55,7 +55,7 @@ spec:
             memory: "2Gi"
       containers:
       - name: ollama
-        image: ollama/ollama:0.17.4-rocm
+        image: ollama/ollama:0.17.5-rocm
         ports:
         - containerPort: 11434
           name: http
