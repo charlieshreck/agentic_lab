@@ -201,6 +201,23 @@ If the agent reports an older version than hub:
 
 **Example (Feb 2026):** Finding reported Plex-VM at 0.18.3 but agent was actually at 0.18.4 (binary updated Feb 20). Resolved as stale.
 
+### Stale Finding Pattern (EXPECTED)
+
+Version drift findings for Plex-VM and other agents are frequently **stale/transient** and resolve automatically:
+
+**Why this happens:**
+1. Beszel agents auto-update when hub is deployed with a new version
+2. The finding reflects hub's last-known state (cached at polling time)
+3. Actual agent binary is usually already updated, but hub hasn't re-polled yet
+4. Next poll cycle (typically within minutes) confirms agent is at target version
+
+**Resolution approach:**
+- For **info/log_only** severity: Resolve as transient — no manual action needed
+- For **connectivity issues** (Gatus shows port down): Investigate SSH key mismatch (see BeszelAgentUpdateFailed runbook)
+- For **persistent** drift (>30 min): Check agent connectivity and attempt manual update
+
+**Related:** See `beszel-agent-update-failed.md` for SSH auth failures and systemic key management issues.
+
 ## Related
 
 - Coroot agents for Talos nodes: See `/home/monit_homelab/kubernetes/platform/coroot-agent-*/`
