@@ -4926,7 +4926,7 @@ spec:
               memory: "384Mi"
               cpu: "100m"
             limits:
-              memory: "768Mi"
+              memory: "1Gi"
               cpu: "500m"
           readinessProbe:
             httpGet:

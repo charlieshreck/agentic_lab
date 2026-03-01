@@ -510,6 +510,13 @@ data:
                 await check_mcp_service_health()
                 await run_threshold_checks()
                 await run_functional_checks()
+                # Cleanup expired alert cooldowns to prevent unbounded memory growth
+                cutoff = datetime.utcnow().timestamp() - (2 * ALERT_COOLDOWN_SECONDS)
+                expired = [k for k, v in raised_alerts.items() if v.timestamp() < cutoff]
+                for k in expired:
+                    del raised_alerts[k]
+                if expired:
+                    logger.info(f"Cleaned up {len(expired)} expired alert cooldowns")
             except Exception as e:
                 logger.error(f"Polling error: {e}")
             await asyncio.sleep(POLL_INTERVAL)
@@ -691,7 +698,7 @@ spec:
               memory: "128Mi"
               cpu: "50m"
             limits:
-              memory: "256Mi"
+              memory: "512Mi"
               cpu: "200m"
           readinessProbe:
             httpGet:
