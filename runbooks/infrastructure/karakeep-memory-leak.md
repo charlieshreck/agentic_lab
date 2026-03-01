@@ -119,7 +119,29 @@ resources:
 ```
 Then adjust: `NODE_OPTIONS: "--max-old-space-size=2048"`
 
+## Stale Alert Pattern (alertmanager re-fires after restart)
+
+**Symptom**: HomelabPodOOMKilled finding created hours or days after the OOM event, referencing an already-resolved incident.
+
+**Root cause**: `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}` persists in kube-state-metrics for old pods until Kubernetes garbage-collects them from etcd. Alertmanager keeps the alert "firing" during this window. When error-hunter polls alertmanager, it creates a new finding even though the pod has already been replaced.
+
+**Verification**: Check if the OOMKilled pod name in the alert differs from the currently-running pod:
+```bash
+kubectl get pods -l app=karakeep -n apps --context admin@homelab-prod
+# If current pod name differs from alert's pod label → stale fire
+```
+
+**Resolution**: Verify current pod is Running with 0 restarts → resolve as transient.
+
+**Alert rule fix (2026-03-01)**: The `HomelabPodOOMKilled` rule in `monit_homelab/kubernetes/platform/prometheus-rules/homelab-rules.yaml` was updated to join with `kube_pod_status_phase{phase="Running"}`, preventing stale fires for terminated/replaced pods.
+
 ## Incident History
+
+### Finding #966 / Incident #390 (2026-03-01)
+- **Alert**: HomelabPodOOMKilled — stale alertmanager fire from Feb 28 OOM kill
+- **Root cause**: Alert rule fired for old pod (`75cb844778-lpqxd`) metric persisting in kube-state-metrics after CronJob restart replaced the pod at 03:00 UTC
+- **Fix applied**: Updated alert rule expression to join with `kube_pod_status_phase{phase="Running"}`
+- **Current pod**: karakeep-7d84f87967-nsmg5, started 03:05 UTC, healthy at 401MB
 
 ### Incident #389 / Finding #965 (2026-03-01)
 - **Alert**: HomelabPodOOMKilled (karakeep)
