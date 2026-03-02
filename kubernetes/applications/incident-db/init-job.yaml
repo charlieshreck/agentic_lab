@@ -19,7 +19,7 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: init
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         command: ["/bin/sh", "/sql/init.sh"]
         env:
         - name: PGHOST
