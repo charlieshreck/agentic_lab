@@ -16,7 +16,7 @@ spec:
       serviceAccountName: reflector
       containers:
         - name: reflector
-          image: emberstack/kubernetes-reflector:7.1.288
+          image: emberstack/kubernetes-reflector:10.0.14
           env:
             - name: ES_Reflector__Extensions__Enabled
               value: "true"
