@@ -16,7 +16,7 @@ spec:
       serviceAccountName: traefik
       containers:
         - name: traefik
-          image: traefik:v2.11
+          image: traefik:v3.6
           args:
             - --providers.kubernetesingress
             - --providers.kubernetesingress.ingressEndpoint.publishedService=traefik/traefik
