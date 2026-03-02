@@ -33,7 +33,7 @@ spec:
               mountPath: /files
       containers:
         - name: vikunja
-          image: vikunja/vikunja:0.24.6
+          image: vikunja/vikunja:2.1.0
           ports:
             - containerPort: 3456
               name: http
