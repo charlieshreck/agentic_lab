@@ -2693,6 +2693,24 @@ data:
                     logger.info(f"Auto-resolved Plex CPU pulse incident #{row['id']}: {alert_name}")
                     continue
 
+                # Auto-resolve Synapse LXC CPU alerts from Pulse.
+                # Synapse (10.10.0.22) is the AI development host running Claude Code
+                # sessions, Tamar PWA, and MCP servers. It has only 2 vCPUs, so any
+                # active Claude patrol/analysis session easily spikes CPU to 80-95%+.
+                # These spikes are always transient (minutes) and self-heal immediately.
+                # The LXC host is healthy — this is expected workload, not a failure.
+                if source == "pulse" and "cpu" in alert_name.lower() and "synapse" in alert_name.lower():
+                    await pg_execute(
+                        """UPDATE incidents SET status = 'resolved', resolved_at = NOW(),
+                           resolution_summary = $2 WHERE id = $1""",
+                        row["id"],
+                        "Auto-resolved: Synapse LXC CPU spike from Pulse — expected transient behavior "
+                        "from Claude Code sessions running on a 2-vCPU host. Synapse health monitored "
+                        "separately via Tamar/Gatus service checks."
+                    )
+                    logger.info(f"Auto-resolved Synapse CPU pulse incident #{row['id']}: {alert_name}")
+                    continue
+
                 if source == "coroot" and "@media" in alert_name:
                     app_name = alert_name.split("@")[0]
                     if app_name in MEDIA_RECREATE_APPS:
