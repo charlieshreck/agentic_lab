@@ -23,7 +23,8 @@ screen -ls
 ```
 Expected screens:
 - `patrol` — rotating patrol agent sessions
-- `invest` — investmentology overnight pipeline
+- `invest` — investmentology overnight pipeline AND active development sessions
+- `albie` — Albie agent session (active AI sessions)
 - `backups` — backup monitoring
 - `troubleshooting` — may be stale if old (check age)
 
@@ -72,8 +73,16 @@ The patrol loop runs periodically. A CPU spike during 02:00-04:00 UTC is expecte
 
 ### If spike has cleared (transient)
 - Verify current CPU is normal
-- Note which sessions are long-running
+- Note which sessions are long-running (check "Context left until auto-compact: X%" in screen hardcopy — low % means large context, old session)
+- Check if same incident has been resolved before (recurring == structural issue)
 - Auto-resolve as transient
+
+### If same incident recurs multiple times
+This is NOT purely transient. The pattern needs a structural fix:
+1. Identify stale sessions (> 3 days old with > 100h cumulative CPU)
+2. Check available RAM (`free -h`) — if < 1.5GB available, memory pressure is contributing
+3. Recommend human cleanup of `troubleshooting` and `backups` screens
+4. Consider raising Synapse vCPU allocation (currently 2, Hikurangi N150 has 4 cores)
 
 ### If stale sessions identified
 Stale sessions accumulate memory (20-25% each) and cause occasional spikes.
@@ -104,14 +113,23 @@ screen -X -S troubleshooting quit
 ## Memory Pressure Warning
 
 Long-running `claude` processes consume ~20-25% RAM each (~1.2-1.5GB).
-With 6GB total and 2+ old claude processes, memory can get tight.
+With 5 concurrent claude processes (observed 2026-03-03), total RSS reached **3.6GB** out of 6GB.
 
 ```
 Free RAM check:
 free -h
 
-If available < 1GB, consider cleaning up old screen sessions.
+# Check all claude processes and their memory:
+ps aux | grep claude | grep -v grep | awk '{sum += $6} END {printf "Total RSS: %.1fGB\n", sum/1024/1024}'
+
+If available < 1.5GB, immediately clean up old screen sessions.
 ```
+
+Sessions consuming most memory (in observed order):
+- `invest` screen: ~1.4GB (active development OR pipeline run)
+- `troubleshooting` screen: ~1.4GB (stale after Feb24 - should be cleaned)
+- `albie` screen: ~430MB
+- `backups` screen: ~285MB (stale - API errored, waiting at "Context: 6%")
 
 ## Prevention
 
