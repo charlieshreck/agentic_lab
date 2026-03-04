@@ -83,3 +83,22 @@ mcp__infrastructure__kubectl_restart_deployment(deployment_name="error-hunter", 
 Finding #1054 was a false positive created at 02:04 on 2026-03-04, before the fix committed at 02:21. The pod (started March 1) was still running old code and produced one more false positive after the fix was committed. Restarting the pod activated the fix.
 
 **Rule**: After any error-hunter checker code change, always restart the deployment.
+
+## Additional Patterns (2026-03-04, finding #1002)
+
+### Season Pack = Multiple Queue Entries (Normal)
+When Sonarr tracks a season pack download, it creates **one queue entry per episode** in the season.
+A season with 12 episodes = 12 queue entries all with the same title and sizeleft. This is NOT duplication or a bug.
+- Mr.Robot S02 (12 eps) → 12 queue entries ✓
+- Do not alert on "N duplicate queue entries" for season packs.
+
+### `series: null` in media-mcp Response
+The media-mcp `sonarr_get_queue` tool returns `"series": null` for ALL queue items — it strips the series
+object from the response. This field is **not usable** for orphan detection via patrol. The `arr_queue_orphaned`
+check in error-hunter queries the real Sonarr API directly and is not affected, but patrol scripts should not
+rely on `series: null` to identify orphaned items.
+
+### Torrent Stopped at 0% for Completed Series
+If `transmission_list_torrents` shows a torrent `stopped` at 0% and the series is already 100% complete
+in Sonarr, this is benign — likely a re-grab that Sonarr queued but then stopped when it detected the
+series was already complete. No action needed; Sonarr will clean it up.
