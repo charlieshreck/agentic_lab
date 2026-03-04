@@ -78,52 +78,21 @@ zfs list Taranaki/Tarriance
 
 **Caution**: Ensure Sonarr/Radarr are not actively importing these files. Check logs first.
 
-### Option 2: Create Cleanup CronJob (Permanent)
+### Option 2: Cleanup CronJob (DEPLOYED — 2026-03-04)
 
-Deploy a Kubernetes CronJob to periodically delete old downloads:
+A daily CronJob is deployed that deletes files older than 7 days from the staging area.
 
-**File**: `/home/prod_homelab/kubernetes/applications/media/cleanup-tarriance-cronjob.yaml`
+**Status**: ✅ Deployed via GitOps (commit `e720d7c` in prod_homelab)
+**Files**:
+- `kubernetes/applications/media/cleanup-tarriance/cronjob.yaml`
+- `kubernetes/argocd-apps/applications/cleanup-tarriance-app.yaml`
+**Schedule**: Daily at 03:00 UTC
 
-```yaml
----
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: cleanup-tarriance-old-downloads
-  namespace: media
-spec:
-  # Run daily at 02:00 UTC (off-peak)
-  schedule: "0 2 * * *"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          restartPolicy: OnFailure
-          containers:
-          - name: cleanup
-            image: busybox:1.36
-            command:
-            - /bin/sh
-            - -c
-            - |
-              echo "Removing Tarriance downloads older than 7 days..."
-              find /downloads -mtime +7 -type f -exec rm -v {} \;
-              echo "Cleanup completed. Current usage:"
-              du -sh /downloads
-            volumeMounts:
-            - name: downloads
-              mountPath: /downloads
-          volumes:
-          - name: downloads
-            nfs:
-              server: 10.40.0.10
-              path: /mnt/Taranaki/Tarriance/hopuhopu_katoa
-```
-
-Deploy:
-```bash
-kubectl -C /home/prod_homelab apply -f kubernetes/applications/media/cleanup-tarriance-cronjob.yaml
-```
+The CronJob:
+1. Logs current usage before/after
+2. Deletes files (`-type f`) older than 7 days
+3. Removes empty directories left behind
+4. Uses UID/GID 3000 (same as arr apps)
 
 ### Option 3: Connect Transmission to Sonarr/Radarr (Architectural Fix)
 
@@ -181,6 +150,7 @@ Example: Pokemon Horizons S01 (85 episodes, ~55 GB) sat for 5+ weeks without imp
 - **Incident #160**: Ruapehu memory pressure (similar resource saturation pattern)
 - **Incidents #385, #386, #387**: Same-day recurrence (2026-02-28) — all self-healed
 - **Finding #1056** (2026-03-04): Pool hit 100%, all downloads stopped. Fixed by deleting Matrix (66GB) + Shaun (13GB) + Dirk Gently (12GB) — all confirmed imported. Pokemon Horizons (85 eps, ~55 GB) + Hostage S01 (7.9 GB) NOT imported — needs Sonarr investigation.
+- **Finding #1001** (2026-03-04): "A Shaun the Sheep Movie Farmageddon 2019 UHD Bluray 2160p" completed in Transmission but not cleaned by Cleanuparr (unlinked from Radarr queue). Pool was at 96% when detected. Systemic fix: cleanup CronJob deployed (commit `e720d7c`).
 - **Known issue (2026-02-23)**: TrueNAS-Media NFS permissions broken for some UIDs (may prevent imports)
 
 ## References
