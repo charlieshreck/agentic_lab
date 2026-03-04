@@ -2250,7 +2250,10 @@ data:
                             orphaned_items.append({"title": title, "queue_id": queue_id,
                                                    "download_client": item.get("downloadClient", "")})
                         # Then check generic stuck items (warning/failed status)
-                        elif status in ("warning", "failed") or tracked_status in ("warning", "error"):
+                        # Note: status=="warning" alone is insufficient — Radarr sets this for queued
+                        # items not yet actively downloading in Transmission (trackedDownloadStatus=="ok").
+                        # Only alert when Radarr's own tracking detects a real issue, or on hard failure.
+                        elif status == "failed" or tracked_status in ("warning", "error"):
                             findings.append(make_finding(
                                 "media", "arr_queue_stuck", "global",
                                 f"{app_name}/queue/{title[:50]}", "warning",
