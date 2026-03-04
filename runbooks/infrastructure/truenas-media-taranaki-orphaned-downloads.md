@@ -162,10 +162,32 @@ Example: Pokemon Horizons S01 (85 episodes, ~55 GB) sat for 5+ weeks without imp
 - **Incident #428** (2026-03-04): Pool spiked to 96%, self-healed to 57%. Root cause: massive download queue (15 Transmission torrents totaling ~294 GB + 16 SABnzbd items at 43 GB) exceeding pool capacity. SABnzbd auto-paused. Identified Huntarr `seasons_packs` mode and missing Cleanuparr stall/slow rules as contributing factors.
 - **Known issue (2026-02-23)**: TrueNAS-Media NFS permissions broken for some UIDs (may prevent imports)
 
+### Incident #431 Resolution (2026-03-04)
+
+**Pattern**: 14 items stuck in download queue (Mr.Robot S02 and Ghosts S01 duplicates, plus Bad Monkey/Black Mirror)
+
+**Fix Applied**:
+1. Resumed SABnzbd (was auto-paused due to queue overflow)
+2. Added Cleanuparr QueueCleaner `stallRules` (max 3600 seconds, 0% progress) via MCP
+3. Added Cleanuparr QueueCleaner `slowRules` (max 10 KB/s, min 1800 seconds) via MCP
+4. Triggered QueueCleaner job to clean up stalled downloads immediately
+
+**Results**:
+- SABnzbd resumed: downloads now proceeding
+- Duplicate queue entries removed (Mr.Robot, Ghosts cleared; Bad Monkey/Black Mirror cleaned up)
+- Taranaki pool utilization stable at 66.4% (not critical)
+
+**Systemic Impact**:
+- Cleanuparr now has automated stall/slow rules — prevents future stalled queue buildup
+- Prevents 939+ GB queue overflow (was enough to consume entire 230 GB pool multiple times over)
+- Going forward, stalled torrents (0% for >1 hour) auto-removed; slow downloads (<10 KB/s for >30 min) auto-removed
+
+**Outstanding Issue**: Huntarr `hunt_missing_mode: "seasons_packs"` still creates large packs (47 GB for Mr.Robot S02, 27 GB for Ghosts S01). Recommendation: change to `"episodes"` mode in Huntarr config (not yet deployed — requires manual Huntarr settings update via web UI or database edit due to API endpoint limitations).
+
 ## References
 
 - TrueNAS-Media: VMID 109, IP 10.10.0.100
 - Tarriance NFS: `10.40.0.10:/mnt/Taranaki/Tarriance/hopuhopu_katoa`
-- Cleanuparr: media namespace, enabled (queue cleaner every 20 min, download cleaner hourly)
+- Cleanuparr: media namespace, enabled (queue cleaner every 20 min, download cleaner hourly) — **NOW WITH stall/slow rules** (updated 2026-03-04)
 - Sonarr: Uses SABnzbd (Usenet), NOT Transmission
 - Radarr: Uses SABnzbd (confirmed 2026-02-28) — can get stuck in `importBlocked` state
