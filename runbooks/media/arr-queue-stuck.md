@@ -70,3 +70,16 @@ The `arr_queue_stuck` checker was updated to only fire when:
 
 Previously it fired on any `status == "warning"`, which included legitimately queued downloads.
 Commit: `4112b5a` in agentic_lab.
+
+## Post-Fix: Pod Restart Required
+
+**Important**: error-hunter runs from a ConfigMap-backed volume. When a checker fix is committed, ArgoCD updates the ConfigMap but the **running Python process does NOT reload**. The pod must be restarted to activate the fix:
+
+```bash
+# Via MCP
+mcp__infrastructure__kubectl_restart_deployment(deployment_name="error-hunter", namespace="ai-platform", cluster="agentic")
+```
+
+Finding #1054 was a false positive created at 02:04 on 2026-03-04, before the fix committed at 02:21. The pod (started March 1) was still running old code and produced one more false positive after the fix was committed. Restarting the pod activated the fix.
+
+**Rule**: After any error-hunter checker code change, always restart the deployment.
