@@ -109,9 +109,17 @@ This allows Cleanuparr to track and delete imports normally.
 ## Prevention
 
 1. **Monitor pool usage**: Alert fires at 85% threshold
-2. **Regular cleanup**: Run manual cleanup monthly OR deploy CronJob
+2. **Regular cleanup**: Cleanup CronJob deployed (Option 2) — deletes files >7 days old daily at 03:00 UTC
 3. **Verify imports**: Ensure Sonarr/Radarr are importing correctly
 4. **Check logs**: Look for import failures that might block cleanup
+
+### Contributing Factors (Identified 2026-03-04, Incident #428)
+
+**Huntarr `seasons_packs` mode**: Huntarr searches for missing content using `hunt_missing_mode: "seasons_packs"` in Sonarr. This grabs entire season packs (e.g., Mr. Robot S02 at 47 GB, Ghosts S01 at 27 GB) that can individually consume 20%+ of the 230 GB pool. Consider switching to `"episodes"` mode to grab individual episodes instead of full season packs.
+
+**No Cleanuparr stall rules**: Cleanuparr has no `stallRules` configured. Torrents that stall at 0% progress (e.g., Mr. Robot S02 stopped at 0%, Nightmare Before Christmas at 0.1%) sit in the queue indefinitely, consuming queue slots and preventing other downloads. Add stall rules to auto-remove torrents with no progress after a configurable period.
+
+**No Cleanuparr slow rules**: Cleanuparr has no `slowRules` configured. Extremely slow downloads (e.g., Hook 48 GB at 0 B/s) don't get cleaned up. Add slow rules to remove downloads below a minimum speed threshold after a grace period.
 
 ## SSH Access
 
@@ -151,6 +159,7 @@ Example: Pokemon Horizons S01 (85 episodes, ~55 GB) sat for 5+ weeks without imp
 - **Incidents #385, #386, #387**: Same-day recurrence (2026-02-28) — all self-healed
 - **Finding #1056** (2026-03-04): Pool hit 100%, all downloads stopped. Fixed by deleting Matrix (66GB) + Shaun (13GB) + Dirk Gently (12GB) — all confirmed imported. Pokemon Horizons (85 eps, ~55 GB) + Hostage S01 (7.9 GB) NOT imported — needs Sonarr investigation.
 - **Finding #1001** (2026-03-04): "A Shaun the Sheep Movie Farmageddon 2019 UHD Bluray 2160p" completed in Transmission but not cleaned by Cleanuparr (unlinked from Radarr queue). Pool was at 96% when detected. Systemic fix: cleanup CronJob deployed (commit `e720d7c`).
+- **Incident #428** (2026-03-04): Pool spiked to 96%, self-healed to 57%. Root cause: massive download queue (15 Transmission torrents totaling ~294 GB + 16 SABnzbd items at 43 GB) exceeding pool capacity. SABnzbd auto-paused. Identified Huntarr `seasons_packs` mode and missing Cleanuparr stall/slow rules as contributing factors.
 - **Known issue (2026-02-23)**: TrueNAS-Media NFS permissions broken for some UIDs (may prevent imports)
 
 ## References
