@@ -344,8 +344,13 @@ data:
                     sonarr_records = []
                 if not isinstance(radarr_records, list):
                     radarr_records = []
+                # Only flag real problems: trackedDownloadStatus warning/error, or hard failure.
+                # Exclude status=="warning"+trackedDownloadStatus=="ok" — that's Transmission queued (false positive).
                 stalled = [i for i in (sonarr_records + radarr_records)
-                           if isinstance(i, dict) and i.get("status", "").lower() in ("warning", "stalled")]
+                           if isinstance(i, dict) and (
+                               i.get("trackedDownloadStatus", "").lower() in ("warning", "error")
+                               or i.get("status", "").lower() == "failed"
+                           )]
                 if stalled:
                     await forward_to_langgraph(
                         alertname="MediaImportStalled",
