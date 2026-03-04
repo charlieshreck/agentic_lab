@@ -144,15 +144,43 @@ This allows Cleanuparr to track and delete imports normally.
 3. **Verify imports**: Ensure Sonarr/Radarr are importing correctly
 4. **Check logs**: Look for import failures that might block cleanup
 
-## Known Limitation
+## SSH Access
 
-**SSH to TrueNAS-Media is unreachable from Synapse LXC** (10.10.0.22). Port 22 is closed.
-Manual cleanup requires SSH from Ruapehu (10.10.0.10) which can reach the VM directly.
+SSH to TrueNAS-Media **IS accessible from Synapse LXC** (10.10.0.22):
+```bash
+ssh root@10.10.0.100  # TrueNAS-Media management IP
+```
+Note: The NFS interface is 10.40.0.10, but SSH management is on 10.10.0.100.
+
+## Critical: Full Pool (100%) — Transmission and SABnzbd Stop
+
+When pool hits **100%**, Transmission logs `No space left on device` and **stops ALL torrents**.
+SABnzbd also pauses globally. All arr queue items show "warning" status.
+
+**This does NOT self-heal** — completed downloads pile up without cleanup.
+
+Diagnosis pattern when pool is 100%:
+```bash
+ssh root@10.10.0.100
+du -sh /mnt/Taranaki/Tarriance/hopuhopu_katoa/*
+# radarr/ and tv-sonarr/ folders likely contain completed but not-cleaned downloads
+```
+
+Resolution (seen 2026-03-04):
+1. Check which completed downloads are already imported to Tongariro library
+2. Delete imported files from radarr/ and tv-sonarr/ (safe if in library AND not seeding)
+3. Resume SABnzbd via MCP: `mcp__media__sabnzbd_resume_queue`
+4. Resume all Transmission torrents via MCP: `mcp__media__transmission_resume_torrent` for each ID
+
+**Sonarr Import Failure Pattern**: Items in `tv-sonarr/` NOT in Tongariro library = Sonarr failed to import.
+These files must NOT be deleted until Sonarr imports them. Investigate Sonarr logs.
+Example: Pokemon Horizons S01 (85 episodes, ~55 GB) sat for 5+ weeks without import (found 2026-03-04).
 
 ## Related Issues
 
 - **Incident #160**: Ruapehu memory pressure (similar resource saturation pattern)
 - **Incidents #385, #386, #387**: Same-day recurrence (2026-02-28) — all self-healed
+- **Finding #1056** (2026-03-04): Pool hit 100%, all downloads stopped. Fixed by deleting Matrix (66GB) + Shaun (13GB) + Dirk Gently (12GB) — all confirmed imported. Pokemon Horizons (85 eps, ~55 GB) + Hostage S01 (7.9 GB) NOT imported — needs Sonarr investigation.
 - **Known issue (2026-02-23)**: TrueNAS-Media NFS permissions broken for some UIDs (may prevent imports)
 
 ## References
