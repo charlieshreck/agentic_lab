@@ -216,6 +216,8 @@ Version drift findings for Plex-VM and other agents are frequently **stale/trans
 - For **connectivity issues** (Gatus shows port down): Investigate SSH key mismatch (see BeszelAgentUpdateFailed runbook)
 - For **persistent** drift (>30 min): Check agent connectivity and attempt manual update
 
+**Recurrence Pattern (2026-03):** Finding #960 (2026-03-01) and #1067 (2026-03-04) both reported Plex-VM version drift. Both were transient. **Improvement needed:** Finding detection should implement 30-min cooldown or suppression filter to prevent duplicate version drift findings during normal auto-update windows. The finding system should not re-trigger the same alert within N minutes of previous resolution to reduce patrol noise.
+
 **Related:** See `beszel-agent-update-failed.md` for SSH auth failures and systemic key management issues.
 
 ## Related
