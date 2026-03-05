@@ -87,40 +87,43 @@ Look for `hunt_missing_mode: "seasons_packs"` — this should be `"episodes"`.
 ```
 mcp__media__huntarr_update_settings(app="sonarr", settings={"hunt_missing_mode": "episodes", "upgrade_mode": "episodes"})
 ```
-**Status 2026-03-04**: MCP fix deployed (commit `1f94cbc` in mcp-servers), awaiting pod restart.
+**Status 2026-03-05**: Huntarr Sonarr switched to `episodes` mode. Prevents season packs
+from overwhelming the 230GB Taranaki pool.
 
-### Cleanuparr Stall/Slow Rules Not Configured
-Cleanuparr can automatically remove stalled/slow downloads but the rules are separate resources:
-- `POST /api/queue-rules/stall` — stall rules (download stuck at same % for N checks)
-- `POST /api/queue-rules/slow` — slow rules (download speed below threshold)
+### Cleanuparr Stall/Slow Rules
 
-**Add stall rule** (once media-mcp redeployed):
-```
-mcp__media__cleanuparr_create_stall_rule(
-    name="Stalled Public",
-    max_strikes=3,          # 3 × 5min = 15min before removal
-    privacy_type="Public",  # Don't auto-remove private tracker torrents
-    min_completion_percentage=0,
-    max_completion_percentage=100,
-    reset_strikes_on_progress=True
-)
+**IMPORTANT**: Stall and slow rules live at **separate API endpoints**, NOT inside the main
+`/api/configuration/queue_cleaner` body. The `stallRules: []` in the main GET is a known API quirk.
+Rules are managed via: `GET/POST /api/queue-rules/stall` and `GET/POST /api/queue-rules/slow`
+
+**Check current rules** (direct API requires `Accept: application/json` header):
+```bash
+CLEANUPARR_KEY="17df8de375fce3dde15e8422f431202e1ec74f362856bafc79dd4c17f8ee3815"
+curl -s https://cleanuparr.kernow.io/api/queue-rules/stall -H "X-Api-Key: $CLEANUPARR_KEY" -H "Accept: application/json"
+curl -s https://cleanuparr.kernow.io/api/queue-rules/slow -H "X-Api-Key: $CLEANUPARR_KEY" -H "Accept: application/json"
 ```
 
-**Add slow rule**:
+**Status 2026-03-05**: Rules exist ("Stuck" stall + "Slow coach" slow, both Public, 3 strikes).
+These are persistent and survive Cleanuparr restarts.
+
+**Add stall rule** (if missing):
 ```
-mcp__media__cleanuparr_create_slow_rule(
-    name="Slow Public",
-    min_speed="10KB/s",
-    max_strikes=3,
-    privacy_type="Public",
-    reset_strikes_on_progress=True
-)
+mcp__media__cleanuparr_create_stall_rule(name="Stuck", max_strikes=3, privacy_type="Public")
 ```
 
-### Cleanuparr Failed Import (Requires Download Client Config)
-Cleanuparr's `failedImport.maxStrikes >= 3` feature auto-removes failed imports but requires a
-download client (Transmission/SABnzbd) to be configured in Cleanuparr first. As of 2026-03-04,
-no download client is configured (`downloadClient: {}`). This feature is not yet available.
+**Add slow rule** (if missing):
+```
+mcp__media__cleanuparr_create_slow_rule(name="Slow coach", min_speed="10KB", max_strikes=3, privacy_type="Public")
+```
+
+### Cleanuparr MCP API Notes (Fixed 2026-03-05, commit `8d13e3f`)
+- `Accept: application/json` is **required** — without it, Caddy returns Angular SPA HTML
+- `PUT /api/configuration/queue_cleaner` returns 400 if `id` is in the body (even though GET returns it)
+- Both bugs fixed in media-mcp — `cleanuparr_update_queue_cleaner_config` now strips `id`
+
+### Cleanuparr Failed Import (Download Client Config)
+Only Transmission is configured in Cleanuparr. SABnzbd Usenet downloads are not directly connected.
+Stall/slow rules still work for Usenet because Cleanuparr detects stalls via arr queue state.
 
 ## Resolution Actions
 
