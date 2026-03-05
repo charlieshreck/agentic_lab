@@ -2714,6 +2714,38 @@ data:
                     logger.info(f"Auto-resolved Synapse CPU pulse incident #{row['id']}: {alert_name}")
                     continue
 
+                # Auto-resolve Haute Banque LXC CPU alerts from Pulse.
+                # HB (10.10.0.101) runs Claude + Gemini CLI agents for overnight
+                # pipeline analysis. 4 vCPUs, 8GB RAM — high CPU is expected during
+                # agent runs and should not trigger remediation or resource changes.
+                if source == "pulse" and "cpu" in alert_name.lower() and "haute" in alert_name.lower():
+                    await pg_execute(
+                        """UPDATE incidents SET status = 'resolved', resolved_at = NOW(),
+                           resolution_summary = $2 WHERE id = $1""",
+                        row["id"],
+                        "Auto-resolved: Haute Banque LXC CPU spike from Pulse — expected transient "
+                        "behavior from Claude/Gemini CLI agent sessions. 4 vCPUs allocated, high CPU "
+                        "during overnight pipeline runs is normal. No action needed."
+                    )
+                    logger.info(f"Auto-resolved HB CPU pulse incident #{row['id']}: {alert_name}")
+                    continue
+
+                # Auto-resolve Hikurangi host CPU alerts from Pulse.
+                # Hikurangi hosts 4 LXCs (Synapse, HB, tamar-test, capture-creature)
+                # on 4 physical cores. Overcommitted by design — CPU spikes during
+                # agent runs are expected and do not require remediation.
+                if source == "pulse" and "cpu" in alert_name.lower() and "hikurangi" in alert_name.lower():
+                    await pg_execute(
+                        """UPDATE incidents SET status = 'resolved', resolved_at = NOW(),
+                           resolution_summary = $2 WHERE id = $1""",
+                        row["id"],
+                        "Auto-resolved: Hikurangi host CPU spike from Pulse — expected behavior. "
+                        "4 LXCs overcommitted on 4 physical cores by design. CPU spikes during "
+                        "Claude/Gemini agent runs are transient and self-heal."
+                    )
+                    logger.info(f"Auto-resolved Hikurangi CPU pulse incident #{row['id']}: {alert_name}")
+                    continue
+
                 if source == "coroot" and "@media" in alert_name:
                     app_name = alert_name.split("@")[0]
                     if app_name in MEDIA_RECREATE_APPS:
