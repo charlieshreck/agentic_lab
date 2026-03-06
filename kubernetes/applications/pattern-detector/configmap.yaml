@@ -37,7 +37,6 @@ data:
 
     # Configuration
     QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
-    MATRIX_WEBHOOK_URL = os.getenv("MATRIX_WEBHOOK_URL", "")
     LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://langgraph:8000")
     DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -70,22 +69,6 @@ data:
                 return response.json()["embedding"]["values"]
             print(f"[WARN] Embedding API returned {response.status_code}")
             return []
-
-
-    async def notify_matrix(message: str):
-        """Send notification to Matrix (if configured)."""
-        if not MATRIX_WEBHOOK_URL or DRY_RUN:
-            print(f"[NOTIFY] {message}")
-            return
-
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(
-                    MATRIX_WEBHOOK_URL,
-                    json={"body": message}
-                )
-        except Exception as e:
-            print(f"[WARN] Failed to notify Matrix: {e}")
 
 
     def get_recent_events(hours: int = 24, event_type: Optional[str] = None) -> List[dict]:
@@ -484,7 +467,7 @@ data:
                 summary += f"- {f['suggestion']}\n"
             if len(actionable) > 5:
                 summary += f"... and {len(actionable) - 5} more"
-            await notify_matrix(summary)
+            print(f"[NOTIFY] {summary}")
 
         print("\n" + "=" * 60)
         print(f"Completed at: {datetime.now().isoformat()}")

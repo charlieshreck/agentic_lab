@@ -88,7 +88,7 @@ Use these standard names across all services for consistency:
 | `home` | Home Assistant, Tasmota, UniFi, Homepage | home-mcp |
 | `media` | Plex, Sonarr, Radarr, Transmission, etc. | media-mcp |
 | `external` | GitHub, OpenRouter, Gemini, SearXNG | external-mcp |
-| `platform` | ArgoCD, Matrix, OpenWebUI, LiteLLM | (no dedicated MCP) |
+| `platform` | ArgoCD, OpenWebUI, LiteLLM | (no dedicated MCP) |
 | `backups` | Garage S3, Backrest, Velero credentials | (no MCP) |
 
 ---
@@ -288,9 +288,6 @@ Cross-cutting platform services.
 /platform/
 ├── argocd/
 │   └── ADMIN_PASSWORD
-├── matrix/
-│   ├── HOST
-│   └── PASSWORD
 ├── openwebui/
 │   └── SECRET_KEY
 ├── litellm/

@@ -20,8 +20,8 @@ All services exposed via NodePort on the agentic cluster (10.20.0.40).
 
 | Port | Service | Description |
 |------|---------|-------------|
-| 30167 | conduit | Matrix/Conduit server |
-| 30168 | matrix-bot | Matrix bot webhook |
+| 30167 | ~~conduit~~ | RETIRED — Matrix/Conduit removed |
+| 30168 | ~~matrix-bot~~ | RETIRED — Matrix removed |
 | 30200 | ~~claude-agent~~ | RETIRED — decommissioned |
 | 30201 | ~~claude-validator~~ | RETIRED — decommissioned |
 | 30202 | ~~gemini-agent~~ | RETIRED — decommissioned |
