@@ -90,7 +90,7 @@ data:
 
     # Routine CronJob prefixes — failures classified as log_only, not fix_now
     ROUTINE_CRONJOB_PREFIXES = (
-        "configarr-", "huntarr-start-", "huntarr-stop-", "mount-canary-writer-",
+        "configarr-", "mount-canary-writer-",
         "matter-hub-health-", "renovate-", "silverbullet-outline-sync-",
         "alert-forwarder-", "entity-enrichment-", "graph-enrichment-",
         "graph-sync-", "neo4j-backup-", "postgresql-backup-", "qdrant-backup-",
@@ -103,7 +103,7 @@ data:
     # These are redundant — pod/deployment checks catch real failures.
     # See: agentic_lab/runbooks/media/coroot-recreate-strategy-alerts.md
     MEDIA_RECREATE_APPS = frozenset({
-        "cleanuparr", "configarr", "huntarr", "maintainerr", "notifiarr",
+        "cleanuparr", "configarr", "maintainerr", "notifiarr",
         "overseerr", "prowlarr", "radarr", "recomendarr", "sabnzbd",
         "sonarr", "tautulli", "transmission",
     })
@@ -381,7 +381,6 @@ data:
         "cleanuparr_get_status": MEDIA_MCP_URL,
         "sabnzbd_get_queue": MEDIA_MCP_URL,
         "sabnzbd_get_history": MEDIA_MCP_URL,
-        "huntarr_get_status": MEDIA_MCP_URL,
     }
 
     def route_tool_to_mcp(tool_name: str) -> str:
@@ -440,7 +439,6 @@ data:
         {"type": "function", "function": {"name": "cleanuparr_get_status", "description": "Get Cleanuparr system status", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "sabnzbd_get_queue", "description": "Get SABnzbd download queue", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "sabnzbd_get_history", "description": "Get SABnzbd download history", "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "description": "Number of history items"}}}}},
-        {"type": "function", "function": {"name": "huntarr_get_status", "description": "Get Huntarr status", "parameters": {"type": "object", "properties": {}}}},
     ]
 
     # ========================================================================
@@ -2422,23 +2420,6 @@ data:
                 ))
         except Exception as e:
             logger.error(f"Cleanuparr check error: {e}")
-
-        # --- Huntarr health (scheduled 00:00-08:00 UTC only) ---
-        try:
-            utc_hour = datetime.now(timezone.utc).hour
-            # Huntarr runs 00:00-08:00 UTC via CronJob scale schedule
-            if 0 <= utc_hour < 8:
-                result = await call_mcp_tool_safe(media, "huntarr_get_status")
-                if result.get("error") or result.get("_error"):
-                    findings.append(make_finding(
-                        "media", "media_tool_unhealthy", "global",
-                        "huntarr/health", "warning",
-                        f"Huntarr unreachable during scheduled uptime (00-08 UTC): {str(result.get('error', result.get('message', '')))[:100]}",
-                        {"error": str(result.get("error", result.get("message", "")))[:200],
-                         "note": "Huntarr should be running 00:00-08:00 UTC"},
-                    ))
-        except Exception as e:
-            logger.error(f"Huntarr check error: {e}")
 
         return findings
 
