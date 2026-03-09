@@ -32,6 +32,12 @@ data:
     LANGGRAPH_URL = os.environ.get("LANGGRAPH_URL", "http://langgraph:8000")
     A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
 
+    # Arr service URLs and API keys (for direct health endpoint polling)
+    SONARR_URL = os.environ.get("SONARR_URL", "https://sonarr.kernow.io")
+    SONARR_API_KEY = os.environ.get("SONARR_API_KEY", "")
+    RADARR_URL = os.environ.get("RADARR_URL", "https://radarr.kernow.io")
+    RADARR_API_KEY = os.environ.get("RADARR_API_KEY", "")
+
     # Consolidated domain MCP endpoints
     MCP_SERVERS = {
         "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
@@ -481,6 +487,57 @@ data:
         except Exception as e:
             logger.error(f"ArgoCD sync check error: {e}")
 
+        # 8. Arr Health — Sonarr/Radarr built-in health checks
+        # Indexer failures are deprioritized to info severity (noisy).
+        await check_arr_health()
+
+    async def check_arr_health():
+        """Poll Sonarr and Radarr /api/v3/health endpoints for issues.
+        Indexer-related sources are deprioritized to 'info' to avoid noise."""
+        INDEXER_SOURCES = {
+            "IndexerStatusCheck", "IndexerLongTermStatusCheck",
+            "IndexerRssCheck", "IndexerSearchCheck",
+            "IndexerDownloadClientCheck",
+        }
+        arr_services = []
+        if SONARR_URL and SONARR_API_KEY:
+            arr_services.append(("Sonarr", SONARR_URL, SONARR_API_KEY))
+        if RADARR_URL and RADARR_API_KEY:
+            arr_services.append(("Radarr", RADARR_URL, RADARR_API_KEY))
+
+        for svc_name, url, api_key in arr_services:
+            try:
+                async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                    resp = await client.get(
+                        f"{url}/api/v3/health",
+                        headers={"X-Api-Key": api_key}
+                    )
+                    if resp.status_code != 200:
+                        logger.warning(f"{svc_name} health endpoint returned {resp.status_code}")
+                        continue
+                    issues = resp.json()
+                    if not isinstance(issues, list):
+                        continue
+                    for issue in issues:
+                        source = issue.get("source", "")
+                        msg = issue.get("message", "Unknown issue")
+                        issue_type = issue.get("type", "warning").lower()
+                        # Deprioritize indexer failures to info
+                        if source in INDEXER_SOURCES:
+                            severity = "info"
+                        elif issue_type == "error":
+                            severity = "warning"
+                        else:
+                            severity = "info"
+                        await forward_to_langgraph(
+                            alertname=f"{svc_name}HealthCheck",
+                            severity=severity,
+                            description=f"{svc_name}: {msg} (source: {source})",
+                            source="alerting-pipeline"
+                        )
+            except Exception as e:
+                logger.error(f"{svc_name} health check error: {e}")
+
     async def check_mcp_service_health():
         """Check if MCP services are reachable."""
         for name, url in MCP_SERVERS.items():
@@ -691,6 +748,20 @@ spec:
                 secretKeyRef:
                   name: a2a-api-token
                   key: TOKEN
+            - name: SONARR_URL
+              value: "https://sonarr.kernow.io"
+            - name: SONARR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alerting-pipeline-sonarr
+                  key: API_KEY
+            - name: RADARR_URL
+              value: "https://radarr.kernow.io"
+            - name: RADARR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alerting-pipeline-radarr
+                  key: API_KEY
             - name: POLL_INTERVAL
               value: "300"  # 5 minutes
           volumeMounts:
@@ -756,3 +827,49 @@ spec:
                 name: alerting-pipeline
                 port:
                   number: 8000
+---
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: alerting-pipeline-sonarr
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  resyncInterval: 300
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /media/sonarr
+  managedSecretReference:
+    secretName: alerting-pipeline-sonarr
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
+---
+apiVersion: secrets.infisical.com/v1alpha1
+kind: InfisicalSecret
+metadata:
+  name: alerting-pipeline-radarr
+  namespace: ai-platform
+spec:
+  hostAPI: https://app.infisical.com/api
+  resyncInterval: 300
+  authentication:
+    universalAuth:
+      credentialsRef:
+        secretName: universal-auth-credentials
+        secretNamespace: infisical-operator-system
+      secretsScope:
+        projectSlug: prod-homelab-y-nij
+        envSlug: prod
+        secretsPath: /media/radarr
+  managedSecretReference:
+    secretName: alerting-pipeline-radarr
+    secretNamespace: ai-platform
+    secretType: Opaque
+    creationPolicy: Owner
