@@ -35,7 +35,18 @@ kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.status.conditions[*]}'
 
 ## Common Causes
 
-### 1. Pending - PVC Not Bound (Most Common)
+### 1. Pending/ContainerCreating - Stale VolumeAttachment (Most Common on Prod)
+
+**Symptoms:**
+- Pod phase: `Pending` or `ContainerCreating`
+- Event: `Multi-Attach error for volume "pvc-xxx" Volume is already exclusively attached to one node`
+- Pod scheduled to different node than where volume was previously attached
+
+**See dedicated runbook:** `runbooks/kubernetes/mayastor-stale-volume-attachment.md`
+
+**Quick fix:** Delete the stale VolumeAttachment resource, then delete the stuck pod.
+
+### 2. Pending - PVC Not Bound
 
 **Symptoms:**
 - Pod phase: `Pending`
@@ -83,7 +94,7 @@ kubectl delete deployment <deployment-name> -n <namespace>
 kubectl delete pvc <pvc-name> -n <namespace>
 ```
 
-### 2. Pending - Insufficient Resources
+### 3. Pending - Insufficient Resources
 
 **Symptoms:**
 - Pod phase: `Pending`
@@ -106,7 +117,7 @@ kubectl edit deployment <deployment-name> -n <namespace>
 # Option 3: Add nodes (long-term)
 ```
 
-### 3. Pending - Node Selector/Affinity Mismatch
+### 4. Pending - Node Selector/Affinity Mismatch
 
 **Symptoms:**
 - Pod phase: `Pending`
@@ -122,7 +133,7 @@ kubectl get nodes --show-labels
 **Resolution:**
 - Update node labels or pod selectors
 
-### 4. CrashLoopBackOff
+### 5. CrashLoopBackOff
 
 **Symptoms:**
 - Pod phase: `Running` but not ready
@@ -140,7 +151,7 @@ kubectl logs <pod-name> -n <namespace> --previous
 - Check environment variables, secrets, configs
 - Verify dependencies are available
 
-### 5. Failing Readiness Probe
+### 6. Failing Readiness Probe
 
 **Symptoms:**
 - Pod phase: `Running`
@@ -158,7 +169,7 @@ kubectl logs <pod-name> -n <namespace>
 - Increase probe timeout/threshold
 - Check dependencies the health check validates
 
-### 6. Orphaned/Stale Pod
+### 7. Orphaned/Stale Pod
 
 **Symptoms:**
 - Pod from old ReplicaSet

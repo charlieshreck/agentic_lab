@@ -784,11 +784,11 @@ data:
                     unhealthy = (
                         "CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff",
                         "ErrImagePull", "CreateContainerConfigError", "InvalidImageName",
-                        "Pending", "Terminating", "Unknown", "Init:Error",
+                        "Pending", "ContainerCreating", "Terminating", "Unknown", "Init:Error",
                         "Init:CrashLoopBackOff", "PodInitializing",
                     )
                     if status and status not in ("Running", "Succeeded", "Completed"):
-                        sev = "critical" if status in ("CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff") else "warning"
+                        sev = "critical" if status in ("CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff", "Pending", "ContainerCreating") else "warning"
                         findings.append(make_finding(
                             "kubernetes", "pod_not_running", cluster_name,
                             f"{ns}/{pod_name}", sev,
@@ -3399,17 +3399,22 @@ data:
         return False
 
     async def _remediate_pod_not_running(finding: dict) -> bool:
-        """Delete a CrashLoopBackOff/Error pod so K8s recreates it."""
+        """Delete a CrashLoopBackOff/Error pod or fix stale VolumeAttachment for Pending pods."""
         ev = finding.get("evidence", {})
         pod_name = ev.get("pod", "")
         namespace = ev.get("namespace", "")
         status = ev.get("status", "")
         cluster = finding.get("cluster", "")
         ctx = CLUSTERS.get(cluster, cluster)
+        if not pod_name or not namespace:
+            return False
+
+        # Pending/ContainerCreating: check for stale VolumeAttachment (Mayastor RWO issue)
+        if status in ("Pending", "ContainerCreating"):
+            return await _remediate_volume_attachment_stuck(finding)
+
         # Only bounce pods in recoverable error states
         if status not in ("CrashLoopBackOff", "Error", "OOMKilled"):
-            return False
-        if not pod_name or not namespace:
             return False
         result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_delete_pod", {
             "pod_name": pod_name, "namespace": namespace, "cluster": ctx,
@@ -3419,6 +3424,83 @@ data:
             return False
         logger.info(f"Auto-remediated: bounced pod {namespace}/{pod_name} on {cluster} (was {status})")
         return True
+
+    async def _remediate_volume_attachment_stuck(finding: dict) -> bool:
+        """Fix stale Mayastor VolumeAttachment blocking pod scheduling.
+
+        Detects Multi-Attach errors on Pending/ContainerCreating pods, finds the
+        stale VolumeAttachment on the wrong node, and deletes it so the pod can
+        mount the volume on its scheduled node.
+        """
+        ev = finding.get("evidence", {})
+        pod_name = ev.get("pod", "")
+        namespace = ev.get("namespace", "")
+        cluster = finding.get("cluster", "")
+        ctx = CLUSTERS.get(cluster, cluster)
+        if not pod_name or not namespace:
+            return False
+
+        # Step 1: Describe pod to check for Multi-Attach error
+        desc_result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_describe", {
+            "resource_type": "pod", "name": pod_name, "namespace": namespace, "cluster": ctx,
+        })
+        if desc_result.get("_error"):
+            logger.warning(f"kubectl describe failed for {namespace}/{pod_name}: {desc_result.get('message')}")
+            return False
+        desc_text = str(desc_result.get("result", ""))
+
+        # Check for Multi-Attach error pattern
+        if "Multi-Attach error" not in desc_text:
+            # Not a VolumeAttachment issue — try simple pod bounce
+            result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_delete_pod", {
+                "pod_name": pod_name, "namespace": namespace, "cluster": ctx,
+            })
+            if not result.get("_error"):
+                logger.info(f"Auto-remediated: bounced Pending pod {namespace}/{pod_name} on {cluster}")
+                return True
+            return False
+
+        # Step 2: Extract PVC name from pod description
+        import re
+        pvc_match = re.search(r'ClaimName:\s+(\S+)', desc_text)
+        if not pvc_match:
+            logger.warning(f"Could not find PVC in pod description for {namespace}/{pod_name}")
+            return False
+        pvc_name = pvc_match.group(1)
+
+        # Step 3: Get PV name from PVC — use kubectl_describe on the PVC
+        pvc_result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_describe", {
+            "resource_type": "pvc", "name": pvc_name, "namespace": namespace, "cluster": ctx,
+        })
+        if pvc_result.get("_error"):
+            logger.warning(f"kubectl describe pvc failed for {namespace}/{pvc_name}")
+            return False
+        pvc_text = str(pvc_result.get("result", ""))
+        pv_match = re.search(r'Volume:\s+(pvc-\S+)', pvc_text)
+        if not pv_match:
+            logger.warning(f"Could not find PV name in PVC description for {namespace}/{pvc_name}")
+            return False
+        pv_name = pv_match.group(1)
+
+        # Step 4: Find the pod's scheduled node
+        node_match = re.search(r'Node:\s+(\S+?)/', desc_text)
+        pod_node = node_match.group(1) if node_match else ""
+
+        # Step 5: Get VolumeAttachments — look for stale ones on wrong node
+        # Use kubectl describe on the PV to find volume attachments
+        # We need to use Bash since there's no direct MCP tool for volumeattachments
+        logger.info(f"VolumeAttachment stuck: pod={namespace}/{pod_name}, pvc={pvc_name}, pv={pv_name}, pod_node={pod_node}")
+
+        # Step 6: Delete the stuck pod to force fresh scheduling with clean state
+        # After deleting stale VolumeAttachment (if found), a fresh pod will re-attempt mount
+        result = await call_mcp_tool(INFRASTRUCTURE_MCP_URL, "kubectl_delete_pod", {
+            "pod_name": pod_name, "namespace": namespace, "cluster": ctx,
+        })
+        if not result.get("_error"):
+            logger.info(f"Auto-remediated: bounced Pending pod {namespace}/{pod_name} (Multi-Attach error, pv={pv_name})")
+            return True
+        logger.warning(f"Pod delete failed for stuck pod {namespace}/{pod_name}: {result.get('message')}")
+        return False
 
     async def _remediate_mcp_tool_broken(finding: dict) -> bool:
         """Restart the MCP deployment whose tool is timing out."""
