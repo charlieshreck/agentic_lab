@@ -381,6 +381,7 @@ data:
         "cleanuparr_get_status": MEDIA_MCP_URL,
         "sabnzbd_get_queue": MEDIA_MCP_URL,
         "sabnzbd_get_history": MEDIA_MCP_URL,
+        "sabnzbd_get_warnings": MEDIA_MCP_URL,
     }
 
     def route_tool_to_mcp(tool_name: str) -> str:
@@ -2344,7 +2345,7 @@ data:
         except Exception as e:
             logger.error(f"Transmission check error: {e}")
 
-        # --- SABnzbd active queue ---
+        # --- SABnzbd active queue + disk space ---
         try:
             result = await call_mcp_tool_safe(media, "sabnzbd_get_queue")
             slots = result.get("slots", result.get("items", result.get("result", [])))
@@ -2361,8 +2362,48 @@ data:
                             f"SABnzbd download {status}: {name}",
                             {"name": name, "status": status},
                         ))
+            # Check disk space from SABnzbd queue response
+            diskspace_free = result.get("diskspace1", "")
+            diskspace_total = result.get("diskspacetotal1", "")
+            if diskspace_free and diskspace_total:
+                try:
+                    free_gb = float(diskspace_free)
+                    total_gb = float(diskspace_total)
+                    if total_gb > 0:
+                        used_pct = ((total_gb - free_gb) / total_gb) * 100
+                        if used_pct >= 90:
+                            findings.append(make_finding(
+                                "media", "download_disk_critical", "global",
+                                "sabnzbd/disk-space", "critical",
+                                f"SABnzbd download volume {used_pct:.0f}% full ({free_gb:.1f}GB free of {total_gb:.0f}GB)",
+                                {"free_gb": free_gb, "total_gb": total_gb, "used_pct": round(used_pct, 1)},
+                            ))
+                        elif used_pct >= 80:
+                            findings.append(make_finding(
+                                "media", "download_disk_warning", "global",
+                                "sabnzbd/disk-space", "warning",
+                                f"SABnzbd download volume {used_pct:.0f}% full ({free_gb:.1f}GB free of {total_gb:.0f}GB)",
+                                {"free_gb": free_gb, "total_gb": total_gb, "used_pct": round(used_pct, 1)},
+                            ))
+                except (ValueError, ZeroDivisionError):
+                    pass
         except Exception as e:
             logger.error(f"SABnzbd queue check error: {e}")
+
+        # --- SABnzbd warnings (disk full, connection errors) ---
+        try:
+            warnings = await call_mcp_tool_safe(media, "sabnzbd_get_warnings")
+            if isinstance(warnings, list):
+                disk_warnings = [w for w in warnings if isinstance(w, str) and ("disk" in w.lower() or "space" in w.lower() or "full" in w.lower())]
+                if disk_warnings:
+                    findings.append(make_finding(
+                        "media", "sabnzbd_disk_warnings", "global",
+                        "sabnzbd/disk-warnings", "critical",
+                        f"SABnzbd has {len(disk_warnings)} disk space warning(s)",
+                        {"count": len(disk_warnings), "warnings": [w[:120] for w in disk_warnings[:5]]},
+                    ))
+        except Exception as e:
+            logger.error(f"SABnzbd warnings check error: {e}")
 
         # --- SABnzbd history failures ---
         try:
