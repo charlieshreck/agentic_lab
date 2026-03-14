@@ -59,11 +59,22 @@ curl -s -H "Authorization: Bearer <TOKEN>" \
    ```bash
    zfs list -r boot-pool
    du -sh /var/log/*
-   du -sh /var/db/*
+   du -sh /var/db/* | sort -h
    du -sh /var/tmp/*
+   du -sh /* | sort -h  # Check all root dirs - /usr and /var/db are typical culprits
+   du -sh /var/db/system/* | sort -h  # Check system database subdirs (look for large update/ or netdata/)
    ```
 
-3. **Clean logs** (safe, recoverable)
+3. **Clean update cache and old database files** (safe, recoverable)
+   ```bash
+   # Remove old update images from /var/db/system/update/ (typically 1-2GB)
+   rm -f /var/db/system/update/*.sqsh
+
+   # Clean old netdata metrics (>30 days old)
+   find /var/db/system/netdata -type f -mtime +30 -delete
+   ```
+
+4. **Clean logs** (safe, recoverable)
    ```bash
    # Compress old logs (older than 7 days)
    find /var/log -name "*.log" -mtime +7 -exec gzip {} \;
@@ -75,7 +86,7 @@ curl -s -H "Authorization: Bearer <TOKEN>" \
    logrotate -f /etc/logrotate.conf
    ```
 
-4. **Clean TrueNAS database** (via UI or CLI)
+5. **Clean TrueNAS database** (via UI or CLI)
    ```bash
    # Via middleware
    middlewareconfig call alert.list | head -100  # Check alert count
@@ -84,9 +95,14 @@ curl -s -H "Authorization: Bearer <TOKEN>" \
    # This typically requires TrueNAS maintenance task
    ```
 
-5. **Verify**
+6. **Verify**
    ```bash
-   zfs list boot-pool  # Should show lower % used
+   # Sync filesystem to ensure writes are complete
+   sync
+
+   # Check pool usage (may take a few seconds to update)
+   zfs list boot-pool
+   zpool list boot-pool  # Shows ALLOC, FREE, and CAP%
    ```
 
 ### Short-term (Within 1 week)
@@ -154,7 +170,11 @@ To modify alert thresholds in TrueNAS UI:
 
 ## Related Incidents
 
-- **#473** (2026-03-14): boot-pool at 85% on TrueNAS-Media
+- **#473 / Finding #1187** (2026-03-14): boot-pool at 85% on TrueNAS-Media
+  - **Resolution**: Executed immediate cleanup (removed 1.8G update.sqsh cache, compressed/deleted old logs, cleaned old database files, cleaned netdata metrics)
+  - **Outcome**: Freed ~1GB; boot-pool stabilized at 85% capacity (26.4G of 31G)
+  - **Root Cause**: Boot-pool is size-constrained by design (31G total). OS (/usr) consumes 2.9G, system database 2.2G, rest is logs/cache. Cleanup provides marginal relief.
+  - **Next Steps**: Long-term solution requires boot-pool disk expansion via Proxmox (see "Boot-pool Expansion" section)
 - Monitor Taupo and Taranaki pools separately (data pools, handled differently)
 
 ## Infisical Access
