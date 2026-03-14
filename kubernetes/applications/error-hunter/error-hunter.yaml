@@ -4711,10 +4711,13 @@ data:
             return {"error": str(e)}
 
     @app.post("/api/estate/resolve/{item_id}")
-    async def resolve_item(item_id: int, request: Request, item_type: str = "finding"):
+    async def resolve_item(item_id: int, request: Request, item_type: str = None):
         """Mark a finding or incident as resolved, then log to knowledge base.
 
+        Auto-detects item_type by checking both tables if not specified.
+
         Accepts optional JSON body:
+          item_type — "finding" or "incident" (auto-detected if omitted)
           summary   — what was done to resolve
           lessons   — lessons learned (optional)
           runbook_path — path to runbook file if one was created (optional)
@@ -4728,14 +4731,35 @@ data:
         except Exception:
             pass
 
+        # Allow item_type from body, query param, or auto-detect
+        if not item_type:
+            item_type = body.get("item_type")
+
         summary = body.get("summary", "")
         lessons = body.get("lessons", "")
         runbook_path = body.get("runbook_path", "")
         domain = body.get("domain", "")
 
         try:
-            # ---- 1. Fetch item context before updating ----
+            # ---- 1. Auto-detect item_type if not provided ----
             item_context = {}
+            if not item_type:
+                # Check findings first, then incidents
+                rows = await pg_fetch(
+                    "SELECT id FROM error_hunter_findings WHERE id = $1", item_id
+                )
+                if rows:
+                    item_type = "finding"
+                else:
+                    rows = await pg_fetch(
+                        "SELECT id FROM incidents WHERE id = $1", item_id
+                    )
+                    if rows:
+                        item_type = "incident"
+                    else:
+                        return {"error": f"Item {item_id} not found in findings or incidents"}
+
+            # ---- 2. Fetch item context before updating ----
             if item_type == "finding":
                 rows = await pg_fetch(
                     "SELECT id, check_name, severity, cluster, resource, description, "
@@ -4753,7 +4777,7 @@ data:
                 if rows:
                     item_context = dict(rows[0])
 
-            # ---- 2. Update DB ----
+            # ---- 3. Update DB ----
             if item_type == "finding":
                 await pg_execute(
                     "UPDATE error_hunter_findings SET status = 'resolved' WHERE id = $1",
@@ -4780,7 +4804,7 @@ data:
                     item_id, summary or None, json.dumps({"lessons": lessons}) if lessons else None,
                 )
 
-            # ---- 3. Log resolution to knowledge (async, non-blocking) ----
+            # ---- 4. Log resolution to knowledge (async, non-blocking) ----
             asyncio.create_task(_log_resolution_to_knowledge(
                 item_id=item_id,
                 item_type=item_type,
