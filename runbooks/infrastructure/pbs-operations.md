@@ -96,6 +96,41 @@ sshpass -p 'H4ckwh1z' ssh root@10.10.0.178 "vzdump --all 1 --storage pbs-pihanga
 
 See also: `/home/agentic_lab/runbooks/alerts/pbs-backup-stale.md`
 
+### journald Watchdog Timeout Kills PBS API Daemon (Finding #1218 — Mar 2026)
+
+**Symptom**: `pbs_unreachable` finding fires with HTTP 400 error *outside* the 02:00-02:15 backup window. Lasts hours.
+
+**Root cause**: `systemd-journald` hits its watchdog timeout (3 min) when the journal is near full (≤4MB free). journald process is killed with SIGABRT. The `proxmox-backup-api` process is connected to the journald Unix socket for logging; it receives `os error 107 (Transport endpoint is not connected)` and initiates a graceful shutdown. The proxy (`proxmox-backup-proxy`) keeps running but returns HTTP 400 on all auth requests because it can't reach the backend API socket.
+
+**Diagnosis**:
+```bash
+# Check if PBS API is running (proxy is always up; API may be dead)
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "systemctl status proxmox-backup --no-pager"
+# Active: inactive (dead) = this failure mode
+
+# Confirm journald was the cause
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "journalctl --since '2 hours ago' --no-pager | grep 'systemd-journald.*Watchdog\|proxmox-backup-api.*Transport\|journal.*corrupted'"
+```
+
+**Fix**:
+```bash
+# 1. Vacuum old journals to free space
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "journalctl --vacuum-size=100M"
+
+# 2. Restart PBS API daemon
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 "systemctl start proxmox-backup"
+
+# 3. Verify auth works (expect 401 not 400)
+sshpass -p 'H4ckwh1z' ssh root@10.10.0.151 \
+  "curl -sk -o /dev/null -w '%{http_code}' -X POST 'https://127.0.0.1:8007/api2/json/access/ticket' -d 'username=root@pam&password=wrong'"
+# Should print: 401
+```
+
+**Permanent fix applied (Mar 2026)**:
+- `SystemMaxUse` increased from 256MB to 512MB in `/etc/systemd/journald.conf`
+- `SystemKeepFree=100M` added to ensure journal vacuum triggers before disk pressure
+- Disk is not the constraint (25GB free on root); the 256MB cap was too small given PBS proxy logging volume during busy windows
+
 ### Job Errors on vzdump
 Common causes:
 1. VM paused during backup — Check if QEMU guest agent is installed
