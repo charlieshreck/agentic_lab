@@ -330,7 +330,11 @@ data:
         }
 
     def normalize_alertmanager(body) -> list:
-        """Normalize AlertManager webhook. Returns list (AM sends arrays or dicts)."""
+        """Normalize AlertManager webhook. Returns list (AM sends arrays or dicts).
+
+        AlertManager sends status='resolved' when an alert clears. We pass this
+        through so the ingest handler can auto-close matching incidents.
+        """
         results = []
         if isinstance(body, list):
             alerts = body
@@ -350,6 +354,7 @@ data:
                 ).hexdigest(),
                 "labels": labels,
                 "raw_payload": alert,
+                "status": alert.get("status", "firing"),
             })
         return results
 
@@ -1984,6 +1989,11 @@ data:
         if isinstance(normalized, list):
             results = []
             for item in normalized:
+                # Auto-close incidents when AlertManager sends status=resolved
+                if item.get("status") == "resolved":
+                    result = await _auto_resolve_by_fingerprint(item)
+                    results.append(result)
+                    continue
                 reason = should_suppress_alert(
                     item.get("source", source),
                     item.get("alert_name", ""),
@@ -1998,6 +2008,10 @@ data:
                     results.append(result)
             return {"status": "accepted", "count": len(results), "incidents": results}
         else:
+            # Auto-close for single resolved alerts
+            if normalized.get("status") == "resolved":
+                result = await _auto_resolve_by_fingerprint(normalized)
+                return {"status": "accepted", "count": 1, "incidents": [result]}
             reason = should_suppress_alert(
                 normalized.get("source", source),
                 normalized.get("alert_name", ""),
@@ -2009,6 +2023,34 @@ data:
                 return {"status": "suppressed", "count": 0, "reason": reason}
             result = await _process_single_ingest(normalized)
             return {"status": "accepted", "count": 1, "incidents": [result]}
+
+    async def _auto_resolve_by_fingerprint(normalized: dict) -> dict:
+        """Auto-close an incident when its alert resolves (e.g., AlertManager status=resolved)."""
+        fingerprint = normalized.get("fingerprint")
+        alert_name = normalized.get("alert_name", "Unknown")
+        if not fingerprint:
+            logger.info(f"Auto-resolve skipped (no fingerprint): {alert_name}")
+            return {"alert_name": alert_name, "status": "skipped", "reason": "no fingerprint"}
+        try:
+            pool = await get_pg_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE incidents SET status = 'resolved', resolved_at = NOW(),
+                       resolution_summary = 'Auto-resolved: alert cleared in source system',
+                       resolution_type = 'transient'
+                       WHERE fingerprint = $1 AND status NOT IN ('resolved', 'closed', 'false_positive')
+                       RETURNING id, alert_name""",
+                    fingerprint,
+                )
+                if row:
+                    logger.info(f"Auto-resolved incident #{row['id']} ({row['alert_name']}): alert cleared")
+                    return {"alert_name": alert_name, "status": "auto_resolved", "incident_id": row["id"]}
+                else:
+                    logger.debug(f"No open incident for resolved alert {alert_name} ({fingerprint[:12]})")
+                    return {"alert_name": alert_name, "status": "no_open_incident"}
+        except Exception as e:
+            logger.error(f"Auto-resolve error for {alert_name}: {e}")
+            return {"alert_name": alert_name, "status": "error", "error": str(e)}
 
     async def _process_single_ingest(normalized: dict) -> dict:
         """Process a single normalized ingest payload through the graph."""
