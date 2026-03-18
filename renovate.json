@@ -54,6 +54,25 @@
       ]
     },
     {
+      "description": "Database major upgrades require migration runbook - never bundle with other updates",
+      "matchPackageNames": [
+        "postgres",
+        "redis"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "groupName": "database-major-upgrades",
+      "automerge": false,
+      "labels": [
+        "major-update",
+        "database-migration-required",
+        "do-not-merge"
+      ],
+      "prPriority": -10,
+      "additionalBranchPrefix": "db-major-"
+    },
+    {
       "description": "Group Kubernetes platform updates",
       "matchManagers": [
         "kubernetes"
