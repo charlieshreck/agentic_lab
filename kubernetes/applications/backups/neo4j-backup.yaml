@@ -46,8 +46,6 @@ spec:
                   value: "backrest"
                 - name: BACKUP_PREFIX
                   value: "agentic/neo4j"
-                - name: S3_ENDPOINT
-                  value: "http://10.10.0.103:30188"
               command:
                 - /bin/sh
                 - -c
