@@ -1495,6 +1495,16 @@ data:
             logger.warning("GITHUB_TOKEN not set, skipping Renovate check")
             return findings
 
+        # Skip if Renovate CronJob is suspended — Update Patrol handles dependency tracking instead
+        infra = INFRASTRUCTURE_MCP_URL
+        renovate_cj = await call_mcp_tool_safe(infra, "kubectl_get_cronjobs", {
+            "namespace": "renovate", "cluster": "prod",
+        })
+        cj_items = extract_list(renovate_cj, "result", "items")
+        if any(cj.get("suspended") for cj in cj_items if isinstance(cj, dict)):
+            logger.info("Renovate CronJob is suspended — skipping PR check (Update Patrol is active)")
+            return findings
+
         for owner, repo in RENOVATE_REPOS:
             try:
                 prs_result = await call_mcp_tool_safe(ext, "github_list_prs", {
