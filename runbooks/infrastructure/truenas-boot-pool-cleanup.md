@@ -1,9 +1,10 @@
 # Runbook: TrueNAS boot-pool Space Management
 
-**Status**: Active (2026-03-15)
+**Status**: Resolved (2026-03-17)
 **Severity**: Info → Warning (>85% full)
 **Auto-trigger**: Pool reaches 85% capacity
 **Root Cause**: Multiple ZFS boot environments (old OS versions) consume space
+**Last Update**: Finding #1225 investigated 2026-03-17 — boot-pool at 18% utilization, all old BEs cleaned
 
 ## Problem
 

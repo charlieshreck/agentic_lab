@@ -83,12 +83,16 @@
       "groupName": "kubernetes-platform"
     },
     {
-      "description": "Group AI platform application updates",
+      "description": "Group AI platform application updates (excludes database images handled by database-major-upgrades rule)",
       "matchManagers": [
         "kubernetes"
       ],
       "matchFileNames": [
         "kubernetes/applications/**"
+      ],
+      "excludePackageNames": [
+        "postgres",
+        "redis"
       ],
       "groupName": "kubernetes-apps"
     },

@@ -203,5 +203,13 @@ If PGDATA was wiped and restore failed:
 ## Related
 
 - Runbook: `infrastructure/agentic-backup-operations.md`
-- Renovate rule: `kubernetes-apps` group now excludes database major upgrades
-- Finding: estate finding #1237 (renovate_pr_pending, 2026-03-18)
+- Renovate rule: `kubernetes-apps` group now excludes database major upgrades (postgres, redis) via `excludePackageNames`
+- Finding: estate finding #1237 (renovate_pr_pending, 2026-03-18) — initial detection
+- Finding: estate finding #1245 (renovate_pr_pending, 2026-03-19) — recurrence (PR still open; token lacks write access to close via API — **must be closed manually**)
+
+## Closing Stale Renovate PR #3
+
+PR #3 (`renovate/major-kubernetes-apps`) must be **closed without merging**:
+- Merging would crash PostgreSQL (PG16 data dir incompatible with PG18 image)
+- Renovate is suspended since 2026-03-10 — this PR is stale
+- Manual closure required via GitHub web UI (API token is read-only)
