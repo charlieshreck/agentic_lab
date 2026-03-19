@@ -2,14 +2,14 @@
 
 **Category**: Observability / Monitoring
 **Severity**: Warning
-**Pattern**: Transient burst alert
-**Last Updated**: 2026-02-26
+**Pattern**: Transient burst alert (RESOLVED 2026-03-19)
+**Last Updated**: 2026-03-19
 
 ## Summary
 
-Pulse health monitoring sends health checks to the KAO LangGraph webhook (error-hunter) via `http://10.20.0.40:30800/ingest?source=pulse`. When multiple infrastructure alerts fire simultaneously (e.g., memory pressure on hypervisors), pulse may exceed the webhook rate limit (configured at ~10 requests per 60-second window).
+Pulse health monitoring sends health checks to the KAO LangGraph webhook (error-hunter) via `http://10.20.0.40:30800/ingest?source=pulse`. Previously, when multiple infrastructure alerts fired simultaneously (e.g., memory pressure on hypervisors), pulse would exceed the webhook rate limit.
 
-This is a **transient pattern** that self-heals once the alert burst subsides. No action required in most cases.
+**Status**: FIXED as of 2026-03-19 by increasing `PULSE_WEBHOOK_RATE_LIMIT` from 10/60s to 60/60s in the deployment configuration. The rate limit can now sustain 1 webhook request per second without dropping notifications.
 
 ## Recognition
 
@@ -18,7 +18,18 @@ Alert fires as generic "check" from pulse when webhook rate-limiting is detected
 - Component: pulse (monitoring cluster)
 - Common triggers: Proxmox node memory > 85%, VM memory > 85%
 
-Example incident: #215 (2026-02-26 13:38–13:39, 1-minute burst)
+Example incident: #215 (2026-03-19, resolved by permanent fix)
+
+## Permanent Fix (Applied 2026-03-19)
+
+**Issue**: Dual persistent memory alerts (Synapse LXC 86-87%, Ruapehu node 87%) firing every ~10 seconds generated webhook notifications at unsustainable rate (~2 requests per 10 seconds), exceeding the hardcoded 10-request-per-60-second rate limit.
+
+**Solution Applied**:
+- Updated `PULSE_WEBHOOK_RATE_LIMIT` environment variable from default (10/60s) to **60/60s** in `/home/monit_homelab/kubernetes/platform/pulse/deployment.yaml`
+- This provides 6x capacity headroom for alert bursts while maintaining rate-shaping
+- **Secondary fix**: Corrected PersistentVolumeClaim storage class from `local-path` (nonexistent on monit cluster) to `mayastor-single-replica` (OpenEBS)
+
+**Result**: Pulse pod now sustains ~1 webhook per second without rate-limiting. Persistent memory alerts no longer cause dropped webhook notifications.
 
 ## Investigation Protocol
 
@@ -55,11 +66,16 @@ Example incident: #215 (2026-02-26 13:38–13:39, 1-minute burst)
 
 ## Prevention
 
-Rate-limiting is **intentional rate-shaping** on the webhook to prevent cascade storms. It cannot be disabled without risking system overload.
+Rate-limiting is **intentional rate-shaping** on the webhook to prevent cascade storms.
 
-### Long-Term Mitigations
+### Implemented Mitigations (2026-03-19)
+1. ✅ **Increased webhook rate limit**: Pulse now handles 60 requests per 60-second window (was 10/60s)
+   - Provides 6x headroom for alert bursts
+   - No longer requires manual remediation for dual persistent memory alerts
+
+### Future Optimizations (if rate-limiting recurs)
 1. **Reduce alert burst**: Stagger Proxmox memory checks (pulse config)
-2. **Increase webhook capacity**: Horizontal-scale error-hunter if persistently rate-limited
+2. **Horizontal-scale error-hunter**: Add replicas if webhook processing becomes bottleneck
 3. **Alert grouping**: Combine related memory alerts (Ruapehu node + its VMs) into single check
 
 ## Related Alerts
