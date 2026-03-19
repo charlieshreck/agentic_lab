@@ -46,7 +46,7 @@ spec:
               memory: "32Mi"
               cpu: "25m"
         - name: outline
-          image: outlinewiki/outline:1.6.0
+          image: outlinewiki/outline:1.6.1
           ports:
             - containerPort: 3000
               name: outline
