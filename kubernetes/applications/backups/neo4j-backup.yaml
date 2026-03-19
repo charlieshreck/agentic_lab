@@ -53,8 +53,8 @@ spec:
                   set -e
 
                   # Install dependencies
-                  apk add --no-cache curl jq aws-cli python3
-                  pip install --quiet boto3 botocore
+                  apk add --no-cache curl jq aws-cli python3 py3-pip
+                  python3 -m pip install --quiet boto3 botocore
 
                   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
                   BACKUP_DIR="/tmp/backup-${TIMESTAMP}"
