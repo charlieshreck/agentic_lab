@@ -132,7 +132,7 @@ spec:
                   except Exception as e:
                       print(f"  ✗ Upload failed: {str(e)}")
                       sys.exit(1)
-                  PYSCRIPT
+PYSCRIPT
 
                   if [ $? -ne 0 ]; then
                     exit 1
