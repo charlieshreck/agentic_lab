@@ -96,6 +96,7 @@ spec:
 
                   # Upload to S3 using Python script to handle SSL properly
                   echo "=== Uploading to S3 ==="
+                  export BACKUP_DIR BACKUP_BUCKET BACKUP_PREFIX TIMESTAMP
                   python3 << 'PYSCRIPT'
                   import os
                   import sys

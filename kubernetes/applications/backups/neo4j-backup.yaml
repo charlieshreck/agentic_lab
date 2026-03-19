@@ -157,6 +157,7 @@ spec:
                   echo "Uploading to S3..."
                   S3_PATH="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${TIMESTAMP}/neo4j-${TIMESTAMP}.tar.gz"
 
+                  export BACKUP_DIR BACKUP_BUCKET BACKUP_PREFIX TIMESTAMP
                   python3 << 'PYSCRIPT'
                   import os
                   import sys
