@@ -4,6 +4,7 @@ kind: Kustomization
 namespace: ai-platform
 
 resources:
+  - backup-s3-credentials.yaml
   - postgresql-backup.yaml
   - qdrant-backup.yaml
   - redis-backup.yaml

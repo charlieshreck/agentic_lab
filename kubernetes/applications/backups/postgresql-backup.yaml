@@ -166,29 +166,3 @@ spec:
                 limits:
                   memory: "512Mi"
                   cpu: "500m"
----
-# S3 credentials for backups (synced from Infisical)
-apiVersion: secrets.infisical.com/v1alpha1
-kind: InfisicalSecret
-metadata:
-  name: backup-s3-infisical
-  namespace: ai-platform
-  labels:
-    app.kubernetes.io/name: backup-credentials
-spec:
-  hostAPI: https://app.infisical.com/api
-  resyncInterval: 300
-  authentication:
-    universalAuth:
-      credentialsRef:
-        secretName: universal-auth-credentials
-        secretNamespace: infisical-operator-system
-      secretsScope:
-        projectSlug: prod-homelab-y-nij
-        envSlug: prod
-        secretsPath: /backups/garage
-  managedSecretReference:
-    secretName: backup-s3-credentials
-    secretNamespace: ai-platform
-    secretType: Opaque
-    creationPolicy: Owner
