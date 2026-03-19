@@ -176,37 +176,37 @@ spec:
                     except Exception as e:
                         print(f"✗ Upload failed: {str(e)}")
                         sys.exit(1)
-            PYSCRIPT
+                    PYSCRIPT
 
                   if [ $? -ne 0 ]; then
                     exit 1
                   fi
-                else
-                  echo "No dump file created (Redis may be empty)"
-                fi
-
-                # Clean up old backups (keep 7 days - session data is less critical)
-                echo "=== Cleaning old backups ==="
-                # Calculate cutoff date (7 days ago) using epoch seconds (busybox compatible)
-                CUTOFF_EPOCH=$(($(date +%s) - 86400*7))
-                CUTOFF_DATE=$(date -d "@${CUTOFF_EPOCH}" +%Y%m%d 2>/dev/null || date -D %s -d "${CUTOFF_EPOCH}" +%Y%m%d)
-
-                aws s3 ls "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/" \
-                  --endpoint-url "${S3_ENDPOINT}" \
-                  --no-verify-ssl | while read -r line; do
-                  DIR=$(echo "$line" | awk '{print $2}' | tr -d '/')
-                  DIR_DATE=$(echo "$DIR" | cut -d'-' -f1)
-                  if [ -n "$DIR_DATE" ] && [ "$DIR_DATE" -lt "$CUTOFF_DATE" ] 2>/dev/null; then
-                    echo "  Deleting old backup: ${DIR}"
-                    aws s3 rm "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${DIR}/" \
-                      --endpoint-url "${S3_ENDPOINT}" --recursive --no-verify-ssl
+                  else
+                    echo "No dump file created (Redis may be empty)"
                   fi
-                done
 
-                # Cleanup
-                rm -rf "${BACKUP_DIR}"
+                  # Clean up old backups (keep 7 days - session data is less critical)
+                  echo "=== Cleaning old backups ==="
+                  # Calculate cutoff date (7 days ago) using epoch seconds (busybox compatible)
+                  CUTOFF_EPOCH=$(($(date +%s) - 86400*7))
+                  CUTOFF_DATE=$(date -d "@${CUTOFF_EPOCH}" +%Y%m%d 2>/dev/null || date -D %s -d "${CUTOFF_EPOCH}" +%Y%m%d)
 
-                echo "=== Redis Backup Completed at $(date) ==="
+                  aws s3 ls "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/" \
+                    --endpoint-url "${S3_ENDPOINT}" \
+                    --no-verify-ssl | while read -r line; do
+                    DIR=$(echo "$line" | awk '{print $2}' | tr -d '/')
+                    DIR_DATE=$(echo "$DIR" | cut -d'-' -f1)
+                    if [ -n "$DIR_DATE" ] && [ "$DIR_DATE" -lt "$CUTOFF_DATE" ] 2>/dev/null; then
+                      echo "  Deleting old backup: ${DIR}"
+                      aws s3 rm "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${DIR}/" \
+                        --endpoint-url "${S3_ENDPOINT}" --recursive --no-verify-ssl
+                    fi
+                  done
+
+                  # Cleanup
+                  rm -rf "${BACKUP_DIR}"
+
+                  echo "=== Redis Backup Completed at $(date) ==="
               resources:
                 requests:
                   memory: "64Mi"

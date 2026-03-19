@@ -91,7 +91,7 @@ spec:
                   # Upload to S3 using Python script to handle SSL properly
                   echo "=== Uploading to S3 ==="
                   export BACKUP_DIR BACKUP_BUCKET BACKUP_PREFIX TIMESTAMP
-                  python3 << 'PYSCRIPT'
+                  python3 <<-'PYSCRIPT'
                   import os
                   import sys
                   import boto3
@@ -132,7 +132,7 @@ spec:
                   except Exception as e:
                       print(f"  ✗ Upload failed: {str(e)}")
                       sys.exit(1)
-PYSCRIPT
+                  PYSCRIPT
 
                   if [ $? -ne 0 ]; then
                     exit 1
