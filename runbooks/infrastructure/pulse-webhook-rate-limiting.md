@@ -27,7 +27,7 @@ Example incident: #215 (2026-03-19, resolved by permanent fix)
 **Solution Applied**:
 - Updated `PULSE_WEBHOOK_RATE_LIMIT` environment variable from default (10/60s) to **60/60s** in `/home/monit_homelab/kubernetes/platform/pulse/deployment.yaml`
 - This provides 6x capacity headroom for alert bursts while maintaining rate-shaping
-- **Secondary fix**: Corrected PersistentVolumeClaim storage class from `local-path` (nonexistent on monit cluster) to `mayastor-single-replica` (OpenEBS)
+- Storage class: Uses `local-path` (standard on monit cluster, sufficient for Pulse state persistence)
 
 **Result**: Pulse pod now sustains ~1 webhook per second without rate-limiting. Persistent memory alerts no longer cause dropped webhook notifications.
 
