@@ -178,9 +178,9 @@ spec:
                         sys.exit(1)
                     PYSCRIPT
 
-                  if [ $? -ne 0 ]; then
-                    exit 1
-                  fi
+                    if [ $? -ne 0 ]; then
+                      exit 1
+                    fi
                   else
                     echo "No dump file created (Redis may be empty)"
                   fi
