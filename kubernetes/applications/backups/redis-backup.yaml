@@ -43,8 +43,9 @@ spec:
                 - |
                   set -e
 
-                  # Install AWS CLI
-                  apk add --no-cache aws-cli
+                  # Install AWS CLI and Python dependencies
+                  apk add --no-cache aws-cli python3
+                  pip install --quiet boto3 botocore
 
                   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
                   BACKUP_DIR="/tmp/backup-${TIMESTAMP}"
