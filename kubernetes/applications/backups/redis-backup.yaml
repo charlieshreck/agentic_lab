@@ -99,47 +99,47 @@ spec:
 
                     export BACKUP_DIR BACKUP_BUCKET BACKUP_PREFIX TIMESTAMP
                     cat > /tmp/upload_s3.py << 'EOF'
-import os
-import sys
-import boto3
-from botocore.config import Config
-import urllib3
-urllib3.disable_warnings()
+                  import os
+                  import sys
+                  import boto3
+                  from botocore.config import Config
+                  import urllib3
+                  urllib3.disable_warnings()
 
-# Disable SSL verification
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
-ssl.match_hostname = lambda cert, hostname: True
+                  # Disable SSL verification
+                  import ssl
+                  ssl._create_default_https_context = ssl._create_unverified_context
+                  ssl.match_hostname = lambda cert, hostname: True
 
-try:
-    s3_client = boto3.client(
-        's3',
-        endpoint_url=os.environ['S3_ENDPOINT'],
-        aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
-        aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
-        region_name='garage',
-        verify=False,
-        config=Config(
-            signature_version='s3v4',
-            s3={'addressing_style': 'virtual'}
-        )
-    )
+                  try:
+                      s3_client = boto3.client(
+                          's3',
+                          endpoint_url=os.environ['S3_ENDPOINT'],
+                          aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+                          aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+                          region_name='garage',
+                          verify=False,
+                          config=Config(
+                              signature_version='s3v4',
+                              s3={'addressing_style': 'virtual'}
+                          )
+                      )
 
-    backup_dir = os.environ['BACKUP_DIR']
-    bucket = os.environ['BACKUP_BUCKET']
-    prefix = os.environ['BACKUP_PREFIX']
-    timestamp = os.environ['TIMESTAMP']
+                      backup_dir = os.environ['BACKUP_DIR']
+                      bucket = os.environ['BACKUP_BUCKET']
+                      prefix = os.environ['BACKUP_PREFIX']
+                      timestamp = os.environ['TIMESTAMP']
 
-    for filename in os.listdir(backup_dir):
-        if filename.endswith('.gz'):
-            filepath = os.path.join(backup_dir, filename)
-            key = f"{prefix}/{timestamp}/{filename}"
-            s3_client.upload_file(filepath, bucket, key)
-            print(f"  ✓ Uploaded: s3://{bucket}/{key}")
-except Exception as e:
-    print(f"  ✗ Upload failed: {str(e)}")
-    sys.exit(1)
-EOF
+                      for filename in os.listdir(backup_dir):
+                          if filename.endswith('.gz'):
+                              filepath = os.path.join(backup_dir, filename)
+                              key = f"{prefix}/{timestamp}/{filename}"
+                              s3_client.upload_file(filepath, bucket, key)
+                              print(f"  ✓ Uploaded: s3://{bucket}/{key}")
+                  except Exception as e:
+                      print(f"  ✗ Upload failed: {str(e)}")
+                      sys.exit(1)
+                    EOF
                     python3 /tmp/upload_s3.py
 
                     UPLOAD_STATUS=$?
