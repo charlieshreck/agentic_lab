@@ -24,7 +24,7 @@ spec:
           restartPolicy: OnFailure
           containers:
             - name: backup
-              image: redis:7-alpine
+              image: redis:8-alpine
               envFrom:
                 - secretRef:
                     name: backup-s3-credentials
