@@ -89,6 +89,29 @@ Check `Health.Status`, `Operation State`, and `History` fields.
 **Check**: Deployment rollout status, pod scheduling, image pull
 **Fix**: Check resource limits, node capacity, image availability
 
+### Batch Resources False-Positive (CronJob, Job, custom resources)
+**Symptom**: health_status=Degraded or Missing, but all pods/jobs completed successfully
+**Root Cause**: Batch resources (CronJob, Job) and custom resources (InfisicalSecret, CRD instances) don't report `.status.conditions` field required for ArgoCD health evaluation. ArgoCD marks these as Degraded/Missing even when functioning correctly.
+**Verification**:
+```
+# Check if resource is batch or custom
+mcp__infrastructure__kubectl_describe(resource_type=cronjob, name=<name>, namespace=<ns>, cluster=prod)
+mcp__infrastructure__kubectl_describe(resource_type=<CustomResourceKind>, name=<name>, namespace=<ns>, cluster=prod)
+
+# Verify jobs are completing successfully
+mcp__infrastructure__kubectl_get_jobs(namespace=<ns>, cluster=prod)
+# Look for Status.Succeeded > 0 and Status.Failed = 0
+```
+**Fix**: None required — this is expected behavior for batch and custom resources. Health should be monitored via:
+- **CronJob**: Check job `.status.succeeded` / `.status.failed` and recent `.status.lastSuccessfulTime`
+- **Job**: Check pod completion status and logs
+- **Custom resources**: Verify resource-specific status fields (e.g., InfisicalSecret `.status.conditions`)
+- **Monitoring**: Set up alerts on job failure status, not ArgoCD health
+
+**Example**: `agentic-backups` application (neo4j-backup, postgresql-backup, qdrant-backup, redis-backup CronJobs + backup-s3-credentials InfisicalSecret) shows Degraded but all jobs run successfully daily.
+
+**Prevention**: Document in application README which resources are batch/custom and won't report health to ArgoCD.
+
 ## Fix Protocol
 
 1. **Identify root cause** from pod logs
@@ -109,5 +132,6 @@ git -C /home/prod_homelab push origin main
 
 | Date | App | Root Cause | Status |
 |------|-----|-----------|--------|
+| 2026-03-19 | agentic-backups | Batch resources (CronJob) + custom resources (InfisicalSecret) lack ArgoCD health reporting | False positive — all 4 backup jobs running successfully. Added runbook guidance. |
 | 2026-02-25 00:43 | renovate | Docker Hub rate limit (HTTP 429) during image scan | Transient — self-healed when 6-hour window shifted. Patrol verified. |
 | 2026-02-25 | renovate | OOM crash (1Gi → too small for 317 deps) | Increased to 4Gi / 3072MB heap |
