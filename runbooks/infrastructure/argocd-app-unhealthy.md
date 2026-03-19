@@ -110,6 +110,8 @@ mcp__infrastructure__kubectl_get_jobs(namespace=<ns>, cluster=prod)
 
 **Example**: `agentic-backups` application (neo4j-backup, postgresql-backup, qdrant-backup, redis-backup CronJobs + backup-s3-credentials InfisicalSecret) shows Degraded but all jobs run successfully daily.
 
+**Alert rule**: The `ArgoCDAppUnhealthy` Prometheus rule excludes `agentic-backups` by name (`name!="agentic-backups"`) to suppress this permanent false positive. Any new application consisting only of batch/custom resources should be added to this exclusion.
+
 **Prevention**: Document in application README which resources are batch/custom and won't report health to ArgoCD.
 
 ## Fix Protocol
@@ -132,6 +134,7 @@ git -C /home/prod_homelab push origin main
 
 | Date | App | Root Cause | Status |
 |------|-----|-----------|--------|
+| 2026-03-19 | agentic-backups | Finding #1255 (recurrence of incident #465). Root cause unchanged: batch resources lack ArgoCD health reporting. Fixed by excluding `agentic-backups` from `ArgoCDAppUnhealthy` rule in `monit_homelab/kubernetes/platform/prometheus-rules/homelab-rules.yaml`. | RESOLVED — Rule updated to suppress permanent false positive. |
 | 2026-03-19 | agentic-backups | Batch resources (CronJob) + custom resources (InfisicalSecret) lack ArgoCD health reporting. Redis, PostgreSQL, Qdrant, neo4j CronJobs all show hookPhase:Running when idle between executions (3 AM, 2 AM, 1 AM, 4 AM UTC respectively). Backend InfisicalSecret also reports no health. Verified all 4 backup jobs completed successfully today. | RESOLVED — False positive. All backup jobs operational (neo4j-backup Succeeded today). No action required. Documented as expected batch resource behavior. |
 | 2026-02-25 00:43 | renovate | Docker Hub rate limit (HTTP 429) during image scan | Transient — self-healed when 6-hour window shifted. Patrol verified. |
 | 2026-02-25 | renovate | OOM crash (1Gi → too small for 317 deps) | Increased to 4Gi / 3072MB heap |
