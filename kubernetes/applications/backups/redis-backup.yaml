@@ -73,53 +73,16 @@ spec:
                     TIMEOUT=$((TIMEOUT-2))
                   done
 
-                  # Get dump via DEBUG DIGEST and DUMP commands for each key
-                  # Actually, let's use the RDB approach via container volume mount
-                  # For now, dump keys as JSON (simpler approach without volume access)
-
+                  # Attempt RDB export (primary method)
                   DUMP_FILE="${BACKUP_DIR}/redis-${TIMESTAMP}.rdb"
 
-                  # Export all keys as JSON (since we can't access RDB file directly)
                   echo "Exporting Redis data..."
-                  redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} --rdb "${DUMP_FILE}" 2>/dev/null || {
-                    echo "Direct RDB export not available, using key export..."
-                    KEYS_FILE="${BACKUP_DIR}/redis-keys-${TIMESTAMP}.json"
-                    echo "[" > "${KEYS_FILE}"
-                    FIRST=1
-                    redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} KEYS '*' | while read KEY; do
-                      if [ -n "$KEY" ]; then
-                        TYPE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} TYPE "$KEY" | tr -d '\r')
-                        TTL=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} TTL "$KEY")
-
-                        case $TYPE in
-                          string)
-                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} GET "$KEY")
-                            ;;
-                          hash)
-                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} HGETALL "$KEY")
-                            ;;
-                          list)
-                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} LRANGE "$KEY" 0 -1)
-                            ;;
-                          set)
-                            VALUE=$(redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} SMEMBERS "$KEY")
-                            ;;
-                          *)
-                            VALUE="<unsupported type: $TYPE>"
-                            ;;
-                        esac
-
-                        if [ $FIRST -eq 1 ]; then
-                          FIRST=0
-                        else
-                          echo "," >> "${KEYS_FILE}"
-                        fi
-                        echo "{\"key\":\"$KEY\",\"type\":\"$TYPE\",\"ttl\":$TTL}" >> "${KEYS_FILE}"
-                      fi
-                    done
-                    echo "]" >> "${KEYS_FILE}"
-                    DUMP_FILE="${KEYS_FILE}"
-                  }
+                  if redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} --rdb "${DUMP_FILE}" 2>/dev/null; then
+                    echo "RDB export successful"
+                  else
+                    echo "RDB export not available, skipping backup"
+                    DUMP_FILE=""
+                  fi
 
                   if [ -f "$DUMP_FILE" ]; then
                     # Compress
