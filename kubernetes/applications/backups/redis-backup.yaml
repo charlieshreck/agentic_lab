@@ -172,9 +172,9 @@ spec:
                                 filepath = os.path.join(backup_dir, filename)
                                 key = f"{prefix}/{timestamp}/{filename}"
                                 s3_client.upload_file(filepath, bucket, key)
-                                print(f"✓ Uploaded: s3://{bucket}/{key}")
+                                print(f"  ✓ Uploaded: s3://{bucket}/{key}")
                     except Exception as e:
-                        print(f"✗ Upload failed: {str(e)}")
+                        print(f"  ✗ Upload failed: {str(e)}")
                         sys.exit(1)
                     PYSCRIPT
 
