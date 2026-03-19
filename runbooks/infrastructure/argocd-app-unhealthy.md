@@ -132,6 +132,6 @@ git -C /home/prod_homelab push origin main
 
 | Date | App | Root Cause | Status |
 |------|-----|-----------|--------|
-| 2026-03-19 | agentic-backups | Batch resources (CronJob) + custom resources (InfisicalSecret) lack ArgoCD health reporting | False positive — all 4 backup jobs running successfully. Added runbook guidance. |
+| 2026-03-19 | agentic-backups | Batch resources (CronJob) + custom resources (InfisicalSecret) lack ArgoCD health reporting. Redis, PostgreSQL, Qdrant, neo4j CronJobs all show hookPhase:Running when idle between executions (3 AM, 2 AM, 1 AM, 4 AM UTC respectively). Backend InfisicalSecret also reports no health. Verified all 4 backup jobs completed successfully today. | RESOLVED — False positive. All backup jobs operational (neo4j-backup Succeeded today). No action required. Documented as expected batch resource behavior. |
 | 2026-02-25 00:43 | renovate | Docker Hub rate limit (HTTP 429) during image scan | Transient — self-healed when 6-hour window shifted. Patrol verified. |
 | 2026-02-25 | renovate | OOM crash (1Gi → too small for 317 deps) | Increased to 4Gi / 3072MB heap |
