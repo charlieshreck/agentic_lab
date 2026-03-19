@@ -46,14 +46,16 @@ spec:
                   value: "backrest"
                 - name: BACKUP_PREFIX
                   value: "agentic/postgresql"
+                - name: AWS_CLI_FILE_ENCODING
+                  value: "utf-8"
               command:
                 - /bin/sh
                 - -c
                 - |
                   set -e
 
-                  # Install AWS CLI (alpine package)
-                  apk add --no-cache aws-cli
+                  # Install dependencies
+                  apk add --no-cache aws-cli python3
 
                   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
                   BACKUP_DIR="/tmp/backup-${TIMESTAMP}"
@@ -85,29 +87,57 @@ spec:
                     fi
                   done
 
-                  # Upload to S3
+                  # Upload to S3 using Python script to handle SSL properly
                   echo "=== Uploading to S3 ==="
-                  for DUMP in ${BACKUP_DIR}/*.dump; do
-                    if [ -f "$DUMP" ]; then
-                      FILENAME=$(basename "$DUMP")
-                      S3_PATH="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${TIMESTAMP}/${FILENAME}"
+                  python3 << 'PYSCRIPT'
+                  import os
+                  import sys
+                  import boto3
+                  from botocore.config import Config
+                  import urllib3
+                  urllib3.disable_warnings()
 
-                      aws s3 cp "$DUMP" "$S3_PATH" \
-                        --endpoint-url "${S3_ENDPOINT}" \
-                        --no-verify-ssl
+                  # Disable SSL verification
+                  import ssl
+                  ssl._create_default_https_context = ssl._create_unverified_context
+                  ssl.match_hostname = lambda cert, hostname: True
 
-                      if [ $? -eq 0 ]; then
-                        echo "  ✓ Uploaded: ${S3_PATH}"
-                      else
-                        echo "  ✗ Upload failed: ${FILENAME}"
-                        exit 1
-                      fi
-                    fi
-                  done
+                  try:
+                      s3_client = boto3.client(
+                          's3',
+                          endpoint_url=os.environ['S3_ENDPOINT'],
+                          aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+                          aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+                          region_name='garage',
+                          verify=False,
+                          config=Config(
+                              signature_version='s3v4',
+                              s3={'addressing_style': 'virtual'}
+                          )
+                      )
+
+                      backup_dir = os.environ['BACKUP_DIR']
+                      bucket = os.environ['BACKUP_BUCKET']
+                      prefix = os.environ['BACKUP_PREFIX']
+                      timestamp = os.environ['TIMESTAMP']
+
+                      for filename in sorted(os.listdir(backup_dir)):
+                          if filename.endswith('.dump'):
+                              filepath = os.path.join(backup_dir, filename)
+                              key = f"{prefix}/{timestamp}/{filename}"
+                              s3_client.upload_file(filepath, bucket, key)
+                              print(f"  ✓ Uploaded: s3://{bucket}/{key}")
+                  except Exception as e:
+                      print(f"  ✗ Upload failed: {str(e)}")
+                      sys.exit(1)
+                  PYSCRIPT
+
+                  if [ $? -ne 0 ]; then
+                    exit 1
+                  fi
 
                   # Clean up old backups (keep 14 days)
                   echo "=== Cleaning old backups ==="
-                  # Calculate cutoff date (14 days ago) using epoch seconds (busybox compatible)
                   CUTOFF_EPOCH=$(($(date +%s) - 86400*14))
                   CUTOFF_DATE=$(date -d "@${CUTOFF_EPOCH}" +%Y%m%d 2>/dev/null || date -D %s -d "${CUTOFF_EPOCH}" +%Y%m%d)
 
@@ -115,7 +145,6 @@ spec:
                     --endpoint-url "${S3_ENDPOINT}" \
                     --no-verify-ssl | while read -r line; do
                     DIR=$(echo "$line" | awk '{print $2}' | tr -d '/')
-                    # Extract date portion (YYYYMMDD)
                     DIR_DATE=$(echo "$DIR" | cut -d'-' -f1)
                     if [ -n "$DIR_DATE" ] && [ "$DIR_DATE" -lt "$CUTOFF_DATE" ] 2>/dev/null; then
                       echo "  Deleting old backup: ${DIR}"

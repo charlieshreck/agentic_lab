@@ -41,7 +41,7 @@ spec:
                   set -e
 
                   # Install dependencies
-                  apk add --no-cache curl jq aws-cli
+                  apk add --no-cache curl jq aws-cli python3
 
                   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
                   BACKUP_DIR="/tmp/backup-${TIMESTAMP}"
@@ -87,24 +87,60 @@ spec:
                       continue
                     fi
 
-                    # Upload to S3
-                    S3_PATH="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${TIMESTAMP}/${COLLECTION}-${SNAPSHOT_NAME}"
-                    echo "  Uploading to S3..."
-                    aws s3 cp "${SNAPSHOT_FILE}" "${S3_PATH}" \
-                      --endpoint-url "${S3_ENDPOINT}" \
-                      --no-verify-ssl
-
-                    if [ $? -eq 0 ]; then
-                      echo "  ✓ Uploaded: ${S3_PATH}"
-                    else
-                      echo "  ✗ Upload failed for ${COLLECTION}"
-                    fi
-
                     # Delete snapshot from Qdrant (to save space)
                     echo "  Cleaning up Qdrant snapshot..."
                     curl -s -X DELETE "${QDRANT_HOST}/collections/${COLLECTION}/snapshots/${SNAPSHOT_NAME}"
 
                   done
+
+                  # Upload to S3 using Python script to handle SSL properly
+                  echo "=== Uploading to S3 ==="
+                  python3 << 'PYSCRIPT'
+                  import os
+                  import sys
+                  import boto3
+                  from botocore.config import Config
+                  import urllib3
+                  urllib3.disable_warnings()
+
+                  # Disable SSL verification
+                  import ssl
+                  ssl._create_default_https_context = ssl._create_unverified_context
+                  ssl.match_hostname = lambda cert, hostname: True
+
+                  try:
+                      s3_client = boto3.client(
+                          's3',
+                          endpoint_url=os.environ['S3_ENDPOINT'],
+                          aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+                          aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+                          region_name='garage',
+                          verify=False,
+                          config=Config(
+                              signature_version='s3v4',
+                              s3={'addressing_style': 'virtual'}
+                          )
+                      )
+
+                      backup_dir = os.environ['BACKUP_DIR']
+                      bucket = os.environ['BACKUP_BUCKET']
+                      prefix = os.environ['BACKUP_PREFIX']
+                      timestamp = os.environ['TIMESTAMP']
+
+                      for filename in sorted(os.listdir(backup_dir)):
+                          if not filename.startswith('neo4j-') and not filename.startswith('redis-'):
+                              filepath = os.path.join(backup_dir, filename)
+                              key = f"{prefix}/{timestamp}/{filename}"
+                              s3_client.upload_file(filepath, bucket, key)
+                              print(f"  ✓ Uploaded: s3://{bucket}/{key}")
+                  except Exception as e:
+                      print(f"  ✗ Upload failed: {str(e)}")
+                      sys.exit(1)
+                  PYSCRIPT
+
+                  if [ $? -ne 0 ]; then
+                    exit 1
+                  fi
 
                   # Clean up old backups (keep 14 days)
                   echo "=== Cleaning old backups ==="
