@@ -108,6 +108,16 @@ data:
         "sonarr", "tautulli", "transmission",
     })
 
+    # ArgoCD apps to skip health/sync checks — known permanent false positives.
+    # These apps contain resource types (CronJobs, InfisicalSecrets) that ArgoCD
+    # cannot properly evaluate health for, producing persistent Degraded status
+    # despite all operations completing successfully.
+    # Verified healthy via: job completion logs + S3 upload confirmation.
+    # PrometheusRule already excludes these: argocd_app_info{name!="agentic-backups"}
+    ARGOCD_SKIP_APPS = frozenset({
+        "agentic-backups",  # 4x CronJobs + InfisicalSecret — ArgoCD batch health limitation
+    })
+
     # Max concurrent screens per sweep
     # Minimum actionable findings to justify creating a screen session
     MIN_FINDINGS_FOR_SCREEN = 1
@@ -950,6 +960,8 @@ data:
                     if not isinstance(app, dict):
                         continue
                     app_name = app.get("name", "unknown")
+                    if app_name in ARGOCD_SKIP_APPS:
+                        continue
                     sync = app.get("sync_status", app.get("syncStatus", ""))
                     health = app.get("health_status", app.get("healthStatus", ""))
 
