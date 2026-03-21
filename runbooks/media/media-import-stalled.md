@@ -54,6 +54,20 @@ mcp__media__radarr_remove_queue_item(queue_id=<id>, remove_from_client=False, bl
 mcp__media__sonarr_remove_queue_item(queue_id=<id>, remove_from_client=False, blocklist=False)
 ```
 
+### Step 2b: Check for duplicate downloads (movie/series already exists in library)
+
+If a queue item has `trackedDownloadState: "importBlocked"`, it usually means Radarr/Sonarr **cannot**
+import because the movie/series already exists in the library. Verify by searching your Radarr/Sonarr
+library for the movie title. If found, this is a duplicate download situation.
+
+Fix: **Remove from arr queue and remove from client** (the file is already imported):
+```
+mcp__media__radarr_remove_queue_item(queue_id=<id>, remove_from_client=True, blocklist=True)
+mcp__media__sonarr_remove_queue_item(queue_id=<id>, remove_from_client=True, blocklist=True)
+```
+
+**Recent example (2026-03-21)**: Radarr queue had "Sevimli.Canavarlar.Universitesi.2013..." (Turkish title for Monsters University) with `importBlocked` state. Monsters University (2013) already existed in library at 720p. Removed the duplicate queue item with `remove_from_client=True` + `blocklist=True` to prevent duplicate downloads in future.
+
 ### Step 3: Check download clients
 ```
 mcp__media__transmission_list_torrents
