@@ -4,47 +4,44 @@ description: Gatus health check configured for non-existent Garage Web UI port (
 type: incident
 ---
 
-## Incident #503 (2026-03-18) — Garage S3 Health Check Port Mismatch
+## Incident #503 (2026-03-18) — Garage S3 Health Check Condition Issue
 
-**Status**: RESOLVED
+**Status**: RESOLVED ✅
 
 ### Issue
 
-Gatus health checks for Garage S3 were failing:
-- **Garage S3 API** (port 30188): **HTTP 403** — Expected, working correctly
-- **Garage Web UI** (port 30186): **Connection refused** — Port doesn't exist
+Gatus health checks for Garage S3 API were failing with 403 responses being reported as unhealthy, even though:
+- **Garage S3 API** (port 30188): Returns **HTTP 403** (expected for anonymous requests)
+- **Garage Web UI** (port 30186): Returns **HTTP 200** (working correctly)
 
-Both endpoints marked unhealthy in Gatus monitoring dashboard.
+The S3 API endpoint was incorrectly marked as unhealthy in Gatus despite returning valid 403 responses.
 
 ### Root Cause
 
-**Port mismatch in Gatus configuration**. The Garage Docker container exposes ports via TrueNAS Apps:
-- 30187: Cluster communications (netapp)
-- 30188: S3 API ✓
-- **30189**: Web UI (nginx)
-- 30190: Admin API
+**Gatus condition was too restrictive**. The original health check condition only accepted HTTP 403 but S3-compatible APIs (Garage, MinIO, AWS) can return **either 400 or 403** for anonymous requests depending on the specific operation attempted.
 
-But Gatus was configured to check port **30186** for the Web UI, which doesn't exist on the container.
+The Gatus condition was missing support for HTTP 400 responses, causing transient failures when S3 operations returned 400 Bad Request (valid response).
 
 ### Solution
 
-**Permanent fix (APPLIED)**: Corrected Gatus ConfigMap port mapping.
+**Permanent fix (APPLIED)**: Updated Gatus S3 API health check condition to accept both 400 and 403 responses.
 
-**File**: `/home/monit_homelab/kubernetes/platform/gatus/deployment.yaml` (line 71)
+**File**: `/home/monit_homelab/kubernetes/platform/gatus/deployment.yaml` (line 55)
 
 ```yaml
 # Before
-- name: Garage Web UI
-  url: "http://10.10.0.103:30186"  # ❌ WRONG PORT
+conditions:
+  - "[STATUS] == 403"  # ❌ ONLY ACCEPTS 403
 
 # After
-- name: Garage Web UI
-  url: "http://10.10.0.103:30189"  # ✓ CORRECT PORT
+conditions:
+  - "[STATUS] == any(400, 403)"  # ✓ ACCEPTS BOTH 400 AND 403
 ```
 
 **Commits**:
-- `b7322b4` (monit_homelab): fix: correct Garage Web UI port in Gatus health check (30186 -> 30189)
-- `6a2c58c` (parent): chore: update monit_homelab submodule (Gatus Garage S3 port fix)
+- `b7322b4` (monit_homelab): fix: correct Garage Web UI port in Gatus health check (intermediate)
+- `fb3ce92` (monit_homelab): fix: correct Garage Web UI Gatus check port back to 30186 (clarified actual port)
+- `6ee5f8d` (monit_homelab): fix: gatus garage s3 api endpoint condition - accept 400/403 responses (FINAL FIX)
 
 ### Why This Happened
 

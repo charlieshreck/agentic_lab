@@ -102,3 +102,47 @@ rely on `series: null` to identify orphaned items.
 If `transmission_list_torrents` shows a torrent `stopped` at 0% and the series is already 100% complete
 in Sonarr, this is benign — likely a re-grab that Sonarr queued but then stopped when it detected the
 series was already complete. No action needed; Sonarr will clean it up.
+
+## Content-Based Issues (2026-03-21, incident #431)
+
+### Radarr: `importBlocked` — Movie Matching Ambiguity
+**Pattern**: `trackedDownloadStatus: "warning"`, `trackedDownloadState: "importBlocked"`
+Error message: `"Found matching movie via grab history, but release was matched to movie by ID. Manual Import required."`
+
+**Root cause**: Radarr safety feature triggered when a release is initially matched to a movie via grab history,
+but then re-matched by a different method (e.g., movie ID). This creates an ambiguity that requires manual intervention
+to confirm the import is correct.
+
+**Resolution** (in priority order):
+
+1. **Blocklist + Re-Search (RECOMMENDED)** - Avoids the matching ambiguity entirely:
+   ```
+   mcp__media__radarr_remove_queue_item(queue_id=<id>, blocklist=true)
+   mcp__media__radarr_trigger_search(movie_id=<id>)
+   ```
+   This forces Radarr to find an alternative release without the matching ambiguity.
+
+2. **Manual Import (if you trust the file)** - For releases where the file is verified correct:
+   - Radarr UI: Activity → Queue → click item → Manual Import → confirm
+   - OR via API: Send PUT to `/api/v3/history/failed` to mark as complete, then trigger re-import
+
+**Example**: "The Silence of the Lambs (1991)" matched initially by grab history, later re-confirmed by TMDB ID match.
+Blocklisting the release and re-searching is preferred over manual import for production reliability.
+
+### Sonarr: `importPending` — Executable File Detected
+**Pattern**: `trackedDownloadStatus: "warning"`, `trackedDownloadState: "importPending"`
+Error message: `"Caution: Found executable file"`
+
+**Root cause**: NZB release contains an executable file (.exe) which Sonarr blocks as a security measure.
+The .exe file often masquerades as the video file or comes packaged in the release.
+
+**Resolution**:
+1. Verify file in /downloads: `ls -lah /downloads/tv-sonarr/<release>/`
+2. Remove the .exe: `rm /downloads/tv-sonarr/<release>/*.exe`
+3. Trigger re-import: Sonarr Activity → Queue → click item → Force Import OR wait for auto-import after cleanup
+4. OR: Request re-download from different NZB source/indexer that doesn't include executable
+
+**Prevention**:
+- Check release comments on indexer before grabbing
+- Configure Sonarr "Settings → Import → Skip free space check" to catch malformed releases earlier
+- Add problematic indexers to ignore list if releases consistently contain malware/executables
