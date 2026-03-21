@@ -626,7 +626,7 @@ data:
                     'finding' as item_type, id, check_name as name, severity,
                     classification as priority, status, description,
                     first_seen as detected_at, last_seen as last_updated,
-                    NULL::timestamptz as resolved_at, incident_id,
+                    resolved_at, incident_id,
                     evidence::text as metadata,
                     CASE severity WHEN 'critical' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END as severity_order
                 FROM error_hunter_findings
@@ -3203,7 +3203,6 @@ data:
             check_logs("agentic"),
             check_logs("monitoring"),
             check_mcp_health(),
-            check_renovate(),
             check_beszel(),
             check_dns_routing(),
             check_backups(),
@@ -4802,7 +4801,7 @@ data:
             # ---- 3. Update DB ----
             if item_type == "finding":
                 await pg_execute(
-                    "UPDATE error_hunter_findings SET status = 'resolved' WHERE id = $1",
+                    "UPDATE error_hunter_findings SET status = 'resolved', resolved_at = NOW() WHERE id = $1",
                     item_id
                 )
                 # Also resolve the linked incident (if any) so it doesn't re-surface in sweeps
