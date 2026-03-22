@@ -17,7 +17,7 @@ spec:
       annotations:
         coroot.com/slo-latency-threshold: "30s"
         coroot.com/slo-latency-objective: "95%"
-        coroot.com/slo-availability-objective: "99%"
+        coroot.com/slo-availability-objective: "95%"
       labels:
         app: ollama
         component: inference
