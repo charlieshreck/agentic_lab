@@ -184,10 +184,19 @@ Example: Pokemon Horizons S01 (85 episodes, ~55 GB) sat for 5+ weeks without imp
 
 **Outstanding Issue**: Huntarr `hunt_missing_mode: "seasons_packs"` still creates large packs (47 GB for Mr.Robot S02, 27 GB for Ghosts S01). Recommendation: change to `"episodes"` mode in Huntarr config (not yet deployed — requires manual Huntarr settings update via web UI or database edit due to API endpoint limitations).
 
+### Finding #1312 (2026-03-22)
+
+**Pattern**: "2 items stuck in download queue" — alerting-pipeline re-triggered for incident #431.
+
+**Investigation**: Arr queues were empty by time of patrol. Transmission showed 2 completed (100%, stopped) torrents (Dog Man 2025 4K + Ghosts S01) — likely already imported. Stall rule "Stuck" confirmed active via direct API (MCP tool falsely showed `stallRules: []`).
+
+**Resolution**: False positive / self-healed. Stall rules are working. MCP tool bug documented above.
+
 ## References
 
 - TrueNAS-Media: VMID 109, IP 10.10.0.100
 - Tarriance NFS: `10.40.0.10:/mnt/Taranaki/Tarriance/hopuhopu_katoa`
-- Cleanuparr: media namespace, enabled (queue cleaner every 20 min, download cleaner hourly) — **NOW WITH stall/slow rules** (updated 2026-03-04)
+- Cleanuparr: media namespace, enabled (queue cleaner every 5 min, download cleaner hourly) — **NOW WITH stall/slow rules** (updated 2026-03-04)
+- **⚠️ MCP bug (2026-03-22)**: `cleanuparr_get_queue_cleaner_config` returns `stallRules: []` even when rules exist. Always verify via direct API: `curl -s https://cleanuparr.kernow.io/api/queue-rules/stall -H 'X-Api-Key: <key>'` (key in Infisical `/media/cleanuparr/API_KEY`)
 - Sonarr: Uses SABnzbd (Usenet), NOT Transmission
 - Radarr: Uses SABnzbd (confirmed 2026-02-28) — can get stuck in `importBlocked` state
