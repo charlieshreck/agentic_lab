@@ -202,10 +202,18 @@ KUBECONFIG=/root/.kube/config kubectl --context admin@monitoring-cluster rollout
 
 **Root cause (2026-03-25)**: PBS beszel-agent was running as root, triggering SMART queries that always return "SMART support is: Unavailable". Fixed by changing the service to run as `beszel` user (non-root) — no SMART queries, no goroutine crashes.
 
+**Pattern extended (2026-03-25)**: Ruapehu (bare-metal Proxmox host) also showed "down". Agent was running as root. Fixed identically. Note: Ruapehu has real NVMe/SATA drives with a `smart.conf` drop-in granting `AmbientCapabilities=CAP_SYS_RAWIO CAP_SYS_ADMIN` — SMART queries continue to work even as non-root beszel user.
+
 **Prevention (implemented 2026-03-25)**:
 - PBS agent runs as non-root `beszel` user — SMART queries skipped, root cause addressed
+- Ruapehu agent runs as non-root `beszel` user — SMART still works via AmbientCapabilities drop-in
 - Daily restart CronJob at 01:00 UTC (`beszel-daily-restart` in monitoring namespace) — safety net for any remaining goroutine issues
 - For any QEMU VM or system with unavailable SMART: always run beszel-agent as non-root
+- For bare-metal hosts: run as non-root with `smart.conf` AmbientCapabilities drop-in for SMART access
+
+**Agents confirmed running as non-root (beszel user)**: PBS, Ruapehu
+
+**Agents still running as root (SMART works, low goroutine crash risk)**: Pihanga, TrueNAS-Media, TrueNAS-HDD, Plex-VM, Synapse, Haute-Banque, Omada, UniFi-OS — monitor for future goroutine crashes
 
 **Fix for QEMU/virtual disks (run agent as non-root)**:
 ```bash
