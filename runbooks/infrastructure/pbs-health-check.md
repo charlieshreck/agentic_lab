@@ -69,9 +69,24 @@ curl -v -k --max-time 30 https://10.10.0.151:8007/api2/json/version
 
 3. **Annual review**: Check Gatus timeout settings during infrastructure reviews
 
+## Error-Hunter PBS Suppression Window
+
+error-hunter checks PBS during sweeps and suppresses `pbs_unreachable` findings during
+the backup window to avoid false positives while backup jobs are starting up:
+
+- **Backup schedule**: Daily at 02:00 UTC across all 3 Proxmox hosts
+- **Suppression window**: 02:00–02:30 UTC (PBS may be busy handling concurrent backup jobs)
+- **Pattern**: PBS API briefly returns ENOTCONN as backup jobs initialise (~2-5 min per host)
+- **Fix**: If `pbs_unreachable` fires outside the window, PBS truly is unreachable — investigate
+
+**Finding #1382 (2026-03-25)**: `pbs_unreachable` fired with blank exception message. PBS was
+healthy; the previous 02:15 cutoff was too narrow. Widened to 02:30 to cover all 3 hosts
+completing backup startup.
+
 ## Related Issues
 
 - Incident #504: PBS health check timeout (RESOLVED 2026-03-20)
+- Finding #1382: pbs_unreachable false positive — suppression window too narrow (RESOLVED 2026-03-25)
 
 ## See Also
 
