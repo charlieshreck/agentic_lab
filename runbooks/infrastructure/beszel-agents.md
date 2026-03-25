@@ -163,6 +163,45 @@ curl -s -X POST "https://beszel.kernow.io/api/collections/systems/records" \
 2. Verify SSH key matches Hub public key
 3. Check port 45876 not blocked
 
+### Hub Stops Polling Specific Systems (Goroutine Crash)
+
+**Symptom**: One or more systems show "down" in Beszel, but the agent is running and port 45876 is reachable. Other systems continue polling normally.
+
+**Root cause**: The Beszel hub's per-system polling goroutine crashes or deadlocks — likely triggered by persistent `smartctl failed (exit status 4)` responses from systems with SMART-failing drives (e.g., TrueNAS-Media, PBS). The hub retries a few times (visible as rapid "SSH connected" bursts in agent logs) then stops permanently.
+
+**Diagnosis**:
+```bash
+# 1. Verify agent is healthy (runs, port open, log shows recent "SSH connected")
+ssh root@<agent-ip> "systemctl status beszel-agent --no-pager"
+nc -zv <agent-ip> 45876
+
+# 2. Check agent logs - look for last "SSH connected" entry
+ssh root@<agent-ip> "journalctl -u beszel-agent --no-pager -n 20"
+
+# 3. Confirm via API - last stats should be stale, hub shows "down"
+TOKEN=$(curl -s -X POST "https://beszel.kernow.io/api/collections/users/auth-with-password" \
+  -H "Content-Type: application/json" \
+  -d '{"identity":"charlieshreck@gmail.com","password":"H4ckwh1z"}' | jq -r '.token')
+curl -s "https://beszel.kernow.io/api/collections/systems/records?filter=(name='<system>')" \
+  -H "Authorization: $TOKEN" | jq '.items[0] | {status, updated}'
+
+# 4. Check last stats timestamp (stale = problem is hub-side, not agent)
+SYSTEM_ID=$(curl -s "..." | jq -r '.items[0].id')
+curl -s "https://beszel.kernow.io/api/collections/system_stats/records?filter=(system='$SYSTEM_ID')&sort=-created&perPage=1" \
+  -H "Authorization: $TOKEN" | jq '.items[0].created'
+```
+
+**Fix**: Restart the Beszel hub pod:
+```bash
+KUBECONFIG=/root/.kube/config kubectl --context admin@monitoring-cluster rollout restart deployment/beszel -n monitoring
+# Wait ~30s, then verify:
+# API should show status: "up" for affected systems
+```
+
+**Pattern observed (2026-03-24)**: TrueNAS-Media and PBS both stopped being polled at 02:50 UTC. Both have persistent `smartctl failed (exit status 4)` on SATA drives. Hub pod had been running 11 days without restart. After rollout restart, both came back immediately.
+
+**Prevention**: The hub should be restarted periodically or monitored for stale poll cycles. Consider adding a Gatus check for beszel.kernow.io and an alert if multiple systems go "down" simultaneously.
+
 ### High CPU on Agent
 
 Beszel agents are lightweight (<1% CPU typical). If high:
