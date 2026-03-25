@@ -42,6 +42,35 @@ ssh root@10.10.0.103 "beszel-agent --version"
 
 ## Common Causes
 
+### 0. Transient: Hub Restart (beszel_agent_down)
+
+**Symptoms:**
+- Alert fires for one or more agents briefly (< 2 minutes), then auto-resolves
+- Beszel pod was recently restarted (tugtainer image update, ArgoCD sync, OOM)
+- All affected agents reconnect shortly after
+
+**Verification:**
+```bash
+# Check if beszel pod recently restarted
+kubectl --kubeconfig /root/.kube/config -n monitoring get pod -l app=beszel
+# Look for low age or recent restart
+
+# Check agent status on-host — should show "SSH connected" recently
+sshpass -p 'H4ckwh1z' ssh root@<agent-ip> "journalctl -u beszel-agent --since '5 minutes ago'"
+```
+
+**Resolution:**
+No action needed — agents auto-reconnect within ~30 seconds of hub restart.
+
+**Root cause / prevention:**
+When beszel hub restarts, all SSH connections from hub→agents are dropped. Agents show "down"
+until they re-establish the SSH tunnel. This is normal and expected.
+
+To prevent recurring alerts from rolling `:latest` image restarts:
+- Beszel is now pinned to a specific version tag (see manifest and registry)
+- Update-patrol manages version upgrades (policy: auto)
+- Future restarts will only occur during deliberate version upgrades
+
 ### 1. SSH Authentication Failure
 
 **Symptoms:**
@@ -171,6 +200,7 @@ mcp__observability__gatus_get_endpoint_status()
 | Plex-VM | 10.10.0.50 | 45876 | `/opt/beszel-agent/beszel-agent` | Media server |
 | Omada LXC | 10.10.0.3 | 45876 | `/usr/local/bin/beszel-agent` | Network controller |
 | Synapse LXC | 10.10.0.22 | 45876 | `/usr/local/bin/beszel-agent` | Claude Code host |
+| PBS | 10.10.0.151 | 45876 | `/opt/beszel-agent` | Proxmox Backup Server (Pihanga) |
 
 ## Prevention
 
