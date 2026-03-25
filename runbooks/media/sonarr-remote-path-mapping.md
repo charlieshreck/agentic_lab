@@ -42,13 +42,25 @@ The shared downloads NFS mount should maintain this structure:
 └── movies-radarr/      # Radarr completed downloads
 ```
 
+### Permanent Fix — Init Container (2026-03-25)
+Transmission deployment now has an init container that ensures required directories exist on every pod start:
+
+```yaml
+initContainers:
+- name: init-download-dirs
+  image: busybox:1.37
+  command: ['sh', '-c', 'mkdir -p /downloads/tv-sonarr /downloads/movies-radarr /downloads/incomplete && chown -R 3000:3000 /downloads/tv-sonarr /downloads/movies-radarr']
+  volumeMounts:
+  - name: downloads
+    mountPath: /downloads
+```
+
+This prevents recurrence after pod restarts or NFS remounts.
+
 ### Why Separate Directories?
 - **Isolation**: Each service has its own completed downloads directory
 - **Monitoring**: Easier to track which service added what files
 - **Cleanup**: Enables per-service retention policies
-
-### One-Time Setup
-This fix only needs to be applied once. The directories persist on NFS.
 
 ### Related Configuration
 - Sonarr remote path mapping: UI → Settings → Download Clients → Transmission
