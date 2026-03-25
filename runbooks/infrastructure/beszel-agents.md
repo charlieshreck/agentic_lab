@@ -198,9 +198,32 @@ KUBECONFIG=/root/.kube/config kubectl --context admin@monitoring-cluster rollout
 # API should show status: "up" for affected systems
 ```
 
-**Pattern observed (2026-03-24)**: TrueNAS-Media and PBS both stopped being polled at 02:50 UTC. Both have persistent `smartctl failed (exit status 4)` on SATA drives. Hub pod had been running 11 days without restart. After rollout restart, both came back immediately.
+**Pattern observed (2026-03-24, 2026-03-25)**: PBS and/or TrueNAS-Media stop being polled. Both have SMART-unavailable disks (PBS is a QEMU VM; TrueNAS-Media has SATA drives returning exit status 4). Hub polling goroutine crashes within minutes of start.
 
-**Prevention**: The hub should be restarted periodically or monitored for stale poll cycles. Consider adding a Gatus check for beszel.kernow.io and an alert if multiple systems go "down" simultaneously.
+**Root cause (2026-03-25)**: PBS beszel-agent was running as root, triggering SMART queries that always return "SMART support is: Unavailable". Fixed by changing the service to run as `beszel` user (non-root) — no SMART queries, no goroutine crashes.
+
+**Prevention (implemented 2026-03-25)**:
+- PBS agent runs as non-root `beszel` user — SMART queries skipped, root cause addressed
+- Daily restart CronJob at 01:00 UTC (`beszel-daily-restart` in monitoring namespace) — safety net for any remaining goroutine issues
+- For any QEMU VM or system with unavailable SMART: always run beszel-agent as non-root
+
+**Fix for QEMU/virtual disks (run agent as non-root)**:
+```bash
+# Create beszel user
+useradd --system --no-create-home --shell /usr/sbin/nologin beszel
+
+# Add User=beszel to service file
+# Edit /etc/systemd/system/beszel-agent.service:
+# [Service]
+# User=beszel
+# ...
+
+# Fix data directory permissions
+mkdir -p /var/lib/beszel-agent
+chown beszel:beszel /var/lib/beszel-agent
+
+systemctl daemon-reload && systemctl restart beszel-agent
+```
 
 ### High CPU on Agent
 
