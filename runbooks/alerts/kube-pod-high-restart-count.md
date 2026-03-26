@@ -8,7 +8,7 @@
 | **Severity** | Warning |
 | **Threshold** | Container restart count > 100 |
 | **Source** | kube-state-metrics |
-| **Clusters Affected** | All (prod, agentic, monit) |
+| **Clusters Affected** | All (prod, agentic, monit) — **kube-system excluded** |
 
 ## Description
 
@@ -36,6 +36,12 @@ kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.status.containerStatuse
 - **2**: Misuse of shell built-in
 - **124**: Timeout
 - **127**: Command not found
+
+## Alert Scope — kube-system Excluded
+
+The `HomelabPodHighRestartCount` alert intentionally **excludes `kube-system`** pods. System components (cilium-operator, kube-proxy, etc.) restart whenever the Talos node reboots for maintenance or updates. On single-node clusters (monit) this causes cumulative restart counts that are expected, not pathological.
+
+Real crash-loop instability in kube-system is caught by `HomelabPodCrashLooping` (>5 restarts/hour), which has a time-bounded window. If you are investigating a kube-system pod restart pattern, see the [cilium-operator leader election section](#6-leader-election-loss-kube-system-pods) below.
 
 ## Common Causes
 
@@ -144,6 +150,34 @@ kubectl logs <pod-name> -n <namespace> --tail=50
 - Increase initial delay in probes to give dependencies time to start
 - Add init containers to wait for dependencies
 
+### 6. Leader Election Loss (kube-system Pods)
+
+**Symptoms:**
+- Exit code: 255
+- Logs end with `level=fatal msg="Leader election lost"`
+- Logs show `connection refused` to the API server IP just before the fatal exit
+- Pod is in `kube-system` namespace (cilium-operator, kube-controller-manager, etc.)
+
+**Root cause:**
+Components using Kubernetes leader election (e.g., cilium-operator) hold a coordination lease. When the API server becomes briefly unreachable (Talos node reboot, kernel update, maintenance), the pod cannot renew the lease, loses election, and exits. This is **designed behavior** — the pod immediately restarts and re-acquires leadership once the API server is back.
+
+On single-node clusters (monit: talos-monitor), every node reboot causes ALL system pods to restart since the API server is co-located with the workloads.
+
+**Why this won't alert anymore:**
+`HomelabPodHighRestartCount` excludes `namespace!="kube-system"`. Monitor via `HomelabPodCrashLooping` for rapid restarts (>5/hour) which would indicate a genuine problem.
+
+**Verification (for manual investigation):**
+```bash
+# Check if restarts correlate with Talos maintenance windows
+kubectl logs <pod> -n kube-system --previous | tail -20
+# Look for: "Leader election lost" + "connection refused" to 10.10.0.30:6443
+
+# Check node uptime
+kubectl get node -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].lastTransitionTime}'
+```
+
+**No action required** if: pod is Running/Ready, logs show normal operation, and restarts correlate with maintenance windows.
+
 ### 5. Resource Request/Limit Mismatch
 
 **Symptoms:**
@@ -250,6 +284,15 @@ kubectl logs <pod-name> -n <namespace> -f
 - **Exit code**: 137 (liveness probe kill)
 - **Resolution**: Removed hostNetwork, updated dnsPolicy, increased memory limits
 - **Lesson**: hostNetwork breaks service discovery; modern Matter doesn't require it
+
+### March 2026 - cilium-operator Leader Election Loss (monit cluster)
+- **Affected**: `cilium-operator-7f5c565bc4-nntnn` in kube-system, monit cluster
+- **Symptom**: 106 restarts accumulated since Feb 19, triggering HomelabPodHighRestartCount
+- **Root cause**: Talos single-node cluster reboots for maintenance/updates cause API server to be briefly unavailable → cilium-operator loses leader election lease → exits with code 255 (by design)
+- **Exit code**: 255 (`leader election lost`)
+- **Logs signature**: `connection refused` to `10.10.0.30:6443` → `level=fatal msg="Leader election lost"`
+- **Resolution**: Excluded `kube-system` namespace from `HomelabPodHighRestartCount` alert. This is expected behavior for system components; `HomelabPodCrashLooping` (>5/hour) catches genuine instability.
+- **Lesson**: High cumulative restart counts in kube-system are normal for single-node Talos clusters receiving regular maintenance. Alert rules should target application namespaces only.
 
 ## References
 
