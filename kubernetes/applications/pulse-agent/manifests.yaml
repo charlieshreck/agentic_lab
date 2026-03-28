@@ -74,7 +74,7 @@ spec:
       serviceAccountName: pulse-agent
       containers:
         - name: pulse-agent
-          image: rcourtman/pulse:5.1.24
+          image: rcourtman/pulse:5.1.25
           command: ["/opt/pulse/bin/pulse-agent-linux-amd64"]
           args:
             - --enable-kubernetes
