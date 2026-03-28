@@ -322,6 +322,7 @@ systemctl status beszel-agent
 
 **Agents requiring manual update check**:
 - Proxmox hosts (Ruapehu, Pihanga, Hikurangi) — often left unattended, check on infrastructure patrol
+- Synapse (10.10.0.22) — Tamar unified PWA, critical LXC. Stuck at 0.18.4 for 32 days (Feb 24 - Mar 28, 2026) due to SSH key mismatch. Manually updated to 0.18.5 on 2026-03-28.
 - Plex-VM — media server, periodic checks recommended
 - TrueNAS instances — generally stable, lower priority
 
