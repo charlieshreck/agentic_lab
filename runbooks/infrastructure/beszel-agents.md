@@ -253,20 +253,20 @@ Beszel agents typically auto-update when a new version is available. If version 
 
 ```bash
 # Check current version on agent
-ssh root@<agent-ip> "/opt/beszel-agent/beszel-agent -v"
+ssh root@<agent-ip> "/usr/local/bin/beszel-agent -v"
 
-# Output: beszel-agent 0.18.4
+# Output: beszel-agent 0.18.5
 
-# Check if newer version available
-ssh root@<agent-ip> "cd /opt/beszel-agent && ./beszel-agent update"
+# Check if newer version available (works from any directory)
+ssh root@<agent-ip> "/usr/local/bin/beszel-agent update"
 
-# Output: "You already have the latest version 0.18.4."
+# Output: "Update completed successfully!" or "You already have the latest version 0.18.5."
 ```
 
 If the agent reports an older version than hub:
 1. Verify current version with `-v` flag
 2. Run update command to trigger if needed
-3. Check binary modification time: `ls -la /opt/beszel-agent/beszel-agent`
+3. Check binary modification time: `ls -la /usr/local/bin/beszel-agent`
 4. If modification date is recent (within last 7 days), update was already applied — finding is stale
 
 **Example (Feb 2026):** Finding reported Plex-VM at 0.18.3 but agent was actually at 0.18.4 (binary updated Feb 20). Resolved as stale.
@@ -308,10 +308,10 @@ If finding is > **30 days old**, escalate to investigation even if severity=info
 ssh root@<agent-ip>
 
 # Manually trigger update (bypasses auto-update mechanism)
-cd /opt/beszel-agent && ./beszel-agent update
+/usr/local/bin/beszel-agent update
 
 # Verify
-./beszel-agent -v
+/usr/local/bin/beszel-agent -v
 systemctl status beszel-agent
 ```
 
