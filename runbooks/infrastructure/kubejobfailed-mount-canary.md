@@ -7,115 +7,99 @@ Alert: **KubeJobFailed** with severity **warning**
 - Job: `mount-canary-writer-*`
 - Cluster: `production`
 
-## Root Cause
+## What This Canary Does
 
-The `mount-canary-writer` CronJob tests NFS mount health by writing sentinel files to mounted Plex media directories. It failed when configured to mount non-existent TrueNAS datasets:
+The `mount-canary-writer` CronJob runs every 5 minutes and writes sentinel files to two NFS-mounted directories to verify NFS connectivity is healthy:
 
-- `/mnt/Taranaki/Tarriance/hopuhopu_katoa` (downloads)
-- `/mnt/Tongariro/Plexopathy/Film` (movies)
-- `/mnt/Tongariro/Plexopathy/Television` (tv)
+- `/media/downloads` → `10.40.0.10:/mnt/Taranaki/Tarriance/hopuhopu_katoa`
+- `/media/plexopathy` → `10.40.0.10:/mnt/Tongariro/Plexopathy`
 
-These datasets do not exist on TrueNAS-HDD. The actual media dataset is:
-- `/mnt/Taupo/Pleximetry` (857.7GB, contains Plex media)
+It uses `busybox:1.37`, runs as UID/GID 3000, with a 120-second `activeDeadlineSeconds`.
 
-## Fix
+## Failure Modes
 
-Update the CronJob manifest to mount the correct existing path:
+### 1. Transient NFS Timeout (most common)
 
-**File**: `kubernetes/applications/media/mount-canary/cronjob.yaml`
+**Symptoms**: Job fails with `DeadlineExceeded` reason. Subsequent runs succeed.
 
-Change all volume mounts from:
-```yaml
-volumes:
-  - name: downloads
-    nfs:
-      server: 10.40.0.10
-      path: /mnt/Taranaki/Tarriance/hopuhopu_katoa
-  - name: movies
-    nfs:
-      server: 10.40.0.10
-      path: /mnt/Tongariro/Plexopathy/Film
-  - name: tv
-    nfs:
-      server: 10.40.0.10
-      path: /mnt/Tongariro/Plexopathy/Television
-```
+**Cause**: Brief NFS unresponsiveness from TrueNAS-Media (10.40.0.10) — e.g., disk I/O spike, reboot, network blip.
 
-To:
-```yaml
-volumes:
-  - name: downloads
-    nfs:
-      server: 10.40.0.10
-      path: /mnt/Taupo/Pleximetry
-  - name: movies
-    nfs:
-      server: 10.40.0.10
-      path: /mnt/Taupo/Pleximetry
-  - name: tv
-    nfs:
-      server: 10.40.0.10
-      path: /mnt/Taupo/Pleximetry
-```
-
-Apply via GitOps:
-```bash
-git -C /home/prod_homelab add kubernetes/applications/media/mount-canary/cronjob.yaml
-git -C /home/prod_homelab commit -m "fix: mount-canary-writer - use correct TrueNAS paths"
-git -C /home/prod_homelab push origin main
-# ArgoCD auto-syncs within minutes
-```
-
-## Verification
-
-After ArgoCD syncs (watch `/home/prod_homelab/kubernetes/applications/media/mount-canary/`):
+**Fix**: Delete the failed job to clear the alert. No other action needed.
 
 ```bash
-# Check the latest job pod
-kubectl get pods -n media | grep mount-canary
-
-# Verify it Succeeded
-kubectl logs -n media job/mount-canary-writer-* | tail -5
-# Should output: "Canary files written successfully"
+kubectl --context admin@homelab-prod delete job <job-name> -n media
+# e.g.: kubectl --context admin@homelab-prod delete job mount-canary-writer-29571990 -n media
 ```
 
-## Long-Term Solution
+**Confirm recovery**: Check the next job succeeded:
+```bash
+kubectl --context admin@homelab-prod get jobs -n media | grep mount-canary
+```
 
-The current fix mounts all three mount points (downloads, movies, tv) to the same Pleximetry dataset. This is a temporary workaround.
+### 2. Persistent NFS Failure
 
-**Proper solution** (requires TrueNAS infrastructure updates):
+**Symptoms**: Multiple consecutive jobs fail. No recent successful runs.
 
-1. Create Tongariro/Tongariro dataset with subdirectories:
-   - `/mnt/Tongariro/Plexopathy/Film` → for Radarr movies
-   - `/mnt/Tongariro/Plexopathy/Television` → for Sonarr TV shows
+**Cause**: TrueNAS-Media offline, NFS export removed, network partition, or dataset deleted.
 
-2. Create Taranaki dataset with subdirectory:
-   - `/mnt/Taranaki/Tarriance/hopuhopu_katoa` → for Transmission/SABnzbd downloads
+**Investigation**:
+```bash
+# Check TrueNAS-Media alerts
+mcp: truenas_get_alerts(instance="media")
 
-3. Export all three as NFS shares to 10.40.0.0/24 network
+# Check recent events
+kubectl --context admin@homelab-prod get events -n media | grep mount-canary
 
-4. Update mount-canary-writer to mount each to its proper path
+# Check if NFS is reachable
+ssh root@10.10.0.178 "showmount -e 10.40.0.10"
+```
 
-5. Update any Kubernetes *arr deployments to mount these paths instead of Pleximetry
+**Fix**: Restore NFS service on TrueNAS-Media or fix network connectivity.
+
+### 3. Wrong NFS Paths (historical, fixed 2026-03)
+
+**Symptoms**: Job fails with `OOMKilled` or pod stuck in `ContainerCreating` (NFS mount hang).
+
+**Cause**: CronJob configured with non-existent NFS paths.
+
+**Current valid paths** (as of 2026-03-24):
+- `/mnt/Taranaki/Tarriance/hopuhopu_katoa` ✓
+- `/mnt/Tongariro/Plexopathy` ✓
+
+If paths change, update manifest:
+```
+prod_homelab/kubernetes/applications/media/mount-canary/cronjob.yaml
+```
+
+## Standard Resolution (Transient)
+
+```bash
+# 1. Confirm it's transient (latest job succeeded)
+kubectl --context admin@homelab-prod get jobs -n media | grep mount-canary
+
+# 2. Delete the failed job to clear the alert
+kubectl --context admin@homelab-prod delete job <failed-job-name> -n media
+
+# 3. Confirm no more failed jobs
+kubectl --context admin@homelab-prod get jobs -n media | grep mount-canary
+```
 
 ## Alert Configuration
 
-This alert fires whenever the `mount-canary-writer` CronJob fails. The canary runs every 5 minutes (`schedule: "*/5 * * * *"`).
-
-**Alert should trigger** when NFS mounts are truly unavailable (e.g., TrueNAS offline, network down). **False positives** occur when paths don't exist or permissions are misconfigured.
-
-To adjust sensitivity:
-- `backoffLimit: 1` - job fails after 1 retry (currently strict, no tolerance)
-- `activeDeadlineSeconds: 60` - 60-second timeout per attempt
+CronJob schedule: `*/5 * * * *` (every 5 minutes)
+- `backoffLimit: 1` — 1 retry before marking failed
+- `activeDeadlineSeconds: 120` — 2-minute timeout
+- `failedJobsHistoryLimit: 1` — keeps only the most recent failed job
 
 ## Related Resources
 
 - CronJob manifest: `prod_homelab/kubernetes/applications/media/mount-canary/cronjob.yaml`
-- TrueNAS NFS config: OPNsense → Infisical secret `/infrastructure/truenas-hdd/`
-- NFS network: vmbr3 (10.40.0.0/24) on prod cluster workers
+- NFS server: 10.40.0.10 (TrueNAS-Media NFS, vmbr3 10.40.0.0/24)
+- TrueNAS-Media management: 10.10.0.100
 
-## References
+## Incident History
 
-- **TrueNAS Datasets**: Available at `/mnt/Taupo/*` and `/mnt/Tekapo/*`
-- **NFS Server**: 10.40.0.10 (TrueNAS-HDD management IP: 10.10.0.103)
-- **Prod Network**: 10.10.0.0/24 (management), 10.40.0.0/24 (NFS storage)
+| Date | Job | Failure Reason | Resolution |
+|------|-----|---------------|------------|
+| 2026-03-24T02:30Z | mount-canary-writer-29571990 | DeadlineExceeded (transient NFS timeout) | Deleted failed job; subsequent runs OK |
+| 2026-03 (earlier) | multiple | Wrong NFS paths (datasets didn't exist) | Updated cronjob.yaml to correct paths |

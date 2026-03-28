@@ -290,6 +290,41 @@ Version drift findings for Plex-VM and other agents are frequently **stale/trans
 
 **Related:** See `beszel-agent-update-failed.md` for SSH auth failures and systemic key management issues.
 
+### SSH Key Sync Issue & 30-Day Investigation Threshold (2026-03-28)
+
+**Incident #1421**: Ruapehu agent was stuck at 0.18.2 for 76+ days while hub was at 0.18.5. Investigation revealed that Beszel's auto-update mechanism failed due to SSH key mismatch between hub (PVC-stored keys) and agent (authorized_keys file). Hub lacks automatic reconnection or retry logic for failed SSH connections.
+
+**Root cause**: Beszel hub stores SSH keys in Kubernetes PersistentVolumeClaim (runtime storage, not version-controlled). When the hub pod restarts, the PVC mounts the old keys. If an agent's authorized_keys file gets out of sync (e.g., system rebuild, key rotation), the hub cannot reconnect and auto-update fails silently with no retry.
+
+**Investigation threshold**: Do NOT assume all version drift findings are "transient" — the stale finding pattern (auto-resolve within minutes) only applies to:
+- Hub just deployed with new version → agents in auto-update window (< 5 min)
+- Agent re-polling after temporary network blip
+
+If finding is > **30 days old**, escalate to investigation even if severity=info. The 76-day Ruapehu drift was caught only by timestamp inspection, not automated alerts.
+
+**Fix for stuck agents**:
+```bash
+# SSH to agent host
+ssh root@<agent-ip>
+
+# Manually trigger update (bypasses auto-update mechanism)
+cd /opt/beszel-agent && ./beszel-agent update
+
+# Verify
+./beszel-agent -v
+systemctl status beszel-agent
+```
+
+**Prevention**:
+1. **Periodic manual updates**: Create CronJob on each agent host to run `./beszel-agent update` weekly
+2. **SSH key re-sync in Beszel hub**: Implement Infisical integration or init container to inject SSH keys from Infisical `/observability/beszel/` into PVC at startup
+3. **Version drift alert tuning**: Flag any drift > 30 days as requires-review, not just log_only
+
+**Agents requiring manual update check**:
+- Proxmox hosts (Ruapehu, Pihanga, Hikurangi) — often left unattended, check on infrastructure patrol
+- Plex-VM — media server, periodic checks recommended
+- TrueNAS instances — generally stable, lower priority
+
 ## Related
 
 - Coroot agents for Talos nodes: See `/home/monit_homelab/kubernetes/platform/coroot-agent-*/`
