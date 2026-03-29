@@ -476,7 +476,7 @@ data:
                 app_list = apps.get("result", apps) if isinstance(apps, dict) else apps
                 if isinstance(app_list, list):
                     for app in app_list:
-                        if isinstance(app, dict) and app.get("sync_status") == "OutOfSync":
+                        if isinstance(app, dict) and app.get("sync_status") == "OutOfSync" and app.get("health") not in ("Healthy", "Progressing"):
                             app_name = app.get("name", "unknown")
                             health = app.get("health", "unknown")
                             await forward_to_langgraph(
