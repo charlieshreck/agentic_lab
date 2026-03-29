@@ -4,78 +4,82 @@
 The Infisical Operator pod crashes periodically with exit code 1 due to failed leader election lease renewal.
 
 **Symptoms:**
-- Pod restarts frequently (every few hours)
+- Pod restarts frequently (dozens of times over weeks)
 - Error in logs: `failed to renew lease ... context deadline exceeded`
 - API server timeouts when updating leader election lease
+- Crash occurs after bulk reconciliation of many InfisicalSecrets
 
 **Error Pattern:**
 ```
-E0325 02:26:25.627496 leaderelection.go:429] Failed to update lock optimistically: ... Client.Timeout exceeded
-E0325 02:26:30.627606 leaderelection.go:436] error retrieving resource lock ... context deadline exceeded
+E leaderelection.go:429] Failed to update lock optimistically: ... Client.Timeout exceeded while awaiting headers
+E leaderelection.go:436] error retrieving resource lock ... context deadline exceeded
+I leaderelection.go:297] failed to renew lease ... context deadline exceeded
 ERROR setup problem running manager {"error": "leader election lost"}
 ```
 
 ## Root Cause
-The Kubernetes operator uses leader election to ensure only one replica manages cluster state. The default probe timeout of 1 second is too aggressive—even minor API server latency causes the liveness probe to fail and trigger a restart.
+Two contributing factors combine to cause this crash loop:
 
-**Contributing Factors:**
-- Liveness/readiness probe `timeoutSeconds: 1` is very tight
-- Periodic Kubernetes API server latency (common in multi-cluster setups)
-- High number of InfisicalSecret resources requiring periodic sync
+### Factor 1: Probe timeout too tight (initial fix)
+The liveness/readiness probe `timeoutSeconds: 1` was too aggressive. Even minor API server latency causes the probe to fail.
+
+### Factor 2: Memory limit too low (recurrence cause)
+With **46+ InfisicalSecrets** each reconciled every 1 minute, the 128Mi memory limit causes Go GC (garbage collection) pressure. GC pauses interrupt the leader election lease renewal goroutine, causing the 5s API request timeout to be exceeded. The crash pattern: bulk reconciliation completes → GC runs → lease renewal goroutine stalls → timeout → leader election lost.
+
+This is the dominant factor — the probe fix alone did not prevent recurrence.
 
 ## Solution
-Increase the liveness and readiness probe timeouts from 1 second to 5 seconds. This allows the operator to tolerate transient API latency without crashing.
 
-### Changes Made
+### Step 1: Increase probe timeouts (applied 2026-03-25)
 ```yaml
-# Before
 livenessProbe:
-  timeoutSeconds: 1      # ← Too aggressive
+  timeoutSeconds: 5      # was: 1
   failureThreshold: 3
   periodSeconds: 20
-
 readinessProbe:
-  timeoutSeconds: 1      # ← Too aggressive
-  failureThreshold: 3
-  periodSeconds: 10
-
-# After
-livenessProbe:
-  timeoutSeconds: 5      # ← Forgiving of latency
-  failureThreshold: 3
-  periodSeconds: 20
-
-readinessProbe:
-  timeoutSeconds: 5      # ← Forgiving of latency
+  timeoutSeconds: 5      # was: 1
   failureThreshold: 3
   periodSeconds: 10
 ```
 
-The failureThreshold of 3 means:
-- Liveness: 3 failures × 20s = 60s before restart (graceful)
-- Readiness: 3 failures × 10s = 30s before marking unready
+### Step 2: Increase resource limits (applied 2026-03-29)
+```yaml
+resources:
+  requests:
+    cpu: 10m
+    memory: 128Mi    # was: 64Mi
+  limits:
+    cpu: 1000m       # was: 500m
+    memory: 256Mi    # was: 128Mi
+```
 
-This gives the operator plenty of time to recover from transient latency without crashing.
+The memory increase from 128Mi → 256Mi reduces Go GC frequency, allowing the leader election renewal goroutine to complete within the 5s timeout even during peak reconciliation.
 
 ### Where to Apply
-Edit the ArgoCD application in `prod_homelab/kubernetes/argocd-apps/platform/infisical-operator-app.yaml`:
-- Add Helm values section with `manager.livenessProbe.timeoutSeconds: 5`
-- Add `manager.readinessProbe.timeoutSeconds: 5`
+Edit the ArgoCD application in `prod_homelab/kubernetes/argocd-apps/platform/infisical-operator-app.yaml`
+under the `manager.resources` Helm values section.
 
 ArgoCD will auto-sync and redeploy the operator with the new settings.
 
+## Scaling Rule
+As more InfisicalSecrets are added to the cluster, memory pressure will grow. Rough guidance:
+- < 20 InfisicalSecrets: 128Mi is sufficient
+- 20-50 InfisicalSecrets: 256Mi
+- 50+ InfisicalSecrets: 512Mi or consider increasing `resyncInterval` to 5m
+
 ## Prevention
-- Monitor the operator pod for restarts: `kubectl top pod -n infisical-operator-system`
-- If restarts spike again, check API server latency and cluster load
-- Consider increasing resource requests if the cluster is under high load
+- Monitor restart count: `kubectl get pod -n infisical-operator-system`
+- If restarts resume, check current InfisicalSecret count: `kubectl get infisicalsecrets -A | wc -l`
+- Scale memory limits proactively as secrets grow
 
 ## Verification
 After ArgoCD syncs:
-1. Check the deployment is updated: `kubectl get deployment -n infisical-operator-system infisical-opera-controller-manager -o yaml`
-2. Verify probe timeouts are now 5 seconds in the spec
-3. Monitor for stable operation: `kubectl get pod -n infisical-operator-system -w`
+1. Check deployment updated: `kubectl get deployment -n infisical-operator-system infisical-opera-controller-manager -o yaml | grep -A4 resources`
+2. Verify memory limit is 256Mi
+3. Monitor stability: `kubectl get pod -n infisical-operator-system -w`
+4. Restart count should stop incrementing after a few hours
 
 ## See Also
-- [Leader Election (Kubernetes docs)](https://kubernetes.io/docs/tasks/administer-cluster/manage-resources/quotas/)
 - Infisical Operator version: v0.10.2
 - ArgoCD Application: `prod_homelab/kubernetes/argocd-apps/platform/infisical-operator-app.yaml`
+- Finding #1428 (2026-03-29): 51 restarts, root cause confirmed as GC pressure with 46 secrets
