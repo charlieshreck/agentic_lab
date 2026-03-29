@@ -43,7 +43,10 @@ spec:
             - name: EXTERNAL_MCP_URL
               value: "http://external-mcp:8000"
             - name: DATABASE_URL
-              value: "postgresql://langgraph:password@postgresql.ai-platform.svc.cluster.local:5432/incident_management"
+              valueFrom:
+                secretKeyRef:
+                  name: incident-db-credentials
+                  key: DATABASE_URL
             - name: A2A_API_TOKEN
               valueFrom:
                 secretKeyRef:
