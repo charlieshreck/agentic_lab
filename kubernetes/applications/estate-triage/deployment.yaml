@@ -47,7 +47,7 @@ spec:
             - name: A2A_API_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: a2a-credentials
+                  name: a2a-api-token
                   key: TOKEN
           volumeMounts:
             - name: code
