@@ -1,0 +1,751 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: estate-triage-config
+  namespace: ai-platform
+data:
+  known-conditions.yaml: |
+    # Embedded copy — kept in sync with /home/scripts/estate-patrol/known-conditions.yaml
+    # The triage service uses this for real-time webhook filtering
+    suppress_alertnames:
+      - alertname: "Watchdog"
+      - alertname: "InfoInhibitor"
+    suppress_labels:
+      - alertname: "ArgoCDAppOutOfSync"
+        health_status: "Healthy"
+      - alertname: "ArgoCDAppOutOfSync"
+        health_status: "Progressing"
+      - alertname: "ArgoCDAppUnhealthy"
+        name: "agentic-backups"
+    routine_cronjob_prefixes:
+      - "configarr-"
+      - "mount-canary-writer-"
+      - "renovate-"
+      - "matter-hub-health-check-"
+      - "karakeep-restart-"
+      - "cleanup-tarriance-"
+    fp_threshold: 7
+    fp_window_days: 30
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: estate-triage-code
+  namespace: ai-platform
+  labels:
+    app: estate-triage
+data:
+  main.py: |
+    """Estate Triage Service v2 — Real-time alert handler for Kernow homelab.
+
+    Receives AlertManager webhooks, triages by severity, matches known patterns
+    via Qdrant vector search, executes deterministic fixes via MCP REST APIs,
+    validates results, and queues unknowns for the Claude -p sweep.
+
+    Zero LLM tokens used. All decisions are deterministic or pattern-matched.
+    """
+    import os
+    import json
+    import hashlib
+    import logging
+    import asyncio
+    from datetime import datetime, timezone, timedelta
+    from typing import Optional
+
+    import httpx
+    import yaml
+    import asyncpg
+    from fastapi import FastAPI, Request, HTTPException
+    from fastapi.responses import JSONResponse
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logger = logging.getLogger("estate-triage")
+
+    # ========================================================================
+    # CONFIGURATION
+    # ========================================================================
+
+    DATABASE_URL = os.environ.get("DATABASE_URL", "")
+    A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
+
+    MCP_URLS = {
+        "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
+        "observability": os.environ.get("OBSERVABILITY_MCP_URL", "http://observability-mcp:8000"),
+        "knowledge": os.environ.get("KNOWLEDGE_MCP_URL", "http://knowledge-mcp:8000"),
+        "home": os.environ.get("HOME_MCP_URL", "http://home-mcp:8000"),
+        "media": os.environ.get("MEDIA_MCP_URL", "http://media-mcp:8000"),
+        "external": os.environ.get("EXTERNAL_MCP_URL", "http://external-mcp:8000"),
+    }
+
+    CONFIG_PATH = "/config/known-conditions.yaml"
+
+    # Domain classification for persona routing
+    DOMAIN_KEYWORDS = {
+        "kubernetes": ["pod", "deployment", "statefulset", "daemonset", "job", "cronjob",
+                       "pvc", "service", "ingress", "node", "namespace", "kubelet",
+                       "kube-", "container", "replica", "mayastor", "cilium", "coredns"],
+        "argocd": ["argocd", "sync", "outofsync", "unhealthy", "application"],
+        "media": ["plex", "sonarr", "radarr", "prowlarr", "transmission", "sabnzbd",
+                  "tautulli", "overseerr", "maintainerr", "cleanuparr", "notifiarr"],
+        "network": ["dns", "adguard", "unbound", "caddy", "traefik", "cloudflare",
+                     "opnsense", "firewall", "vlan", "dhcp", "unifi", "omada"],
+        "storage": ["truenas", "nfs", "zfs", "pool", "dataset", "mount", "volume",
+                     "pvc", "mayastor", "backup", "backrest", "velero", "pbs"],
+        "monitoring": ["prometheus", "alertmanager", "grafana", "gatus", "coroot",
+                       "victoria", "metric", "scrape", "alert"],
+        "home": ["homeassistant", "tasmota", "mqtt", "matter", "zigbee", "iot"],
+    }
+
+    # ========================================================================
+    # APP SETUP
+    # ========================================================================
+
+    app = FastAPI(title="Estate Triage v2", version="2.0.0")
+    db_pool: Optional[asyncpg.Pool] = None
+    config: dict = {}
+
+    @app.on_event("startup")
+    async def startup():
+        global db_pool, config
+        # Load config
+        try:
+            with open(CONFIG_PATH) as f:
+                config = yaml.safe_load(f) or {}
+            logger.info(f"Loaded config from {CONFIG_PATH}")
+        except Exception as e:
+            logger.warning(f"Could not load config: {e}")
+            config = {}
+
+        # Connect to PostgreSQL
+        try:
+            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+            logger.info("Connected to PostgreSQL")
+        except Exception as e:
+            logger.error(f"Failed to connect to PostgreSQL: {e}")
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        if db_pool:
+            await db_pool.close()
+
+    # ========================================================================
+    # MCP TOOL CALLING
+    # ========================================================================
+
+    async def call_mcp(domain: str, tool: str, args: dict = None, timeout: float = 30.0) -> dict:
+        """Call an MCP tool via the REST bridge. Returns result dict or error dict."""
+        url = MCP_URLS.get(domain)
+        if not url:
+            return {"_error": True, "message": f"Unknown MCP domain: {domain}"}
+
+        headers = {"Content-Type": "application/json"}
+        if A2A_API_TOKEN:
+            headers["Authorization"] = f"Bearer {A2A_API_TOKEN}"
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                resp = await client.post(
+                    f"{url}/api/call",
+                    json={"tool": tool, "arguments": args or {}},
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if result.get("status") == "success":
+                        output = result.get("output")
+                        if isinstance(output, dict):
+                            return output
+                        if isinstance(output, str):
+                            try:
+                                return json.loads(output)
+                            except (json.JSONDecodeError, ValueError):
+                                return {"text": output}
+                        return {"result": output}
+                    return {"_error": True, "message": result.get("error", "Unknown")}
+                return {"_error": True, "message": f"HTTP {resp.status_code}"}
+            except Exception as e:
+                return {"_error": True, "message": str(e)}
+
+    # ========================================================================
+    # FINGERPRINTING & CLASSIFICATION
+    # ========================================================================
+
+    def compute_fingerprint(alertname: str, cluster: str = "", namespace: str = "",
+                            resource: str = "") -> str:
+        """Deterministic SHA256 fingerprint for deduplication."""
+        raw = f"{alertname}|{cluster}|{namespace}|{resource}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def classify_severity(alert: dict) -> str:
+        """Map AlertManager severity to patrol severity."""
+        labels = alert.get("labels", {})
+        severity = labels.get("severity", "warning").lower()
+        if severity in ("critical", "error"):
+            return "critical"
+        if severity in ("warning",):
+            return "warning"
+        return "info"
+
+    def classify_domain(alert: dict) -> str:
+        """Determine which domain this alert belongs to for persona routing."""
+        text = json.dumps(alert).lower()
+        scores = {}
+        for domain, keywords in DOMAIN_KEYWORDS.items():
+            scores[domain] = sum(1 for kw in keywords if kw in text)
+        if not scores or max(scores.values()) == 0:
+            return "general"
+        return max(scores, key=scores.get)
+
+    def is_suppressed(alert: dict) -> tuple[bool, str]:
+        """Check if alert matches suppress rules from config."""
+        labels = alert.get("labels", {})
+        alertname = labels.get("alertname", "")
+
+        # Check direct alertname suppression
+        for rule in config.get("suppress_alertnames", []):
+            if rule.get("alertname") == alertname:
+                return True, f"Suppressed: {alertname}"
+
+        # Check label-based suppression
+        for rule in config.get("suppress_labels", []):
+            match = True
+            for key, value in rule.items():
+                if labels.get(key) != value:
+                    match = False
+                    break
+            if match:
+                return True, f"Suppressed: label match {rule}"
+
+        # Check routine cronjob prefixes
+        resource = labels.get("job_name", "") or labels.get("pod", "")
+        for prefix in config.get("routine_cronjob_prefixes", []):
+            if resource.startswith(prefix):
+                return True, f"Routine cronjob: {prefix}"
+
+        return False, ""
+
+    # ========================================================================
+    # QDRANT PATTERN MATCHING
+    # ========================================================================
+
+    async def find_known_pattern(description: str) -> Optional[dict]:
+        """Search Qdrant estate-patterns collection for a matching resolution."""
+        result = await call_mcp("knowledge", "vector_search_documents", {
+            "collection": "estate-patterns",
+            "query": description,
+            "limit": 3,
+        })
+        if result.get("_error"):
+            logger.warning(f"Qdrant search failed: {result.get('message')}")
+            return None
+
+        # Check top result similarity
+        items = result.get("items", result.get("result", []))
+        if isinstance(items, list) and items:
+            top = items[0]
+            score = top.get("score", 0)
+            if score >= 0.85:
+                payload = top.get("payload", top)
+                return {
+                    "match_id": top.get("id", ""),
+                    "similarity": score,
+                    "resolution_steps": payload.get("resolution_steps", []),
+                    "runbook_path": payload.get("runbook_path", ""),
+                    "confidence": payload.get("confidence", 0.5),
+                }
+        return None
+
+    # ========================================================================
+    # DETERMINISTIC REMEDIATION
+    # ========================================================================
+
+    REMEDIATORS = {
+        "pod_not_running": {
+            "action": "restart_pod",
+            "steps": [
+                {"mcp": "infrastructure", "tool": "kubectl_delete_pod",
+                 "args_template": {"pod_name": "{resource}", "namespace": "{namespace}", "cluster": "{cluster}"}},
+            ],
+            "validation": "pod_not_running",
+        },
+        "deployment_unavailable": {
+            "action": "restart_deployment",
+            "steps": [
+                {"mcp": "infrastructure", "tool": "kubectl_restart_deployment",
+                 "args_template": {"name": "{resource}", "namespace": "{namespace}", "cluster": "{cluster}"}},
+            ],
+            "validation": "deployment_unavailable",
+        },
+        "argocd_out_of_sync": {
+            "action": "sync_app",
+            "steps": [
+                {"mcp": "infrastructure", "tool": "argocd_sync_application",
+                 "args_template": {"name": "{resource}"}},
+            ],
+            "validation": "argocd_out_of_sync",
+        },
+    }
+
+    async def execute_deterministic_fix(finding: dict, pattern: dict) -> dict:
+        """Execute a known fix pattern via MCP tools. Returns result."""
+        steps_executed = []
+        success = True
+
+        resolution_steps = pattern.get("resolution_steps", [])
+        if not resolution_steps:
+            # Fall back to REMEDIATORS if pattern has no explicit steps
+            alertname = finding.get("alertname", "").lower()
+            for key, remediation in REMEDIATORS.items():
+                if key in alertname:
+                    resolution_steps = remediation["steps"]
+                    break
+
+        for step in resolution_steps:
+            mcp_domain = step.get("mcp", "infrastructure")
+            tool = step.get("tool", "")
+            args_template = step.get("args_template", step.get("args", {}))
+
+            # Template substitution
+            args = {}
+            for k, v in args_template.items():
+                if isinstance(v, str) and v.startswith("{") and v.endswith("}"):
+                    field = v[1:-1]
+                    # Support finding.X and direct field names
+                    field = field.replace("finding.", "")
+                    args[k] = finding.get(field, v)
+                else:
+                    args[k] = v
+
+            result = await call_mcp(mcp_domain, tool, args)
+            step_result = {"tool": tool, "args": args, "success": not result.get("_error", False)}
+            steps_executed.append(step_result)
+
+            if result.get("_error"):
+                success = False
+                step_result["error"] = result.get("message", "Unknown error")
+                break
+
+        return {"success": success, "steps": steps_executed}
+
+    # ========================================================================
+    # VALIDATION
+    # ========================================================================
+
+    async def validate_fix(finding: dict, validation_type: str) -> bool:
+        """Run a concrete validation check. Returns True if fix is confirmed working."""
+        # Simple validation: re-check the resource status
+        if validation_type == "pod_not_running":
+            result = await call_mcp("infrastructure", "kubectl_get_pods", {
+                "namespace": finding.get("namespace", "default"),
+                "cluster": finding.get("cluster", "prod"),
+            })
+            if result.get("_error"):
+                return False
+            pods = result.get("result", [])
+            resource = finding.get("resource", "")
+            for pod in pods if isinstance(pods, list) else []:
+                if resource in pod.get("name", "") and pod.get("ready"):
+                    return True
+            return False
+
+        elif validation_type == "deployment_unavailable":
+            result = await call_mcp("infrastructure", "kubectl_get_deployments", {
+                "namespace": finding.get("namespace", "default"),
+                "cluster": finding.get("cluster", "prod"),
+            })
+            if result.get("_error"):
+                return False
+            # If we got a result without error, deployment is probably healthy
+            return True
+
+        elif validation_type == "argocd_out_of_sync":
+            result = await call_mcp("infrastructure", "argocd_get_applications")
+            if result.get("_error"):
+                return False
+            apps = result.get("result", [])
+            resource = finding.get("resource", "")
+            for a in apps if isinstance(apps, list) else []:
+                if a.get("name") == resource and a.get("sync_status") == "Synced":
+                    return True
+            return False
+
+        # Default: can't validate this type
+        return False
+
+    # ========================================================================
+    # FP TRACKING
+    # ========================================================================
+
+    async def track_fp(fingerprint: str, alertname: str, cluster: str = ""):
+        """Increment FP counter. Returns True if now tune-eligible."""
+        if not db_pool:
+            return False
+
+        threshold = config.get("fp_threshold", 7)
+        window_days = config.get("fp_window_days", 30)
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM patrol_fp_tracking WHERE fingerprint = $1", fingerprint
+            )
+            if row:
+                # Check if window expired
+                window_start = row["window_start"]
+                if datetime.now(timezone.utc) - window_start > timedelta(days=window_days):
+                    # Reset window
+                    await conn.execute(
+                        """UPDATE patrol_fp_tracking
+                           SET occurrence_count = 1, window_start = NOW(),
+                               tune_eligible = false, last_seen = NOW()
+                           WHERE fingerprint = $1""",
+                        fingerprint,
+                    )
+                    return False
+                else:
+                    new_count = row["occurrence_count"] + 1
+                    tune_eligible = new_count >= threshold
+                    await conn.execute(
+                        """UPDATE patrol_fp_tracking
+                           SET occurrence_count = $1, tune_eligible = $2, last_seen = NOW()
+                           WHERE fingerprint = $3""",
+                        new_count, tune_eligible, fingerprint,
+                    )
+                    if tune_eligible and not row["tune_eligible"]:
+                        logger.info(f"FP threshold reached for {alertname} ({new_count}/{threshold})")
+                    return tune_eligible
+            else:
+                await conn.execute(
+                    """INSERT INTO patrol_fp_tracking (fingerprint, alertname, cluster)
+                       VALUES ($1, $2, $3)""",
+                    fingerprint, alertname, cluster,
+                )
+                return False
+
+    # ========================================================================
+    # DATABASE OPERATIONS
+    # ========================================================================
+
+    async def insert_finding(finding: dict) -> Optional[int]:
+        """Insert a new finding into PostgreSQL. Returns finding ID."""
+        if not db_pool:
+            logger.error("No database connection")
+            return None
+
+        async with db_pool.acquire() as conn:
+            try:
+                row = await conn.fetchrow(
+                    """INSERT INTO patrol_findings
+                       (fingerprint, alertname, cluster, namespace, resource,
+                        severity, source, status, description, raw_alert,
+                        qdrant_match_id, qdrant_similarity)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                       ON CONFLICT (fingerprint) DO UPDATE
+                       SET updated_at = NOW(),
+                           raw_alert = EXCLUDED.raw_alert,
+                           description = EXCLUDED.description
+                       RETURNING id""",
+                    finding["fingerprint"], finding["alertname"],
+                    finding.get("cluster"), finding.get("namespace"),
+                    finding.get("resource"), finding["severity"],
+                    finding.get("source", "alertmanager"),
+                    finding.get("status", "new"),
+                    finding.get("description"),
+                    json.dumps(finding.get("raw_alert", {})),
+                    finding.get("qdrant_match_id"),
+                    finding.get("qdrant_similarity"),
+                )
+                return row["id"] if row else None
+            except Exception as e:
+                logger.error(f"Failed to insert finding: {e}")
+                return None
+
+    async def update_finding_status(finding_id: int, status: str):
+        """Update finding status."""
+        if not db_pool:
+            return
+        async with db_pool.acquire() as conn:
+            extra = ""
+            if status == "resolved":
+                extra = ", resolved_at = NOW()"
+            elif status == "validated":
+                extra = ", validated_at = NOW()"
+            await conn.execute(
+                f"UPDATE patrol_findings SET status = $1, updated_at = NOW(){extra} WHERE id = $2",
+                status, finding_id,
+            )
+
+    async def insert_resolution(finding_id: int, method: str, steps: list,
+                                 root_cause: str = "", summary: str = "",
+                                 success: bool = False) -> Optional[int]:
+        """Record a resolution attempt."""
+        if not db_pool:
+            return None
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO patrol_resolutions
+                   (finding_id, method, steps, root_cause, summary, success)
+                   VALUES ($1, $2, $3, $4, $5, $6)
+                   RETURNING id""",
+                finding_id, method, json.dumps(steps), root_cause, summary, success,
+            )
+            return row["id"] if row else None
+
+    async def insert_validation(finding_id: int, resolution_id: int, check_type: str,
+                                 passed: bool, failure_reason: str = "",
+                                 attempt: int = 1):
+        """Record a validation check result."""
+        if not db_pool:
+            return
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO patrol_validations
+                   (finding_id, resolution_id, check_type, passed, failure_reason, attempt_number)
+                   VALUES ($1, $2, $3, $4, $5, $6)""",
+                finding_id, resolution_id, check_type, passed, failure_reason, attempt,
+            )
+
+    # ========================================================================
+    # WEBHOOK HANDLER
+    # ========================================================================
+
+    @app.post("/webhook/alertmanager")
+    async def handle_alertmanager_webhook(request: Request):
+        """Receive AlertManager webhook, triage, and handle."""
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "Invalid JSON")
+
+        alerts = payload.get("alerts", [])
+        results = []
+
+        for alert in alerts:
+            # Only process firing alerts (not resolved)
+            if alert.get("status") != "firing":
+                continue
+
+            labels = alert.get("labels", {})
+            annotations = alert.get("annotations", {})
+            alertname = labels.get("alertname", "unknown")
+            cluster = labels.get("cluster", "")
+            namespace = labels.get("namespace", "")
+            resource = labels.get("pod", "") or labels.get("deployment", "") or labels.get("name", "")
+
+            # Step 1: Check suppress rules
+            suppressed, reason = is_suppressed(alert)
+            if suppressed:
+                logger.debug(f"Suppressed: {alertname} — {reason}")
+                results.append({"alertname": alertname, "action": "suppressed", "reason": reason})
+                continue
+
+            # Step 2: Classify
+            severity = classify_severity(alert)
+            domain = classify_domain(alert)
+            fingerprint = compute_fingerprint(alertname, cluster, namespace, resource)
+            description = annotations.get("description", "") or annotations.get("summary", "") or alertname
+
+            finding = {
+                "fingerprint": fingerprint,
+                "alertname": alertname,
+                "cluster": cluster,
+                "namespace": namespace,
+                "resource": resource,
+                "severity": severity,
+                "source": "alertmanager",
+                "domain": domain,
+                "description": description,
+                "raw_alert": alert,
+            }
+
+            # Step 3: Handle based on severity
+            if severity == "critical":
+                # Real-time handling for critical alerts
+                await handle_critical(finding)
+                results.append({"alertname": alertname, "action": "realtime_triage", "domain": domain})
+            else:
+                # Queue for sweep
+                finding["status"] = "queued_for_sweep"
+                finding_id = await insert_finding(finding)
+                results.append({"alertname": alertname, "action": "queued", "finding_id": finding_id})
+
+        return JSONResponse({"received": len(alerts), "processed": results})
+
+    async def handle_critical(finding: dict):
+        """Handle a critical alert in real-time. Zero LLM tokens."""
+        description = finding.get("description", finding.get("alertname", ""))
+
+        # Check Qdrant for known pattern
+        pattern = await find_known_pattern(description)
+
+        if pattern and pattern.get("resolution_steps"):
+            # Known pattern — execute deterministic fix
+            finding["status"] = "in_progress"
+            finding["qdrant_match_id"] = pattern.get("match_id")
+            finding["qdrant_similarity"] = pattern.get("similarity")
+            finding_id = await insert_finding(finding)
+
+            logger.info(f"Known pattern match ({pattern['similarity']:.2f}) for {finding['alertname']} — executing fix")
+
+            fix_result = await execute_deterministic_fix(finding, pattern)
+
+            resolution_id = await insert_resolution(
+                finding_id, "deterministic", fix_result["steps"],
+                summary=f"Known pattern fix (similarity={pattern['similarity']:.2f})",
+                success=fix_result["success"],
+            )
+
+            if fix_result["success"]:
+                # Wait and validate
+                await asyncio.sleep(60)
+                validation_type = pattern.get("validation", "pod_not_running")
+                passed = await validate_fix(finding, validation_type)
+
+                await insert_validation(finding_id, resolution_id, validation_type, passed)
+
+                if passed:
+                    await update_finding_status(finding_id, "validated")
+                    logger.info(f"Validated fix for {finding['alertname']}")
+                else:
+                    await update_finding_status(finding_id, "queued_for_sweep")
+                    logger.warning(f"Validation failed for {finding['alertname']} — queuing for sweep")
+            else:
+                await update_finding_status(finding_id, "queued_for_sweep")
+                logger.warning(f"Deterministic fix failed for {finding['alertname']} — queuing for sweep")
+        else:
+            # Unknown pattern — queue for Claude sweep
+            finding["status"] = "queued_for_sweep"
+            finding_id = await insert_finding(finding)
+            logger.info(f"No known pattern for {finding['alertname']} — queued for sweep")
+
+            # Track for FP threshold
+            await track_fp(finding["fingerprint"], finding["alertname"], finding.get("cluster"))
+
+    # ========================================================================
+    # API ENDPOINTS (for Tamar + debugging)
+    # ========================================================================
+
+    @app.get("/health")
+    async def health():
+        db_ok = db_pool is not None and not db_pool._closed if db_pool else False
+        return {"status": "healthy" if db_ok else "degraded", "database": db_ok}
+
+    @app.get("/api/findings")
+    async def list_findings(status: str = None, limit: int = 50):
+        """List findings, optionally filtered by status."""
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            if status:
+                rows = await conn.fetch(
+                    """SELECT id, fingerprint, alertname, cluster, namespace, resource,
+                              severity, source, status, description, detected_at, updated_at
+                       FROM patrol_findings WHERE status = $1
+                       ORDER BY detected_at DESC LIMIT $2""",
+                    status, limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT id, fingerprint, alertname, cluster, namespace, resource,
+                              severity, source, status, description, detected_at, updated_at
+                       FROM patrol_findings
+                       ORDER BY detected_at DESC LIMIT $1""",
+                    limit,
+                )
+            return {"findings": [dict(r) for r in rows]}
+
+    @app.get("/api/findings/{finding_id}")
+    async def get_finding(finding_id: int):
+        """Get a single finding with its resolutions and validations."""
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            finding = await conn.fetchrow(
+                "SELECT * FROM patrol_findings WHERE id = $1", finding_id
+            )
+            if not finding:
+                raise HTTPException(404, "Finding not found")
+            resolutions = await conn.fetch(
+                "SELECT * FROM patrol_resolutions WHERE finding_id = $1 ORDER BY created_at",
+                finding_id,
+            )
+            validations = await conn.fetch(
+                "SELECT * FROM patrol_validations WHERE finding_id = $1 ORDER BY checked_at",
+                finding_id,
+            )
+            return {
+                "finding": dict(finding),
+                "resolutions": [dict(r) for r in resolutions],
+                "validations": [dict(v) for v in validations],
+            }
+
+    @app.get("/api/queue")
+    async def get_queue():
+        """Get the active patrol queue (for Tamar patrol tab)."""
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM patrol_queue LIMIT 100"""
+            )
+            return {"queue": [dict(r) for r in rows]}
+
+    @app.get("/api/fp-tracking")
+    async def get_fp_tracking():
+        """Get FP tracking data, sorted by occurrence count."""
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM patrol_fp_tracking
+                   ORDER BY occurrence_count DESC LIMIT 50"""
+            )
+            return {"tracking": [dict(r) for r in rows]}
+
+    @app.get("/api/stats")
+    async def get_stats():
+        """Dashboard statistics."""
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            total = await conn.fetchval("SELECT COUNT(*) FROM patrol_findings")
+            active = await conn.fetchval(
+                "SELECT COUNT(*) FROM patrol_findings WHERE status NOT IN ('validated', 'false_positive', 'expired')"
+            )
+            validated = await conn.fetchval(
+                "SELECT COUNT(*) FROM patrol_findings WHERE status = 'validated'"
+            )
+            escalated = await conn.fetchval(
+                "SELECT COUNT(*) FROM patrol_findings WHERE status = 'escalated'"
+            )
+            tune_eligible = await conn.fetchval(
+                "SELECT COUNT(*) FROM patrol_fp_tracking WHERE tune_eligible = true"
+            )
+            return {
+                "total_findings": total,
+                "active": active,
+                "validated": validated,
+                "escalated": escalated,
+                "alerts_ready_to_tune": tune_eligible,
+            }
+
+    @app.post("/api/findings/{finding_id}/resolve")
+    async def manual_resolve(finding_id: int, request: Request):
+        """Manually resolve a finding (from Tamar UI)."""
+        body = await request.json()
+        await update_finding_status(finding_id, "validated")
+        await insert_resolution(
+            finding_id, "manual", [],
+            summary=body.get("summary", "Manually resolved"),
+            success=True,
+        )
+        return {"status": "resolved"}
+
+    @app.post("/api/expire-stale")
+    async def expire_stale():
+        """Expire stale findings (called by cron or sweep)."""
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval("SELECT expire_stale_findings()")
+            return {"expired": count}

@@ -1,0 +1,99 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: estate-triage
+  namespace: ai-platform
+  labels:
+    app: estate-triage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: estate-triage
+  template:
+    metadata:
+      labels:
+        app: estate-triage
+    spec:
+      containers:
+        - name: estate-triage
+          image: python:3.12-slim
+          command:
+            - sh
+            - -c
+            - |
+              pip install --quiet --no-cache-dir fastapi uvicorn httpx asyncpg pyyaml > /dev/null 2>&1 &&
+              cd /app &&
+              python -m uvicorn main:app --host 0.0.0.0 --port 8000 --log-level info
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: INFRASTRUCTURE_MCP_URL
+              value: "http://infrastructure-mcp:8000"
+            - name: OBSERVABILITY_MCP_URL
+              value: "http://observability-mcp:8000"
+            - name: KNOWLEDGE_MCP_URL
+              value: "http://knowledge-mcp:8000"
+            - name: HOME_MCP_URL
+              value: "http://home-mcp:8000"
+            - name: MEDIA_MCP_URL
+              value: "http://media-mcp:8000"
+            - name: EXTERNAL_MCP_URL
+              value: "http://external-mcp:8000"
+            - name: DATABASE_URL
+              value: "postgresql://langgraph:password@postgresql.ai-platform.svc.cluster.local:5432/incident_management"
+            - name: A2A_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-credentials
+                  key: TOKEN
+          volumeMounts:
+            - name: code
+              mountPath: /app
+            - name: config
+              mountPath: /config
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: code
+          configMap:
+            name: estate-triage-code
+        - name: config
+          configMap:
+            name: estate-triage-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: estate-triage
+  namespace: ai-platform
+  labels:
+    app: estate-triage
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    app: estate-triage
