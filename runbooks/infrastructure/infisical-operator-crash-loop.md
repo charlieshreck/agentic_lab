@@ -18,68 +18,79 @@ ERROR setup problem running manager {"error": "leader election lost"}
 ```
 
 ## Root Cause
-Two contributing factors combine to cause this crash loop:
+**Leader election is enabled on a single-replica deployment.** When there is a transient K8s API server connectivity blip (even 5 seconds), the lease renewal times out and the operator treats this as "leader election lost" and exits with code 1.
 
-### Factor 1: Probe timeout too tight (initial fix)
-The liveness/readiness probe `timeoutSeconds: 1` was too aggressive. Even minor API server latency causes the probe to fail.
+With a single replica, leader election provides no benefit (it exists to coordinate multi-replica deployments where only one instance should act as leader). Enabling it on a single replica means any API blip causes a crash-restart cycle.
 
-### Factor 2: Memory limit too low (recurrence cause)
-With **46+ InfisicalSecrets** each reconciled every 1 minute, the 128Mi memory limit causes Go GC (garbage collection) pressure. GC pauses interrupt the leader election lease renewal goroutine, causing the 5s API request timeout to be exceeded. The crash pattern: bulk reconciliation completes → GC runs → lease renewal goroutine stalls → timeout → leader election lost.
+**Contributing factor**: 46+ InfisicalSecrets each reconciled every 1 minute generates significant API traffic. During peak reconciliation, any momentary latency spike triggers the 5s lease renewal timeout.
 
-This is the dominant factor — the probe fix alone did not prevent recurrence.
+## Definitive Fix (applied 2026-03-29, finding #1439)
 
-## Solution
+Updated `prod_homelab/kubernetes/argocd-apps/platform/infisical-operator-app.yaml`:
 
-### Step 1: Increase probe timeouts (applied 2026-03-25)
+1. **Disabled leader election** (`--leader-elect=false`) — eliminates crash-loop on any API blip
+2. **Upgraded chart 0.10.2 → 0.10.28** (latest, was 26 patch versions behind)
+3. **Fixed Helm values key** — previous values used wrong path `manager.*`; chart requires `controllerManager.manager.*`, causing all overrides to be silently ignored
+
 ```yaml
-livenessProbe:
-  timeoutSeconds: 5      # was: 1
-  failureThreshold: 3
-  periodSeconds: 20
-readinessProbe:
-  timeoutSeconds: 5      # was: 1
-  failureThreshold: 3
-  periodSeconds: 10
+controllerManager:
+  manager:
+    # Disable leader election: single replica only, avoids crash-loop on transient API blips
+    args:
+      - --metrics-bind-address=:8443
+      - --leader-elect=false
+      - --health-probe-bind-address=:8081
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 128Mi
 ```
 
-### Step 2: Increase resource limits (applied 2026-03-29)
-```yaml
-resources:
-  requests:
-    cpu: 10m
-    memory: 128Mi    # was: 64Mi
-  limits:
-    cpu: 1000m       # was: 500m
-    memory: 256Mi    # was: 128Mi
+## History of Attempts
+
+### Attempt 1 (2026-03-25): Probe timeout increase — did not fix it
+Added probe timeout overrides in Helm values under `manager.livenessProbe` — but the chart uses `controllerManager.manager.*` so these were silently ignored. Probe timeouts remained at `timeoutSeconds: 1` (chart default).
+
+### Attempt 2 (2026-03-29 AM): Resource limit increase — did not fix it
+Added `manager.resources` with 256Mi memory limit — but again wrong key path, chart defaults of 128Mi were used. Did not reduce GC pressure.
+
+### Attempt 3 (2026-03-29): **Definitive fix**
+Corrected the key path, upgraded to latest chart, disabled leader election.
+
+## Why Previous Fixes Failed
+The Helm chart `secrets-operator` uses `controllerManager.manager.*` not `manager.*` for all manager container configuration. Any values placed under `manager.*` were silently ignored by Helm as unknown fields.
+
+Verify the chart's correct values structure:
+```bash
+curl -sL "https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/secrets-operator-0.10.28.tgz" | \
+  tar xzO secrets-operator/values.yaml
 ```
-
-The memory increase from 128Mi → 256Mi reduces Go GC frequency, allowing the leader election renewal goroutine to complete within the 5s timeout even during peak reconciliation.
-
-### Where to Apply
-Edit the ArgoCD application in `prod_homelab/kubernetes/argocd-apps/platform/infisical-operator-app.yaml`
-under the `manager.resources` Helm values section.
-
-ArgoCD will auto-sync and redeploy the operator with the new settings.
-
-## Scaling Rule
-As more InfisicalSecrets are added to the cluster, memory pressure will grow. Rough guidance:
-- < 20 InfisicalSecrets: 128Mi is sufficient
-- 20-50 InfisicalSecrets: 256Mi
-- 50+ InfisicalSecrets: 512Mi or consider increasing `resyncInterval` to 5m
-
-## Prevention
-- Monitor restart count: `kubectl get pod -n infisical-operator-system`
-- If restarts resume, check current InfisicalSecret count: `kubectl get infisicalsecrets -A | wc -l`
-- Scale memory limits proactively as secrets grow
 
 ## Verification
-After ArgoCD syncs:
-1. Check deployment updated: `kubectl get deployment -n infisical-operator-system infisical-opera-controller-manager -o yaml | grep -A4 resources`
-2. Verify memory limit is 256Mi
-3. Monitor stability: `kubectl get pod -n infisical-operator-system -w`
-4. Restart count should stop incrementing after a few hours
+
+After ArgoCD syncs (usually within 3 minutes of push):
+```bash
+# Check operator args — should show --leader-elect=false
+kubectl get deployment -n infisical-operator-system infisical-opera-controller-manager \
+  -o jsonpath='{.spec.template.spec.containers[0].args}' --kubeconfig /root/.kube/config
+
+# Verify restart count stops incrementing
+kubectl get pod -n infisical-operator-system -w --kubeconfig /root/.kube/config
+
+# Check image version is v0.10.28
+kubectl get pod -n infisical-operator-system -o jsonpath='{.items[0].spec.containers[0].image}' \
+  --kubeconfig /root/.kube/config
+```
+
+## Future Upgrades
+Check for new versions at: https://dl.cloudsmith.io/public/infisical/helm-charts/helm/charts/index.yaml
+
+The Helm chart version matches the operator image version (e.g., chart `0.10.28` = image `v0.10.28`).
 
 ## See Also
-- Infisical Operator version: v0.10.2
+- Infisical Operator version: v0.10.28 (upgraded from v0.10.2)
 - ArgoCD Application: `prod_homelab/kubernetes/argocd-apps/platform/infisical-operator-app.yaml`
-- Finding #1428 (2026-03-29): 51 restarts, root cause confirmed as GC pressure with 46 secrets
+- Finding #1439 (2026-03-29): 51 restarts — root cause: leader election + wrong Helm values key path
