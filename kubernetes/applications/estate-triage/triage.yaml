@@ -337,10 +337,10 @@ data:
             for i, step in enumerate(steps):
                 reasoning_step = await memory.reasoning.add_step(
                     trace_id=trace.id,
-                    step_number=i + 1,
-                    thought=f"Executing {step.get('tool', 'unknown')}",
+                    thought=f"Step {i+1}: {step.get('tool', 'unknown')}",
                     action=step.get("tool", ""),
                     observation=str(step.get("result", ""))[:500],
+                    generate_embedding=False,
                 )
                 if step.get("tool"):
                     await memory.reasoning.record_tool_call(
