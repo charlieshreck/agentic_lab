@@ -62,7 +62,6 @@ data:
     # neo4j-agent-memory — structured knowledge graph + reasoning traces
     from neo4j_agent_memory import (
         MemoryClient, MemoryConfig, MemorySettings, Neo4jConfig,
-        EmbeddingConfig, EmbeddingProvider,
         ReasoningTrace, ReasoningStep, ToolCall, ToolCallStatus,
     )
 
@@ -147,9 +146,6 @@ data:
                         username=NEO4J_USERNAME,
                         password=NEO4J_PASSWORD,
                         database="neo4j",
-                    ),
-                    embedding=EmbeddingConfig(
-                        provider=EmbeddingProvider.SENTENCE_TRANSFORMERS,
                     ),
                     memory=MemoryConfig(
                         trace_embedding_enabled=False,
@@ -335,6 +331,7 @@ data:
                 task=task,
                 metadata={"tenant_id": tenant_id, "fingerprint": finding.get("fingerprint"),
                           "domain": finding.get("domain", "general"), "severity": finding.get("severity")},
+                generate_embedding=False,
             )
 
             for i, step in enumerate(steps):
