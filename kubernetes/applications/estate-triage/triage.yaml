@@ -793,7 +793,7 @@ data:
     @app.get("/health")
     async def health():
         db_ok = db_pool is not None and not db_pool._closed if db_pool else False
-        memory_ok = memory is not None and memory.is_connected() if memory else False
+        memory_ok = memory is not None and memory.is_connected if memory else False
         all_ok = db_ok and memory_ok
         return {
             "status": "healthy" if all_ok else "degraded",
@@ -822,7 +822,7 @@ data:
 
             # Memory layer stats
             memory_info = {}
-            if memory and memory.is_connected():
+            if memory and memory.is_connected:
                 try:
                     tool_stats = await memory.reasoning.get_tool_stats()
                     memory_info = {
