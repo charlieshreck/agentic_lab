@@ -23,7 +23,7 @@ spec:
             - sh
             - -c
             - |
-              pip install --quiet --no-cache-dir fastapi uvicorn httpx asyncpg pyyaml neo4j-agent-memory > /dev/null 2>&1 &&
+              pip install --quiet --no-cache-dir fastapi uvicorn httpx asyncpg pyyaml 'neo4j-agent-memory' sentence-transformers > /dev/null 2>&1 &&
               cd /app &&
               python -m uvicorn main:app --host 0.0.0.0 --port 8000 --log-level info
           ports:
