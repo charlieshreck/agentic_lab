@@ -968,14 +968,38 @@ data:
             if not finding_id:
                 raise HTTPException(500, "Failed to insert finding")
 
-            # If status is escalated, also insert a resolution record
-            if body.get("status") == "escalated" and body.get("summary"):
-                await insert_resolution(
+            # If has a summary (escalated or validated), insert a resolution record
+            if body.get("summary"):
+                is_success = body.get("status") in ("validated", "resolved")
+                resolution_id = await insert_resolution(
                     finding_id, "claude_sweep", [],
                     root_cause=body.get("root_cause", ""),
                     summary=body.get("summary", ""),
-                    success=False,
+                    success=is_success,
                 )
+
+                # Attach runbook path if provided or auto-find one
+                rb_path = body.get("runbook_path", "")
+                if not rb_path:
+                    # Auto-search for existing runbook by alertname
+                    import glob as globmod
+                    alertname_slug = body.get("alertname", "unknown").lower().replace(" ", "-").replace("_", "-")
+                    matches = globmod.glob(f"/home/agentic_lab/runbooks/**/*{alertname_slug}*", recursive=True)
+                    if not matches:
+                        keywords = [k for k in alertname_slug.split("-") if len(k) > 3][:3]
+                        for kw in keywords:
+                            matches = globmod.glob(f"/home/agentic_lab/runbooks/**/*{kw}*", recursive=True)
+                            if matches:
+                                break
+                    if matches:
+                        rb_path = matches[0]
+
+                if rb_path and resolution_id and db_pool:
+                    async with db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE patrol_resolutions SET runbook_path = $1 WHERE id = $2",
+                            rb_path, resolution_id,
+                        )
 
             return {"id": finding_id, "fingerprint": finding["fingerprint"], "status": finding["status"]}
         except HTTPException:
@@ -1030,6 +1054,22 @@ data:
             summary=summary,
             success=True,
         )
+
+        # Auto-find existing runbook if we didn't generate one
+        if not runbook_path:
+            alertname_slug = body.get("alertname", "unknown").lower().replace(" ", "-").replace("_", "-")
+            import glob as globmod
+            matches = globmod.glob(f"/home/agentic_lab/runbooks/**/*{alertname_slug}*", recursive=True)
+            if not matches:
+                # Try partial match on alert name keywords
+                keywords = alertname_slug.split("-")[:3]
+                for kw in keywords:
+                    if len(kw) > 3:
+                        matches = globmod.glob(f"/home/agentic_lab/runbooks/**/*{kw}*", recursive=True)
+                        if matches:
+                            break
+            if matches:
+                runbook_path = matches[0]
 
         # Update runbook_path on the resolution
         if runbook_path and resolution_id and db_pool:
