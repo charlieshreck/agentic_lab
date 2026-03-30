@@ -1,0 +1,61 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-config
+  namespace: monitoring
+data:
+  vector.yaml: |
+    data_dir: /vector-data-dir
+
+    api:
+      enabled: false
+
+    sources:
+      kubernetes_logs:
+        type: kubernetes_logs
+
+      internal_metrics:
+        type: internal_metrics
+
+    transforms:
+      parse_logs:
+        type: remap
+        inputs: [kubernetes_logs]
+        source: |
+          .log = parse_json(.message) ?? .message
+          .cluster = "agentic"
+          del(.message)
+
+      add_metadata:
+        type: remap
+        inputs: [parse_logs]
+        source: |
+          .namespace = .kubernetes.pod_namespace
+          .pod = .kubernetes.pod_name
+          .container = .kubernetes.container_name
+          .node = .kubernetes.pod_node_name
+
+    sinks:
+      victoria_logs:
+        type: elasticsearch
+        inputs: [add_metadata]
+        endpoints:
+          - "http://victorialogs.monit.kernow.io/insert/elasticsearch"
+        mode: bulk
+        api_version: v8
+        compression: gzip
+        healthcheck:
+          enabled: false
+        request:
+          headers:
+            AccountID: "0"
+            ProjectID: "0"
+            VL-Msg-Field: "log,message,msg"
+            VL-Time-Field: "timestamp"
+            VL-Stream-Fields: "stream,namespace,pod,container,cluster,node"
+
+      prometheus_metrics:
+        type: prometheus_exporter
+        address: 0.0.0.0:9090
+        inputs: [internal_metrics]
