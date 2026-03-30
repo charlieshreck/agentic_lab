@@ -80,7 +80,7 @@ spec:
           echo "Qdrant is ready!"
 
           # Create collections (PUT is idempotent - creates or returns existing)
-          for collection in runbooks decisions documentation agent_events tool_knowledge validations capability_gaps skill_gaps user_feedback entities device_types; do
+          for collection in runbooks decisions documentation agent_events tool_knowledge validations capability_gaps skill_gaps user_feedback entities device_types estate-patterns; do
             echo "Ensuring collection '${collection}' exists..."
             curl -sf -X PUT "${QDRANT_URL}/collections/${collection}" \
               -H "Content-Type: application/json" \
