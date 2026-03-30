@@ -107,6 +107,9 @@ data:
         "monitoring": ["prometheus", "alertmanager", "grafana", "gatus", "coroot",
                        "victoria", "metric", "scrape", "alert"],
         "home": ["homeassistant", "tasmota", "mqtt", "matter", "zigbee", "iot"],
+        "upgrade": ["staleimage", "updateavailable", "updatefailed", "renovatepr",
+                     "applianceupdate", "firmware", "plugin", "helm", "version",
+                     "update-check", "update-patrol"],
     }
 
     # ========================================================================
