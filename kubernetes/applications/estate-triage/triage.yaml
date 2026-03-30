@@ -59,6 +59,12 @@ data:
     from fastapi import FastAPI, Request, HTTPException
     from fastapi.responses import JSONResponse
 
+    # neo4j-agent-memory — structured knowledge graph + reasoning traces
+    from neo4j_agent_memory import (
+        MemoryClient, MemoryConfig, Neo4jConfig,
+        ReasoningTrace, ReasoningStep, ToolCall, ToolCallStatus,
+    )
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logger = logging.getLogger("estate-triage")
 
@@ -68,6 +74,12 @@ data:
 
     DATABASE_URL = os.environ.get("DATABASE_URL", "")
     A2A_API_TOKEN = os.environ.get("A2A_API_TOKEN", "")
+    DEFAULT_TENANT = os.environ.get("DEFAULT_TENANT", "kernow")
+
+    # Neo4j configuration for agent memory
+    NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
+    NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
+    NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")
 
     MCP_URLS = {
         "infrastructure": os.environ.get("INFRASTRUCTURE_MCP_URL", "http://infrastructure-mcp:8000"),
@@ -104,10 +116,11 @@ data:
     app = FastAPI(title="Estate Triage v2", version="2.0.0")
     db_pool: Optional[asyncpg.Pool] = None
     config: dict = {}
+    memory: Optional[MemoryClient] = None
 
     @app.on_event("startup")
     async def startup():
-        global db_pool, config
+        global db_pool, config, memory
         # Load config
         try:
             with open(CONFIG_PATH) as f:
@@ -124,10 +137,36 @@ data:
         except Exception as e:
             logger.error(f"Failed to connect to PostgreSQL: {e}")
 
+        # Connect to Neo4j agent memory
+        try:
+            if NEO4J_PASSWORD:
+                memory = MemoryClient(
+                    neo4j_config=Neo4jConfig(
+                        uri=NEO4J_URI,
+                        username=NEO4J_USERNAME,
+                        password=NEO4J_PASSWORD,
+                        database="neo4j",
+                    ),
+                    memory_config=MemoryConfig(
+                        trace_embedding_enabled=False,  # No embeddings needed for triage
+                        message_embedding_enabled=False,
+                        tool_stats_enabled=True,
+                    ),
+                )
+                await memory.connect()
+                logger.info(f"Connected to Neo4j agent memory (tenant: {DEFAULT_TENANT})")
+            else:
+                logger.warning("NEO4J_PASSWORD not set — agent memory disabled")
+        except Exception as e:
+            logger.error(f"Failed to connect to Neo4j agent memory: {e}")
+            memory = None
+
     @app.on_event("shutdown")
     async def shutdown():
         if db_pool:
             await db_pool.close()
+        if memory:
+            await memory.close()
 
     # ========================================================================
     # MCP TOOL CALLING
@@ -224,6 +263,101 @@ data:
                 return True, f"Routine cronjob: {prefix}"
 
         return False, ""
+
+    # ========================================================================
+    # AGENT MEMORY — Neo4j knowledge graph queries (tenant-scoped)
+    # ========================================================================
+
+    async def get_entity_context(tenant_id: str, resource_name: str) -> dict:
+        """Query Neo4j for what we know about this entity and its relationships.
+        Returns entity info + dependencies + past incidents."""
+        if not memory:
+            return {}
+        try:
+            # Search for the entity in long-term memory
+            entities = await memory.long_term.search_entities(resource_name, limit=3)
+            if not entities:
+                return {}
+
+            top_entity = entities[0]
+            # Get relationships (what depends on this, what it depends on)
+            relationships = await memory.long_term.get_entity_relationships(top_entity.name)
+            # Get facts about this entity
+            facts = await memory.long_term.get_facts_about(top_entity.name)
+
+            return {
+                "entity": {"name": top_entity.name, "type": top_entity.type, "subtype": top_entity.subtype,
+                           "description": top_entity.description, "attributes": top_entity.attributes},
+                "relationships": [{"type": r.type if hasattr(r, 'type') else str(r),
+                                   "target": str(r)} for r in (relationships or [])[:10]],
+                "facts": [{"text": f.text if hasattr(f, 'text') else str(f)} for f in (facts or [])[:5]],
+            }
+        except Exception as e:
+            logger.warning(f"Memory entity query failed: {e}")
+            return {}
+
+    async def get_past_traces(tenant_id: str, description: str) -> list:
+        """Query Neo4j for past reasoning traces similar to this finding.
+        Returns decision chains that worked before."""
+        if not memory:
+            return []
+        try:
+            traces = await memory.reasoning.get_similar_traces(description, limit=3)
+            return [
+                {
+                    "task": t.task,
+                    "outcome": t.outcome,
+                    "success": t.success,
+                    "steps": len(t.steps) if t.steps else 0,
+                    "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+                }
+                for t in (traces or [])
+            ]
+        except Exception as e:
+            logger.warning(f"Memory trace query failed: {e}")
+            return []
+
+    async def record_decision_trace(tenant_id: str, finding: dict, steps: list,
+                                      outcome: str, success: bool):
+        """Write a decision trace to Neo4j after resolution.
+        This is how the system learns."""
+        if not memory:
+            return
+        try:
+            task = f"[{tenant_id}] {finding.get('alertname', 'unknown')}: {finding.get('description', '')}"
+            trace = await memory.reasoning.start_trace(
+                session_id=f"{tenant_id}-triage",
+                task=task,
+                metadata={"tenant_id": tenant_id, "fingerprint": finding.get("fingerprint"),
+                          "domain": finding.get("domain", "general"), "severity": finding.get("severity")},
+            )
+
+            for i, step in enumerate(steps):
+                reasoning_step = await memory.reasoning.add_step(
+                    trace_id=trace.id,
+                    step_number=i + 1,
+                    thought=f"Executing {step.get('tool', 'unknown')}",
+                    action=step.get("tool", ""),
+                    observation=str(step.get("result", ""))[:500],
+                )
+                if step.get("tool"):
+                    await memory.reasoning.record_tool_call(
+                        step_id=reasoning_step.id,
+                        tool_name=step["tool"],
+                        arguments=step.get("args", {}),
+                        result=str(step.get("result", ""))[:500],
+                        status=ToolCallStatus.SUCCESS if step.get("success") else ToolCallStatus.ERROR,
+                        duration_ms=step.get("duration_ms", 0),
+                    )
+
+            await memory.reasoning.complete_trace(
+                trace_id=trace.id,
+                outcome=outcome,
+                success=success,
+            )
+            logger.info(f"Recorded decision trace for {finding.get('alertname')} ({len(steps)} steps, success={success})")
+        except Exception as e:
+            logger.warning(f"Failed to record decision trace: {e}")
 
     # ========================================================================
     # QDRANT PATTERN MATCHING
@@ -573,9 +707,21 @@ data:
 
     async def handle_critical(finding: dict):
         """Handle a critical alert in real-time. Zero LLM tokens."""
+        tenant_id = finding.get("tenant_id", DEFAULT_TENANT)
         description = finding.get("description", finding.get("alertname", ""))
+        resource = finding.get("resource", "")
 
-        # Check Qdrant for known pattern
+        # Step 1: Query agent memory — what do we KNOW about this entity?
+        entity_context = await get_entity_context(tenant_id, resource) if resource else {}
+        if entity_context:
+            logger.info(f"Memory context for {resource}: {len(entity_context.get('relationships', []))} relationships, {len(entity_context.get('facts', []))} facts")
+
+        # Step 2: Query agent memory — have we REASONED about this before?
+        past_traces = await get_past_traces(tenant_id, description)
+        if past_traces:
+            logger.info(f"Found {len(past_traces)} past decision traces for similar findings")
+
+        # Step 3: Check Qdrant for known pattern (vector similarity)
         pattern = await find_known_pattern(description)
 
         if pattern and pattern.get("resolution_steps"):
@@ -606,12 +752,30 @@ data:
                 if passed:
                     await update_finding_status(finding_id, "validated")
                     logger.info(f"Validated fix for {finding['alertname']}")
+                    # Record successful decision trace to Neo4j
+                    await record_decision_trace(
+                        tenant_id, finding, fix_result["steps"],
+                        outcome=f"Known pattern fix validated (similarity={pattern['similarity']:.2f})",
+                        success=True,
+                    )
                 else:
                     await update_finding_status(finding_id, "queued_for_sweep")
                     logger.warning(f"Validation failed for {finding['alertname']} — queuing for sweep")
+                    # Record failed attempt
+                    await record_decision_trace(
+                        tenant_id, finding, fix_result["steps"],
+                        outcome=f"Fix applied but validation failed — escalated to sweep",
+                        success=False,
+                    )
             else:
                 await update_finding_status(finding_id, "queued_for_sweep")
                 logger.warning(f"Deterministic fix failed for {finding['alertname']} — queuing for sweep")
+                # Record failed fix
+                await record_decision_trace(
+                    tenant_id, finding, fix_result.get("steps", []),
+                    outcome=f"Deterministic fix execution failed — escalated to sweep",
+                    success=False,
+                )
         else:
             # Unknown pattern — queue for Claude sweep
             finding["status"] = "queued_for_sweep"
@@ -628,7 +792,56 @@ data:
     @app.get("/health")
     async def health():
         db_ok = db_pool is not None and not db_pool._closed if db_pool else False
-        return {"status": "healthy" if db_ok else "degraded", "database": db_ok}
+        memory_ok = memory is not None and memory.is_connected() if memory else False
+        all_ok = db_ok and memory_ok
+        return {
+            "status": "healthy" if all_ok else "degraded",
+            "database": db_ok,
+            "memory": memory_ok,
+            "tenant": DEFAULT_TENANT,
+        }
+
+    @app.get("/api/memory/stats")
+    async def memory_stats():
+        """Memory layer statistics — tracks if the agent is getting smarter."""
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            # Count resolutions by method (deterministic vs claude_sweep)
+            rows = await conn.fetch(
+                """SELECT method, COUNT(*) as count, SUM(CASE WHEN success THEN 1 ELSE 0 END) as successes
+                   FROM patrol_resolutions GROUP BY method"""
+            )
+            methods = {r["method"]: {"count": r["count"], "successes": r["successes"]} for r in rows}
+
+            # Calculate smartness ratio: deterministic / total
+            total = sum(m["count"] for m in methods.values())
+            deterministic = methods.get("deterministic", {}).get("count", 0)
+            ratio = deterministic / total if total > 0 else 0
+
+            # Memory layer stats
+            memory_info = {}
+            if memory and memory.is_connected():
+                try:
+                    tool_stats = await memory.reasoning.get_tool_stats()
+                    memory_info = {
+                        "connected": True,
+                        "tool_stats": [{"tool": t.tool_name, "calls": t.total_calls,
+                                        "successes": t.successful_calls} for t in (tool_stats or [])[:10]],
+                    }
+                except Exception:
+                    memory_info = {"connected": True, "tool_stats": []}
+            else:
+                memory_info = {"connected": False}
+
+            return {
+                "resolution_methods": methods,
+                "total_resolutions": total,
+                "deterministic_count": deterministic,
+                "smartness_ratio": round(ratio, 3),
+                "improving": ratio > 0.5,  # More than half handled without LLM = getting smarter
+                "memory": memory_info,
+            }
 
     @app.get("/api/findings")
     async def list_findings(status: str = None, limit: int = 50):
@@ -728,6 +941,22 @@ data:
                 "escalated": escalated,
                 "alerts_ready_to_tune": tune_eligible,
             }
+
+    @app.get("/api/memory/entity")
+    async def get_memory_entity(resource: str = "", tenant_id: str = DEFAULT_TENANT):
+        """Get entity context from Neo4j agent memory."""
+        if not resource:
+            return {"entity": None, "relationships": [], "facts": []}
+        context = await get_entity_context(tenant_id, resource)
+        return context or {"entity": None, "relationships": [], "facts": []}
+
+    @app.get("/api/memory/traces")
+    async def get_memory_traces(description: str = "", tenant_id: str = DEFAULT_TENANT):
+        """Get past reasoning traces for similar findings."""
+        if not description:
+            return {"traces": []}
+        traces = await get_past_traces(tenant_id, description)
+        return {"traces": traces}
 
     @app.post("/api/findings/{finding_id}/resolve")
     async def manual_resolve(finding_id: int, request: Request):
