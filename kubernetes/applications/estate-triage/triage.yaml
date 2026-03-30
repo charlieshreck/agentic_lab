@@ -1017,6 +1017,12 @@ data:
         await update_finding_status(finding_id, "validated")
 
         # 2. Insert resolution with structured data
+        runbook_path = ""
+        if generate_runbook and root_cause and fix_applied:
+            alertname_slug = body.get("alertname", "unknown").lower().replace(" ", "-").replace("_", "-")
+            domain = body.get("domain", "general")
+            runbook_path = f"/home/agentic_lab/runbooks/{domain}/{alertname_slug}.md"
+
         resolution_id = await insert_resolution(
             finding_id, "manual",
             steps=[{"action": "human_resolution", "fix": fix_applied}],
@@ -1024,6 +1030,14 @@ data:
             summary=summary,
             success=True,
         )
+
+        # Update runbook_path on the resolution
+        if runbook_path and resolution_id and db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE patrol_resolutions SET runbook_path = $1 WHERE id = $2",
+                    runbook_path, resolution_id,
+                )
 
         # 3. Record decision trace in Neo4j
         if db_pool:
