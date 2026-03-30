@@ -23,7 +23,7 @@ spec:
             - sh
             - -c
             - |
-              pip install --quiet --no-cache-dir fastapi uvicorn httpx asyncpg pyyaml > /dev/null 2>&1 &&
+              pip install --quiet --no-cache-dir fastapi uvicorn httpx asyncpg pyyaml neo4j-agent-memory > /dev/null 2>&1 &&
               cd /app &&
               python -m uvicorn main:app --host 0.0.0.0 --port 8000 --log-level info
           ports:
@@ -52,6 +52,20 @@ spec:
                 secretKeyRef:
                   name: a2a-api-token
                   key: TOKEN
+            - name: NEO4J_URI
+              value: "bolt://neo4j.ai-platform.svc.cluster.local:7687"
+            - name: NEO4J_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: USERNAME
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neo4j-credentials
+                  key: PASSWORD
+            - name: DEFAULT_TENANT
+              value: "kernow"
           volumeMounts:
             - name: code
               mountPath: /app
