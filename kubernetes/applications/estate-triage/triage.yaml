@@ -943,6 +943,46 @@ data:
                 "alerts_ready_to_tune": tune_eligible,
             }
 
+    @app.post("/api/findings")
+    async def create_finding(request: Request):
+        """Create a finding directly (from Claude sweep or manual input)."""
+        try:
+            body = await request.json()
+            finding = {
+                "fingerprint": compute_fingerprint(
+                    body.get("alertname", "unknown"),
+                    body.get("cluster", ""),
+                    body.get("namespace", ""),
+                    body.get("resource", ""),
+                ),
+                "alertname": body.get("alertname", "unknown"),
+                "cluster": body.get("cluster"),
+                "namespace": body.get("namespace"),
+                "resource": body.get("resource"),
+                "severity": body.get("severity", "warning"),
+                "source": body.get("source", "sweep"),
+                "status": body.get("status", "new"),
+                "description": body.get("description"),
+            }
+            finding_id = await insert_finding(finding)
+            if not finding_id:
+                raise HTTPException(500, "Failed to insert finding")
+
+            # If status is escalated, also insert a resolution record
+            if body.get("status") == "escalated" and body.get("summary"):
+                await insert_resolution(
+                    finding_id, "claude_sweep", [],
+                    root_cause=body.get("root_cause", ""),
+                    summary=body.get("summary", ""),
+                    success=False,
+                )
+
+            return {"id": finding_id, "fingerprint": finding["fingerprint"], "status": finding["status"]}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, str(e))
+
     @app.get("/api/memory/entity")
     async def get_memory_entity(resource: str = "", tenant_id: str = DEFAULT_TENANT):
         """Get entity context from Neo4j agent memory."""
