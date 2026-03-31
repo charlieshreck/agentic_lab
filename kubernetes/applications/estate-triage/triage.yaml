@@ -571,20 +571,21 @@ data:
             logger.error("No database connection")
             return None
 
+        tenant_id = finding.get("tenant_id", DEFAULT_TENANT)
         async with db_pool.acquire() as conn:
             try:
                 row = await conn.fetchrow(
                     """INSERT INTO patrol_findings
-                       (fingerprint, alertname, cluster, namespace, resource,
+                       (tenant_id, fingerprint, alertname, cluster, namespace, resource,
                         severity, source, status, description, raw_alert,
                         qdrant_match_id, qdrant_similarity)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                       ON CONFLICT (fingerprint) DO UPDATE
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                       ON CONFLICT (tenant_id, fingerprint) DO UPDATE
                        SET updated_at = NOW(),
                            raw_alert = EXCLUDED.raw_alert,
                            description = EXCLUDED.description
                        RETURNING id""",
-                    finding["fingerprint"], finding["alertname"],
+                    tenant_id, finding["fingerprint"], finding["alertname"],
                     finding.get("cluster"), finding.get("namespace"),
                     finding.get("resource"), finding["severity"],
                     finding.get("source", "alertmanager"),
@@ -600,17 +601,23 @@ data:
                 return None
 
     async def update_finding_status(finding_id: int, status: str):
-        """Update finding status."""
+        """Update finding status and auto-tag outcome."""
         if not db_pool:
             return
         async with db_pool.acquire() as conn:
             extra = ""
+            outcome_clause = ""
             if status == "resolved":
                 extra = ", resolved_at = NOW()"
             elif status == "validated":
                 extra = ", validated_at = NOW()"
+                outcome_clause = ", outcome = 'true_positive', outcome_tagged_at = NOW(), outcome_tagged_by = 'auto'"
+            elif status == "false_positive":
+                outcome_clause = ", outcome = 'false_positive', outcome_tagged_at = NOW(), outcome_tagged_by = 'auto'"
+            elif status == "expired":
+                outcome_clause = ", outcome = 'stale', outcome_tagged_at = NOW(), outcome_tagged_by = 'auto'"
             await conn.execute(
-                f"UPDATE patrol_findings SET status = $1, updated_at = NOW(){extra} WHERE id = $2",
+                f"UPDATE patrol_findings SET status = $1, updated_at = NOW(){extra}{outcome_clause} WHERE id = $2",
                 status, finding_id,
             )
 
@@ -921,30 +928,44 @@ data:
             return {"tracking": [dict(r) for r in rows]}
 
     @app.get("/api/stats")
-    async def get_stats():
-        """Dashboard statistics."""
+    async def get_stats(tenant_id: str = None):
+        """Dashboard statistics with outcome tracking."""
         if not db_pool:
             raise HTTPException(503, "Database unavailable")
+        tid = tenant_id or DEFAULT_TENANT
         async with db_pool.acquire() as conn:
-            total = await conn.fetchval("SELECT COUNT(*) FROM patrol_findings")
+            total = await conn.fetchval("SELECT COUNT(*) FROM patrol_findings WHERE tenant_id = $1", tid)
             active = await conn.fetchval(
-                "SELECT COUNT(*) FROM patrol_findings WHERE status NOT IN ('validated', 'false_positive', 'expired')"
+                "SELECT COUNT(*) FROM patrol_findings WHERE tenant_id = $1 AND status NOT IN ('validated', 'false_positive', 'expired')", tid
             )
             validated = await conn.fetchval(
-                "SELECT COUNT(*) FROM patrol_findings WHERE status = 'validated'"
+                "SELECT COUNT(*) FROM patrol_findings WHERE tenant_id = $1 AND status = 'validated'", tid
             )
             escalated = await conn.fetchval(
-                "SELECT COUNT(*) FROM patrol_findings WHERE status = 'escalated'"
+                "SELECT COUNT(*) FROM patrol_findings WHERE tenant_id = $1 AND status = 'escalated'", tid
             )
             tune_eligible = await conn.fetchval(
-                "SELECT COUNT(*) FROM patrol_fp_tracking WHERE tune_eligible = true"
+                "SELECT COUNT(*) FROM patrol_fp_tracking WHERE tenant_id = $1 AND tune_eligible = true", tid
             )
+            outcome_rows = await conn.fetch(
+                "SELECT outcome, COUNT(*) as count FROM patrol_findings WHERE tenant_id = $1 AND outcome IS NOT NULL GROUP BY outcome", tid
+            )
+            outcomes = {r["outcome"]: r["count"] for r in outcome_rows}
+            fp_30d = await conn.fetchval(
+                "SELECT COUNT(*) FROM patrol_findings WHERE tenant_id = $1 AND outcome = 'false_positive' AND detected_at > NOW() - INTERVAL '30 days'", tid
+            )
+            total_30d = await conn.fetchval(
+                "SELECT COUNT(*) FROM patrol_findings WHERE tenant_id = $1 AND outcome IS NOT NULL AND detected_at > NOW() - INTERVAL '30 days'", tid
+            )
+            fp_rate = round(fp_30d / total_30d, 3) if total_30d > 0 else 0.0
             return {
                 "total_findings": total,
                 "active": active,
                 "validated": validated,
                 "escalated": escalated,
                 "alerts_ready_to_tune": tune_eligible,
+                "outcomes": outcomes,
+                "fp_rate_30d": fp_rate,
             }
 
     @app.post("/api/findings")
@@ -1148,3 +1169,91 @@ data:
         async with db_pool.acquire() as conn:
             count = await conn.fetchval("SELECT expire_stale_findings()")
             return {"expired": count}
+
+    # ==================================================================
+    # FEEDBACK LOOP ENDPOINTS
+    # ==================================================================
+
+    @app.patch("/api/findings/{finding_id}/outcome")
+    async def set_finding_outcome(finding_id: int, request: Request):
+        """Manually set or override a finding's outcome."""
+        body = await request.json()
+        tenant_id = body.get("tenant_id", DEFAULT_TENANT)
+        outcome = body.get("outcome")
+        valid_outcomes = ("true_positive", "false_positive", "severity_wrong", "duplicate", "stale")
+        if outcome not in valid_outcomes:
+            raise HTTPException(400, f"Invalid outcome. Must be one of: {valid_outcomes}")
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            existing = await conn.fetchrow("SELECT id, fingerprint, alertname, cluster FROM patrol_findings WHERE id = $1 AND tenant_id = $2", finding_id, tenant_id)
+            if not existing:
+                raise HTTPException(404, "Finding not found")
+            await conn.execute(
+                "UPDATE patrol_findings SET outcome = $1, outcome_tagged_at = NOW(), outcome_tagged_by = 'human', updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
+                outcome, finding_id, tenant_id,
+            )
+            if outcome == "false_positive":
+                await track_fp(existing["fingerprint"], existing["alertname"], existing["cluster"] or "")
+        return {"finding_id": finding_id, "outcome": outcome, "tagged_by": "human"}
+
+    @app.post("/api/sweeps")
+    async def register_sweep(request: Request):
+        """Register a sweep run and compute comparison against previous sweep."""
+        body = await request.json()
+        tenant_id = body.get("tenant_id", DEFAULT_TENANT)
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            current_fingerprints = body.get("fingerprints", [])
+            sweep_type = body.get("sweep_type", "scheduled")
+            trigger = body.get("trigger", "")
+            prev_sweep = await conn.fetchrow(
+                "SELECT id, started_at FROM patrol_sweeps WHERE tenant_id = $1 ORDER BY started_at DESC LIMIT 1", tenant_id
+            )
+            prev_fingerprints = []
+            if prev_sweep:
+                prev_findings = await conn.fetch(
+                    """SELECT fingerprint, alertname, severity::text, status::text FROM patrol_findings
+                       WHERE tenant_id = $1 AND detected_at < $2
+                       AND (resolved_at IS NULL OR resolved_at > $2 - INTERVAL '8 hours')
+                       AND status NOT IN ('expired')""",
+                    tenant_id, prev_sweep["started_at"],
+                )
+                prev_fingerprints = [dict(r) for r in prev_findings]
+            prev_fps = {f["fingerprint"] for f in prev_fingerprints}
+            curr_fps = {f["fingerprint"] for f in current_fingerprints}
+            reappeared = [f for f in current_fingerprints if f["fingerprint"] in prev_fps]
+            new_findings = [f for f in current_fingerprints if f["fingerprint"] not in prev_fps]
+            disappeared = [f for f in prev_fingerprints if f["fingerprint"] not in curr_fps]
+            comparison = {
+                "previous_sweep_id": prev_sweep["id"] if prev_sweep else None,
+                "previous_count": len(prev_fingerprints),
+                "current_count": len(current_fingerprints),
+                "reappeared_count": len(reappeared),
+                "disappeared_count": len(disappeared),
+                "new_count": len(new_findings),
+                "reappeared": [f.get("alertname", "") for f in reappeared],
+                "new": [f.get("alertname", "") for f in new_findings],
+                "disappeared": [f.get("alertname", "") for f in disappeared],
+            }
+            row = await conn.fetchrow(
+                """INSERT INTO patrol_sweeps (tenant_id, sweep_type, trigger, findings_detected, comparison_json, started_at)
+                   VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING id""",
+                tenant_id, sweep_type, trigger, len(current_fingerprints), json.dumps(comparison),
+            )
+            return {"sweep_id": row["id"], "comparison": comparison}
+
+    @app.get("/api/sweeps/latest-comparison")
+    async def get_latest_comparison(tenant_id: str = None):
+        """Get the latest sweep comparison."""
+        tid = tenant_id or DEFAULT_TENANT
+        if not db_pool:
+            raise HTTPException(503, "Database unavailable")
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, comparison_json, started_at FROM patrol_sweeps WHERE tenant_id = $1 AND comparison_json IS NOT NULL ORDER BY started_at DESC LIMIT 1", tid
+            )
+            if not row:
+                return {"comparison": None}
+            return {"sweep_id": row["id"], "comparison": json.loads(row["comparison_json"]) if row["comparison_json"] else None}
