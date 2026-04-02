@@ -43,6 +43,9 @@ data:
       max_request_timeout: 30.0
       pool_connections: 100
       pool_maxsize: 20
+      proxies:
+        "all://":
+          - socks5h://localhost:1080
 
     engines:
       - name: google
@@ -77,14 +80,14 @@ data:
         engine: brave
         shortcut: br
         disabled: false
-      # Disabled — consistently blocked/CAPTCHA'd
-      - name: qwant
-        engine: qwant
-        shortcut: qw
-        disabled: true
       - name: startpage
         engine: startpage
         shortcut: sp
+        disabled: false
+      # Disabled — consistently blocked even through proxy
+      - name: qwant
+        engine: qwant
+        shortcut: qw
         disabled: true
 ---
 apiVersion: apps/v1
@@ -157,6 +160,29 @@ spec:
               path: /healthz
               port: 8080
             initialDelaySeconds: 30
+            periodSeconds: 30
+        - name: warp
+          image: caomingjun/cloudflare-warp:latest
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+          env:
+            - name: WARP_SLEEP
+              value: "2"
+          ports:
+            - containerPort: 1080
+              name: socks5
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          readinessProbe:
+            exec:
+              command: ['sh', '-c', 'curl -sf --socks5 localhost:1080 https://cloudflare.com/cdn-cgi/trace | grep -q warp=on']
+            initialDelaySeconds: 15
             periodSeconds: 30
       volumes:
         - name: config-ro
