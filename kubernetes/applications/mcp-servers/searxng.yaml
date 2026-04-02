@@ -45,7 +45,7 @@ data:
       pool_maxsize: 20
       proxies:
         "all://":
-          - socks5h://localhost:1080
+          - socks5h://localhost:9091
 
     engines:
       - name: google
@@ -162,15 +162,12 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
         - name: warp
-          image: caomingjun/cloudflare-warp:latest
+          image: ghcr.io/mon-ius/docker-warp-socks:v5
           securityContext:
             capabilities:
               add: ["NET_ADMIN"]
-          env:
-            - name: WARP_SLEEP
-              value: "2"
           ports:
-            - containerPort: 1080
+            - containerPort: 9091
               name: socks5
           resources:
             requests:
@@ -181,8 +178,8 @@ spec:
               cpu: "200m"
           readinessProbe:
             exec:
-              command: ['sh', '-c', 'curl -sf --socks5 localhost:1080 https://cloudflare.com/cdn-cgi/trace | grep -q warp=on']
-            initialDelaySeconds: 15
+              command: ['sh', '-c', 'curl -sf -x socks5h://localhost:9091 https://cloudflare.com/cdn-cgi/trace | grep -q warp=on']
+            initialDelaySeconds: 20
             periodSeconds: 30
       volumes:
         - name: config-ro
