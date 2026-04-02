@@ -1,0 +1,509 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mapbot-research-code
+  namespace: ai-platform
+  labels:
+    app: mapbot-research
+data:
+  requirements.txt: |
+    langgraph>=1.1
+    langchain-core>=1.2
+    httpx>=0.28
+    fastapi>=0.115
+    uvicorn>=0.34
+    pydantic>=2.10
+  main.py: |
+    #!/usr/bin/env python3
+    """
+    Map Bot Research Service — three-layer deep research pipeline.
+
+    Layer 1: LangGraph deterministic data gathering via cluster-local MCP tools
+    Layer 2: Gemini investigative analysis (delegated to CLI Runner on Synapse)
+    Layer 3: Claude profile writing (delegated to CLI Runner on Synapse)
+
+    Endpoints:
+      POST /research           — start a research job (async, returns immediately)
+      GET  /research/{id}      — get job status
+      GET  /health             — health check
+    """
+    import asyncio
+    import json
+    import logging
+    import operator
+    import os
+    import time
+    from datetime import datetime, timezone
+    from typing import Annotated, TypedDict
+    from urllib.parse import urljoin
+
+    import httpx
+    import uvicorn
+    from fastapi import BackgroundTasks, FastAPI, HTTPException
+    from langgraph.graph import END, START, StateGraph
+    from pydantic import BaseModel
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log = logging.getLogger("mapbot-research")
+
+    app = FastAPI(title="Map Bot Research Service")
+
+    # ── Configuration ─────────────────────────────────────────────────────────
+
+    CLI_RUNNER_URL = os.environ.get("CLI_RUNNER_URL", "http://10.10.0.22:4593")
+    MCP_EXTERNAL_URL = os.environ.get("MCP_EXTERNAL_URL", "http://external-mcp:8000/mcp")
+    PORT = int(os.environ.get("PORT", "8000"))
+
+    # ── Job tracking (in-memory) ──────────────────────────────────────────────
+
+    jobs: dict[str, dict] = {}
+
+    class ResearchRequest(BaseModel):
+        engagement_id: str
+        company_name: str
+        sector: str = "unknown"
+
+    # ── MCP Client (cluster-local, fast) ──────────────────────────────────────
+
+    class MCPClient:
+        """Call MCP tools via Streamable HTTP transport."""
+
+        def __init__(self, url: str):
+            self.url = url
+            self.headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            self._id = 0
+
+        def _call(self, client: httpx.Client, name: str, arguments: dict) -> str:
+            self._id += 1
+            try:
+                resp = client.post(
+                    self.url,
+                    headers=self.headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": self._id,
+                        "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments},
+                    },
+                )
+                for line in resp.text.split("\n"):
+                    if line.startswith("data: "):
+                        data = json.loads(line[6:])
+                        if "result" in data:
+                            content = data["result"].get("content", [])
+                            return "\n".join(
+                                c["text"] for c in content if c.get("type") == "text"
+                            )
+                        if "error" in data:
+                            return json.dumps({"error": data["error"]})
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+            return ""
+
+        def search(self, client: httpx.Client, query: str, num_results: int = 10) -> list:
+            text = self._call(client, "websearch_search", {"query": query, "num_results": num_results})
+            return self._parse(text)
+
+        def search_news(self, client: httpx.Client, query: str, num_results: int = 10) -> list:
+            text = self._call(client, "websearch_search_news", {"query": query, "num_results": num_results})
+            return self._parse(text)
+
+        def fetch_page(self, client: httpx.Client, url: str) -> str:
+            return self._call(client, "websearch_get_page_content", {"url": url, "max_length": 15000})
+
+        def search_reddit(self, client: httpx.Client, query: str) -> list:
+            text = self._call(client, "reddit_search", {"query": query, "limit": 10})
+            return self._parse(text)
+
+        def _parse(self, text: str) -> list:
+            try:
+                data = json.loads(text)
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    return data.get("result", [data]) if "result" in data else [data]
+            except (json.JSONDecodeError, TypeError):
+                return [{"raw": text[:2000]}] if text else []
+            return []
+
+    mcp = MCPClient(MCP_EXTERNAL_URL)
+
+    # ── LangGraph State & Nodes ───────────────────────────────────────────────
+
+    SKIP_DOMAINS = [
+        "google.", "bing.", "facebook.com", "twitter.com", "linkedin.com",
+        "yell.com", "192.com", "companieshouse.", "youtube.com", "instagram.com",
+        "tiktok.com", "pinterest.com", "wikipedia.org",
+    ]
+
+    class ResearchState(TypedDict):
+        company_name: str
+        sector: str
+        engagement_id: str
+        web_results: list
+        team_results: list
+        review_results: list
+        news_results: list
+        linkedin_results: list
+        reddit_results: list
+        website_url: str
+        website_content: str
+        team_page_url: str
+        team_page_content: str
+        about_page_content: str
+        output: dict
+        log: Annotated[list, operator.add]
+        http_client: object  # httpx.Client passed through state
+
+    def _log(msg: str) -> list:
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        log.info(msg)
+        return [f"[{ts}] {msg}"]
+
+    def search_company(state):
+        c = state["http_client"]
+        name = state["company_name"]
+        sector = state.get("sector", "")
+        results = mcp.search(c, f'"{name}" {sector}', num_results=10)
+        relevant = [r for r in results if name.lower().split()[0] in r.get("snippet", "").lower()]
+        if len(relevant) < 2:
+            results += mcp.search(c, f'"{name}" UK business', num_results=10)
+        website_url = ""
+        name_words = [w.lower() for w in name.split() if len(w) > 2]
+        for r in results:
+            url = r.get("url", "").lower()
+            if any(s in url for s in SKIP_DOMAINS):
+                continue
+            clean = url.replace("-", "").replace(".", "").replace("/", "")
+            if sum(1 for w in name_words if w in clean) >= 2:
+                website_url = r.get("url", "")
+                break
+        if not website_url:
+            for r in results:
+                url = r.get("url", "").lower()
+                snippet = r.get("snippet", "").lower()
+                if any(s in url for s in SKIP_DOMAINS):
+                    continue
+                if name.lower() in snippet and not any(s in url for s in ["review", "rating", "trustpilot"]):
+                    website_url = r.get("url", "")
+                    break
+        return {"web_results": results, "website_url": website_url, "log": _log(f"Company search: {len(results)} results, website: {website_url or 'none'}")}
+
+    def search_team(state):
+        c = state["http_client"]
+        name = state["company_name"]
+        sector = state.get("sector", "")
+        results = mcp.search(c, f'"{name}" {sector} team OR staff OR "about us" OR directors', num_results=10)
+        team_url = ""
+        for r in results:
+            url = r.get("url", "").lower()
+            if any(kw in url for kw in ["team", "about", "staff", "people", "who-we-are"]):
+                team_url = r.get("url", "")
+                break
+        return {"team_results": results, "team_page_url": team_url, "log": _log(f"Team search: {len(results)} results")}
+
+    def search_reviews(state):
+        c = state["http_client"]
+        name = state["company_name"]
+        sector = state.get("sector", "")
+        results = mcp.search(c, f'"{name}" {sector} review OR rating OR trustpilot', num_results=10)
+        return {"review_results": results, "log": _log(f"Review search: {len(results)} results")}
+
+    def search_news(state):
+        c = state["http_client"]
+        name = state["company_name"]
+        sector = state.get("sector", "")
+        results = mcp.search_news(c, f'"{name}" {sector}', num_results=10)
+        return {"news_results": results, "log": _log(f"News search: {len(results)} results")}
+
+    def search_linkedin(state):
+        c = state["http_client"]
+        results = mcp.search(c, f'"{state["company_name"]}" site:linkedin.com', num_results=10)
+        return {"linkedin_results": results, "log": _log(f"LinkedIn search: {len(results)} results")}
+
+    def search_reddit(state):
+        c = state["http_client"]
+        results = mcp.search_reddit(c, state["company_name"])
+        return {"reddit_results": results, "log": _log(f"Reddit search: {len(results)} results")}
+
+    def scrape_website(state):
+        url = state.get("website_url", "")
+        if not url:
+            return {"website_content": "", "log": _log("Skip website scrape")}
+        content = mcp.fetch_page(state["http_client"], url)
+        return {"website_content": content[:20000], "log": _log(f"Scraped website: {len(content)} chars")}
+
+    def scrape_team_page(state):
+        url = state.get("team_page_url", "")
+        if not url:
+            return {"team_page_content": "", "log": _log("Skip team page")}
+        content = mcp.fetch_page(state["http_client"], url)
+        return {"team_page_content": content[:20000], "log": _log(f"Scraped team page: {len(content)} chars")}
+
+    def scrape_about_page(state):
+        website = state.get("website_url", "")
+        if not website or state.get("team_page_content"):
+            return {"about_page_content": "", "log": _log("Skip about page")}
+        for path in ["/about", "/about-us", "/who-we-are", "/our-story"]:
+            try:
+                about_url = urljoin(website, path)
+                content = mcp.fetch_page(state["http_client"], about_url)
+                if content and len(content) > 200 and "404" not in content[:300].lower():
+                    return {"about_page_content": content[:20000], "log": _log(f"Scraped about page ({path})")}
+            except Exception:
+                continue
+        return {"about_page_content": "", "log": _log("No about page found")}
+
+    def compile_output(state):
+        output = {
+            "company_name": state["company_name"],
+            "sector": state["sector"],
+            "engagement_id": state["engagement_id"],
+            "gathered_at": datetime.now(timezone.utc).isoformat(),
+            "urls": {"website": state.get("website_url", ""), "team_page": state.get("team_page_url", "")},
+            "searches": {
+                "web": state.get("web_results", []),
+                "team": state.get("team_results", []),
+                "reviews": state.get("review_results", []),
+                "news": state.get("news_results", []),
+                "linkedin": state.get("linkedin_results", []),
+                "reddit": state.get("reddit_results", []),
+            },
+            "scraped": {
+                "website": state.get("website_content", ""),
+                "team_page": state.get("team_page_content", ""),
+                "about_page": state.get("about_page_content", ""),
+            },
+            "log": state.get("log", []),
+        }
+        return {"output": output, "log": _log("Compilation complete")}
+
+    def build_graph():
+        g = StateGraph(ResearchState)
+        for name, fn in [
+            ("search_company", search_company), ("search_team", search_team),
+            ("search_reviews", search_reviews), ("search_news", search_news),
+            ("search_linkedin", search_linkedin), ("search_reddit", search_reddit),
+            ("scrape_website", scrape_website), ("scrape_team_page", scrape_team_page),
+            ("scrape_about_page", scrape_about_page), ("compile", compile_output),
+        ]:
+            g.add_node(name, fn)
+        g.add_edge(START, "search_company")
+        g.add_edge("search_company", "search_team")
+        g.add_edge("search_team", "search_reviews")
+        g.add_edge("search_reviews", "search_news")
+        g.add_edge("search_news", "search_linkedin")
+        g.add_edge("search_linkedin", "search_reddit")
+        g.add_edge("search_reddit", "scrape_website")
+        g.add_edge("scrape_website", "scrape_team_page")
+        g.add_edge("scrape_team_page", "scrape_about_page")
+        g.add_edge("scrape_about_page", "compile")
+        g.add_edge("compile", END)
+        return g.compile()
+
+    graph = build_graph()
+
+    # ── Pipeline orchestration ────────────────────────────────────────────────
+
+    async def run_pipeline(req: ResearchRequest):
+        eid = req.engagement_id
+        job = jobs[eid]
+
+        try:
+            # Layer 1: Data Gathering (sync graph, run in thread pool)
+            job["status"] = "gathering"
+            job["layer"] = 1
+            log.info(f"[{eid[:8]}] Layer 1: gathering data for {req.company_name}")
+
+            raw_data = await asyncio.to_thread(_gather, req)
+            raw_json = json.dumps(raw_data, default=str)
+            job["raw_size"] = len(raw_json)
+
+            # Layer 2: Gemini Analysis
+            job["status"] = "analyzing"
+            job["layer"] = 2
+            log.info(f"[{eid[:8]}] Layer 2: Gemini analysis")
+
+            async with httpx.AsyncClient(timeout=660.0) as client:
+                resp = await client.post(f"{CLI_RUNNER_URL}/run/gemini", json={
+                    "engagement_id": eid,
+                    "company_name": req.company_name,
+                    "sector": req.sector,
+                    "raw_data": raw_json,
+                })
+                gemini_result = resp.json()
+
+            if not gemini_result.get("success"):
+                log.warning(f"[{eid[:8]}] Gemini failed: {gemini_result.get('error')}")
+                gemini_output = "(Gemini analysis unavailable)"
+            else:
+                gemini_output = gemini_result["output"]
+                job["gemini_duration"] = gemini_result["duration_seconds"]
+
+            # Layer 3: Claude Profile
+            job["status"] = "writing"
+            job["layer"] = 3
+            log.info(f"[{eid[:8]}] Layer 3: Claude profile writing")
+
+            async with httpx.AsyncClient(timeout=960.0) as client:
+                resp = await client.post(f"{CLI_RUNNER_URL}/run/claude", json={
+                    "engagement_id": eid,
+                    "company_name": req.company_name,
+                    "sector": req.sector,
+                    "raw_data": raw_json,
+                    "gemini_analysis": gemini_output,
+                })
+                claude_result = resp.json()
+
+            if not claude_result.get("success"):
+                raise Exception(f"Claude failed: {claude_result.get('error')}")
+
+            job["status"] = "complete"
+            job["claude_duration"] = claude_result["duration_seconds"]
+            job["profile_size"] = len(claude_result.get("output", ""))
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+            log.info(f"[{eid[:8]}] Pipeline complete")
+
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"] = str(e)
+            log.error(f"[{eid[:8]}] Pipeline failed: {e}")
+
+    def _gather(req: ResearchRequest) -> dict:
+        """Run LangGraph data gathering (sync, called from thread pool)."""
+        with httpx.Client(timeout=90.0) as client:
+            initial = {
+                "company_name": req.company_name,
+                "sector": req.sector,
+                "engagement_id": req.engagement_id,
+                "web_results": [], "team_results": [], "review_results": [],
+                "news_results": [], "linkedin_results": [], "reddit_results": [],
+                "website_url": "", "website_content": "",
+                "team_page_url": "", "team_page_content": "", "about_page_content": "",
+                "output": {}, "log": [],
+                "http_client": client,
+            }
+            result = graph.invoke(initial)
+            return result["output"]
+
+    # ── API endpoints ─────────────────────────────────────────────────────────
+
+    @app.post("/research")
+    async def start_research(req: ResearchRequest, background_tasks: BackgroundTasks):
+        eid = req.engagement_id
+        jobs[eid] = {
+            "engagement_id": eid,
+            "company_name": req.company_name,
+            "sector": req.sector,
+            "status": "pending",
+            "layer": 0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        background_tasks.add_task(run_pipeline, req)
+        return {"engagement_id": eid, "status": "started"}
+
+    @app.get("/research/{engagement_id}")
+    async def get_status(engagement_id: str):
+        if engagement_id not in jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return jobs[engagement_id]
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "service": "mapbot-research", "active_jobs": sum(1 for j in jobs.values() if j["status"] not in ("complete", "failed"))}
+
+    if __name__ == "__main__":
+        uvicorn.run(app, host="0.0.0.0", port=PORT)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mapbot-research
+  namespace: ai-platform
+  labels:
+    app: mapbot-research
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mapbot-research
+  template:
+    metadata:
+      labels:
+        app: mapbot-research
+    spec:
+      initContainers:
+        - name: install-deps
+          image: python:3.14-slim
+          command: ['sh', '-c', 'pip install --target=/app/deps -r /code/requirements.txt']
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+      containers:
+        - name: mapbot-research
+          image: python:3.14-slim
+          command: ['sh', '-c', 'PYTHONPATH=/app/deps python /code/main.py']
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PORT
+              value: "8000"
+            - name: PYTHONPATH
+              value: "/app/deps"
+            - name: CLI_RUNNER_URL
+              value: "http://10.10.0.22:4593"
+            - name: MCP_EXTERNAL_URL
+              value: "http://external-mcp:8000/mcp"
+          volumeMounts:
+            - name: code
+              mountPath: /code
+            - name: deps
+              mountPath: /app/deps
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 30
+      volumes:
+        - name: code
+          configMap:
+            name: mapbot-research-code
+        - name: deps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mapbot-research
+  namespace: ai-platform
+  labels:
+    app: mapbot-research
+spec:
+  type: NodePort
+  selector:
+    app: mapbot-research
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30801
+      name: http
