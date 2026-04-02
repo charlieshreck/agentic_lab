@@ -505,5 +505,5 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 30801
+      nodePort: 30802
       name: http
