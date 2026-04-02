@@ -20,7 +20,7 @@ data:
     search:
       safe_search: 0
       autocomplete: ""
-      default_lang: "en"
+      default_lang: "en-GB"
       formats:
         - html
         - json
@@ -73,18 +73,19 @@ data:
         engine: stackoverflow
         shortcut: so
         disabled: false
-      - name: reddit
-        engine: reddit
-        shortcut: r
-        disabled: false
       - name: brave
         engine: brave
         shortcut: br
         disabled: false
+      # Disabled — consistently blocked/CAPTCHA'd
       - name: qwant
         engine: qwant
         shortcut: qw
-        disabled: false
+        disabled: true
+      - name: startpage
+        engine: startpage
+        shortcut: sp
+        disabled: true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -103,6 +104,18 @@ spec:
       labels:
         app: searxng
     spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - "1.1.1.1"
+          - "8.8.8.8"
+        searches:
+          - ai-platform.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
+        options:
+          - name: ndots
+            value: "3"
       initContainers:
         - name: copy-config
           image: busybox:latest
