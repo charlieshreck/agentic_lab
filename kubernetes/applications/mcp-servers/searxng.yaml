@@ -48,9 +48,24 @@ data:
           - socks5h://localhost:9091
 
     engines:
+      # Google web is blocked even through WARP (429 → /sorry/ CAPTCHA).
+      # Google News uses a different endpoint that works through the proxy.
       - name: google
         engine: google
         shortcut: g
+        disabled: true
+      - name: google news
+        engine: google_news
+        shortcut: gn
+        disabled: false
+        categories: [general, news]
+      - name: google scholar
+        engine: google_scholar
+        shortcut: gs
+        disabled: false
+      - name: google videos
+        engine: google_videos
+        shortcut: gv
         disabled: false
       - name: duckduckgo
         engine: duckduckgo
